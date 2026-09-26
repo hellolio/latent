@@ -66,6 +66,14 @@ impl<'a> Markdown<'a> {
             if (1..=6).contains(&hashes) {
                 let rest = raw[hashes..].trim_start();
                 if raw[hashes..].starts_with(' ') || rest.is_empty() {
+                    // 标题前空一行(文档开头除外):章节层次更清晰
+                    if out
+                        .last()
+                        .map(|line| !line_text(line).is_empty())
+                        .unwrap_or(false)
+                    {
+                        out.push(Line::raw(""));
+                    }
                     out.extend(self.wrap_styled(
                         vec![Span::styled(
                             rest.to_string(),

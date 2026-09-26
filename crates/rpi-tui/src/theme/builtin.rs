@@ -9,8 +9,9 @@ use super::Theme;
 /// 真彩色调色板(COLORTERM=truecolor / 24bit)。
 pub fn dark() -> Theme {
     Theme {
-        accent: Color::Rgb(0x7a, 0xa2, 0xf7),
-        user_bg: Color::Rgb(0x34, 0x35, 0x41),
+        // accent 去蓝:与默认主题(Tokyo Night 精选覆盖)同用橙色
+        accent: Color::Rgb(0xff, 0x9e, 0x64),
+        user_bg: Color::Rgb(0x34, 0x37, 0x44),
         user_text: Color::Rgb(0xe6, 0xe6, 0xe6),
         assistant_text: Color::Rgb(0xc0, 0xca, 0xde),
         thinking: Color::Rgb(0x56, 0x5f, 0x89),
@@ -23,7 +24,7 @@ pub fn dark() -> Theme {
         warning: Color::Rgb(0xe0, 0xaf, 0x68),
         success: Color::Rgb(0x9e, 0xce, 0x6a),
         muted: Color::Rgb(0x96, 0x9e, 0xb6),
-        dim: Color::Rgb(0x56, 0x5f, 0x89),
+        dim: Color::Rgb(0x7e, 0x85, 0x97),
         md_heading: Color::Rgb(0xe0, 0xaf, 0x68),
         md_link: Color::Rgb(0x7a, 0xa2, 0xf7),
         md_code: Color::Rgb(0xff, 0x9e, 0x64),
@@ -32,15 +33,20 @@ pub fn dark() -> Theme {
         border_busy: Color::Rgb(0xbb, 0x9a, 0xf7),
         border_bash: Color::Rgb(0x9e, 0xce, 0x6a),
         spinner: Color::Rgb(0xbb, 0x9a, 0xf7),
-        footer_cwd: Color::Rgb(0x7a, 0xa2, 0xf7),
+        footer_cwd: Color::Rgb(0xff, 0x9e, 0x64),
+        usage_input: Color::Rgb(0x7d, 0xcf, 0xff),
+        usage_output: Color::Rgb(0x9e, 0xce, 0x6a),
+        usage_cache: Color::Rgb(0xbb, 0x9a, 0xf7),
+        usage_cost: Color::Rgb(0xe0, 0xaf, 0x68),
+        popup_border: Color::Rgb(0x6b, 0x73, 0x94),
         is_dark: true,
     }
 }
 
-/// ANSI 16 色兜底(基本色相尽量对齐 dark 调色板的语义)。
+/// ANSI 16 色兜底(基本色相尽量对齐 dark 调色板的语义;accent 用黄少蓝)。
 pub fn dark_ansi() -> Theme {
     Theme {
-        accent: Color::Blue,
+        accent: Color::Yellow,
         user_bg: Color::DarkGray,
         user_text: Color::White,
         assistant_text: Color::Gray,
@@ -54,7 +60,7 @@ pub fn dark_ansi() -> Theme {
         warning: Color::Yellow,
         success: Color::Green,
         muted: Color::Gray,
-        dim: Color::DarkGray,
+        dim: Color::Gray,
         md_heading: Color::Yellow,
         md_link: Color::Blue,
         md_code: Color::Magenta,
@@ -63,7 +69,12 @@ pub fn dark_ansi() -> Theme {
         border_busy: Color::Magenta,
         border_bash: Color::Green,
         spinner: Color::Magenta,
-        footer_cwd: Color::Blue,
+        footer_cwd: Color::Yellow,
+        usage_input: Color::Cyan,
+        usage_output: Color::Green,
+        usage_cache: Color::Magenta,
+        usage_cost: Color::Yellow,
+        popup_border: Color::DarkGray,
         is_dark: true,
     }
 }

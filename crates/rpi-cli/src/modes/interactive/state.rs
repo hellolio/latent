@@ -194,9 +194,20 @@ impl InteractiveState {
         self.commit_many(vec![item]);
     }
 
+    /// 提交空行(去重:上一条已是空行则跳过,避免排版出现连续空行)。
+    pub fn commit_blank(&mut self) {
+        self.commit(TranscriptItem::Blank);
+    }
+
     /// 追加多条转录条目(单条历史消息可展开成多个条目)。
     pub fn commit_many(&mut self, items: Vec<TranscriptItem>) {
         for item in items {
+            // 空行去重:上一条已是空行则跳过(实时与回放路径统一生效)
+            if matches!(item, TranscriptItem::Blank)
+                && matches!(self.transcript.last(), Some(TranscriptItem::Blank))
+            {
+                continue;
+            }
             let lines = super::view::render_item(&item, &self.theme, self.width, self.expanded);
             self.transcript.push(item);
             self.pending.extend(lines);

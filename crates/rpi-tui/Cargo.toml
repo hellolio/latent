@@ -7,7 +7,10 @@ license.workspace = true
 [dependencies]
 # 与 ratatui 0.30 内部 ratatui-crossterm 的 crossterm 0.29 对齐(ratatui::crossterm 再导出同一实例)
 crossterm = { version = "0.29.0", default-features = false, features = ["bracketed-paste", "events", "libc"] }
-ratatui = "0.30.2"
+# scrolling-regions:insert_before 用滚动区实现,走 diff 绘制路径——否则
+# 宽字符(CJK)后面的空位 cell 会被原样打印,提交进 scrollback 的中文
+# 每个字后多出一个空格(ratatui-core#Buffer::diff 有跳过逻辑,默认路径没有)
+ratatui = { version = "0.30.2", features = ["scrolling-regions"] }
 # 主题源:与 ratatui 0.30 共用同一 ratatui-core,Color/Style 类型互通
 ratatui-themes = "0.3.0"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }

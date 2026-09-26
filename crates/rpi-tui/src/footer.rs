@@ -1,11 +1,13 @@
-//! 底部状态栏(pi components/footer.ts 的对应物,两行):
+//! 底部状态栏(pi components/footer.ts 的对应物,三行):
 //! 1. cwd(~/ 缩写)+(git 分支)· session 名;
-//! 2. 左:token 用量与 ctx%(>70% warning 黄、>90% error 红),右:模型 · thinking。
+//! 2. 右对齐 token 段:↑in │ ↓out │ cache 命中率 │ ctx%(>70% warning 黄、
+//!    >90% error 红)· 用量/窗口 │ $cost,每段独立着色;
+//! 3. 右对齐模型 · thinking。
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
-use crate::text::{join_right, truncate_line};
+use crate::text::{line_text, truncate_line};
 use crate::theme::Theme;
 use crate::width::display_width;
 
@@ -18,6 +20,10 @@ pub struct FooterData {
     pub session_label: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// 累计缓存读 token(命中率分子)
+    pub cache_read: u64,
+    /// 累计缓存写 token(命中率分母的一部分)
+    pub cache_write: u64,
     pub cost_total: f64,
     /// 上下文窗口(0 = 未知,不显示 ctx%)
     pub context_window: u64,
@@ -30,7 +36,7 @@ pub struct FooterData {
     pub auto_compact: bool,
 }
 
-/// 两行 footer。
+/// 三行 footer。
 pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let width = width.max(1);
     let dim = Style::new().fg(theme.dim);
@@ -46,17 +52,70 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
     }
     let line1 = truncate_line(Line::from(first), width);
 
-    // 左段:tokens + cost + ctx%
-    let mut left: Vec<Span<'static>> = Vec::new();
-    if data.input_tokens > 0 || data.output_tokens > 0 {
-        left.push(Span::styled(
-            format!("↑{} ↓{}", data.input_tokens, data.output_tokens),
-            dim,
-        ));
-        if data.cost_total > 0.0 {
-            left.push(Span::styled(format!(" ${:.4}", data.cost_total), dim));
+    let line2 = right_align(usage_line(data, theme), width);
+    let line3 = right_align(
+        Line::from(Span::styled(
+            format!("{} · t:{}", data.model, data.thinking),
+            Style::new().fg(theme.muted),
+        )),
+        width,
+    );
+    vec![line1, line2, line3]
+}
+
+/// token 用量段(右对齐显示;session 累计):↑in │ ↓out │ cache 命中率 │
+/// ctx 用量 │ $cost。各段独立着色,分隔符 dim。
+fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
+    let dim = Style::new().fg(theme.dim);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let push = |spans: &mut Vec<Span<'static>>, sep: &mut bool, span: Span<'static>| {
+        if *sep {
+            spans.push(Span::styled(" │ ".to_string(), dim));
         }
-        left.push(Span::raw("  "));
+        *sep = true;
+        spans.push(span);
+    };
+    let mut sep = false;
+    if data.input_tokens > 0 || data.output_tokens > 0 {
+        push(
+            &mut spans,
+            &mut sep,
+            Span::styled(
+                format!("↑ {}", format_tokens(data.input_tokens)),
+                Style::new().fg(theme.usage_input),
+            ),
+        );
+        push(
+            &mut spans,
+            &mut sep,
+            Span::styled(
+                format!("↓ {}", format_tokens(data.output_tokens)),
+                Style::new().fg(theme.usage_output),
+            ),
+        );
+        // 命中率 = cache_read / (input + cache_read + cache_write)
+        // (prompt 全量;input 为未缓存部分)。只要有用量就显示,0% 也显示。
+        let prompt_total = data.input_tokens + data.cache_read + data.cache_write;
+        if let Some(hit) = (data.cache_read * 100).checked_div(prompt_total) {
+            push(
+                &mut spans,
+                &mut sep,
+                Span::styled(
+                    format!("cache {hit}%"),
+                    Style::new().fg(theme.usage_cache),
+                ),
+            );
+        }
+        if data.cost_total > 0.0 {
+            push(
+                &mut spans,
+                &mut sep,
+                Span::styled(
+                    format!("${:.4}", data.cost_total),
+                    Style::new().fg(theme.usage_cost),
+                ),
+            );
+        }
     }
     if data.context_window > 0 && data.context_tokens > 0 {
         let pct = ((data.context_tokens * 100) / data.context_window).min(100);
@@ -68,27 +127,50 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
             dim
         };
         let auto = if data.auto_compact { " (auto)" } else { "" };
-        left.push(Span::styled(
-            format!("{pct}%/{}", format_window(data.context_window)),
-            pct_style,
-        ));
-        left.push(Span::styled(auto.to_string(), dim));
+        push(
+            &mut spans,
+            &mut sep,
+            Span::styled(
+                format!(
+                    "ctx {pct}% ({}/{})",
+                    format_tokens(data.context_tokens),
+                    format_window(data.context_window)
+                ),
+                pct_style,
+            ),
+        );
+        if !auto.is_empty() {
+            spans.push(Span::styled(auto.to_string(), dim));
+        }
     }
-    if left.is_empty() {
-        left.push(Span::raw(""));
+    if spans.is_empty() {
+        spans.push(Span::raw(""));
     }
+    Line::from(spans)
+}
 
-    // 右段:model · thinking
-    let right = Line::from(Span::styled(
-        format!("{} · t:{}", data.model, data.thinking),
-        dim,
-    ));
-    let mut line2 = join_right(Line::from(left), right, width);
-    if display_width(&crate::text::line_text(&line2)) < width {
-        // join_right 返回的行可能短于宽度(左段为空等),右对齐补齐
-        line2 = pad_to_width(line2, width);
+/// 右对齐:左填充空格补满宽度;超宽时右侧截断。
+fn right_align(line: Line<'static>, width: usize) -> Line<'static> {
+    let line = truncate_line(line, width);
+    let current = display_width(&line_text(&line));
+    if current < width {
+        let mut spans = vec![Span::raw(" ".repeat(width - current))];
+        spans.extend(line.spans);
+        return Line::from(spans);
     }
-    vec![line1, line2]
+    line
+}
+
+/// token 数紧凑格式:≥1000 显示 k(1100 → 1.1k,128000 → 128k)。
+fn format_tokens(n: u64) -> String {
+    if n >= 1000 {
+        let k = n as f64 / 1000.0;
+        let formatted = format!("{k:.1}");
+        let formatted = formatted.strip_suffix(".0").unwrap_or(&formatted);
+        format!("{formatted}k")
+    } else {
+        n.to_string()
+    }
 }
 
 /// ctx% 段(pi footer 阈值)的独立格式化:0 窗口/无用量返回空。
@@ -127,14 +209,6 @@ fn format_window(window: u64) -> String {
     }
 }
 
-fn pad_to_width(mut line: Line<'static>, width: usize) -> Line<'static> {
-    let current = display_width(&crate::text::line_text(&line));
-    if current < width {
-        line.spans.push(Span::raw(" ".repeat(width - current)));
-    }
-    line
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,11 +223,13 @@ mod tests {
             cwd: "~/work".into(),
             git_branch: Some("main".into()),
             session_label: Some("fix-bug".into()),
-            input_tokens: 100,
-            output_tokens: 20,
+            input_tokens: 11_000,
+            output_tokens: 149,
+            cache_read: 5_500,
+            cache_write: 2_200,
             cost_total: 0.0012,
             context_window: 128_000,
-            context_tokens: 1280,
+            context_tokens: 12_800,
             model: "mock/m1".into(),
             thinking: "high".into(),
             auto_compact: true,
@@ -168,15 +244,49 @@ mod tests {
     }
 
     #[test]
-    fn second_line_left_tokens_ctx_right_model() {
-        let out = lines(&data(), 60, &theme());
+    fn three_lines_usage_right_model_right() {
+        let out = lines(&data(), 80, &theme());
+        assert_eq!(out.len(), 3);
         let second = line_text(&out[1]);
-        assert!(second.contains("↑100 ↓20"), "{second}");
-        assert!(second.contains("$0.0012"));
-        assert!(second.contains("1%/128k (auto)"), "{second}");
-        assert!(second.ends_with("mock/m1 · t:high"), "{second}");
-        // 右对齐:模型段贴近行尾(行宽补满)
-        assert_eq!(display_width(&second), 60);
+        // 右对齐 token 段:紧凑 k 格式 + 命中率 + ctx + cost
+        assert!(second.contains("↑ 11k"), "{second}");
+        assert!(second.contains("↓ 149"), "{second}");
+        assert!(second.contains("cache 29%"), "{second}");
+        assert!(second.contains("ctx 10% (12.8k/128k) (auto)"), "{second}");
+        assert!(second.contains("$0.0012"), "{second}");
+        assert_eq!(display_width(&second), 80);
+        // 第三行右对齐模型
+        let third = line_text(&out[2]);
+        assert!(third.ends_with("mock/m1 · t:high"), "{third}");
+        assert_eq!(display_width(&third), 80);
+    }
+
+    #[test]
+    fn usage_colors_are_distinct() {
+        let out = lines(&data(), 80, &theme());
+        let theme = theme();
+        let second = &out[1];
+        let input_span = second
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with("↑ "))
+            .unwrap();
+        assert_eq!(input_span.style.fg, Some(theme.usage_input));
+        let output_span = second
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with("↓ "))
+            .unwrap();
+        assert_eq!(output_span.style.fg, Some(theme.usage_output));
+        let cost_span = second.spans.iter().find(|s| s.content.starts_with('$')).unwrap();
+        assert_eq!(cost_span.style.fg, Some(theme.usage_cost));
+        // 模型行用 muted,与 token 段区分
+        let model_span = out[2]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("mock/m1"))
+            .unwrap();
+        assert_eq!(model_span.style.fg, Some(theme.muted));
     }
 
     #[test]
@@ -198,17 +308,30 @@ mod tests {
     }
 
     #[test]
-    fn zero_usage_shows_placeholder_left() {
+    fn zero_usage_shows_empty_usage_line_right_aligned() {
         let mut d = data();
         d.input_tokens = 0;
         d.output_tokens = 0;
+        d.cache_read = 0;
+        d.cache_write = 0;
         d.context_tokens = 0;
+        d.cost_total = 0.0;
         let out = lines(&d, 40, &theme());
-        // 左段为空:右段贴行尾(左填充 40-16=24 空格)
+        assert_eq!(out.len(), 3);
+        // 无用量:第二行为空(仍占行,footer 高度稳定),第三行右对齐模型
+        assert!(line_text(&out[1]).trim().is_empty());
+        let third = line_text(&out[2]);
+        assert!(third.ends_with("mock/m1 · t:high"), "{third}");
+        assert_eq!(display_width(&third), 40);
+    }
+
+    #[test]
+    fn cache_hit_shown_even_at_zero_percent() {
+        let mut d = data();
+        d.cache_read = 0;
+        let out = lines(&d, 80, &theme());
         let second = line_text(&out[1]);
-        assert_eq!(display_width(&second), 40);
-        assert!(second.ends_with("mock/m1 · t:high"));
-        assert!(second.starts_with(' '));
+        assert!(second.contains("cache 0%"), "{second}");
     }
 
     #[test]
@@ -216,5 +339,13 @@ mod tests {
         assert_eq!(abbreviate_home("/home/kin/a", Some("/home/kin")), "~/a");
         assert_eq!(abbreviate_home("/tmp/x", Some("/home/kin")), "/tmp/x");
         assert_eq!(abbreviate_home("/tmp/x", None), "/tmp/x");
+    }
+
+    #[test]
+    fn format_tokens_compact() {
+        assert_eq!(format_tokens(149), "149");
+        assert_eq!(format_tokens(11_000), "11k");
+        assert_eq!(format_tokens(1_100), "1.1k");
+        assert_eq!(format_tokens(128_000), "128k");
     }
 }

@@ -895,7 +895,7 @@ async fn typing_slash_opens_filtered_popup() {
 }
 
 #[tokio::test]
-async fn enter_completes_partial_slash_then_second_enter_executes() {
+async fn enter_executes_partial_slash_directly() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
     let ctx = ctx_of(&built, &resolver);
@@ -903,13 +903,10 @@ async fn enter_completes_partial_slash_then_second_enter_executes() {
     for c in "/mod".chars() {
         handle_key(&ctx, &mut state, Key::Char(c)).await;
     }
-    // Enter(非完全匹配):补全,不提交
+    // Enter(非完全匹配):补全为完整命令并立即执行,一次回车直达
     handle_key(&ctx, &mut state, Key::Enter).await;
-    assert_eq!(state.editor.text(), "/model ", "Enter 应补全为 /model 加尾随空格");
-    assert!(!state.slash_popup.visible(), "补全后弹窗退场");
-    // 再次 Enter:执行命令(打开模型选择器)
-    handle_key(&ctx, &mut state, Key::Enter).await;
-    assert!(state.select.is_some(), "应打开模型选择器");
+    assert!(state.select.is_some(), "Enter 应直接执行 /model 打开选择器");
+    assert!(state.editor.text().is_empty(), "执行后编辑器应清空");
 }
 
 #[tokio::test]

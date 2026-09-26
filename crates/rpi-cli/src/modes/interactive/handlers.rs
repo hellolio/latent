@@ -49,8 +49,8 @@ pub async fn handle_key(
     // 斜杠补全弹窗跟随编辑器内容(直接 set_text 的路径也同步)
     state.sync_slash_popup();
 
-    // 弹窗可见时的 Codex 交互:↑/↓ 选择、Tab/Enter 补全、Esc 关闭;
-    // 查询已与命令名完全一致时 Enter 不拦截,落入提交分支直接执行
+    // 弹窗可见时的 Codex 交互:↑/↓ 选择、Tab 补全、Enter 补全并直接执行、
+    // Esc 关闭;查询已与命令名完全一致时 Enter 不拦截,落入提交分支直接执行
     if state.slash_popup.visible() {
         match key {
             rpi_tui::Key::Up => {
@@ -61,12 +61,20 @@ pub async fn handle_key(
                 state.slash_popup.move_down();
                 return false;
             }
-            rpi_tui::Key::Tab | rpi_tui::Key::Enter if !state.slash_popup.is_exact_match() => {
+            rpi_tui::Key::Tab if !state.slash_popup.is_exact_match() => {
                 if let Some(text) = state.slash_popup.complete_text() {
                     state.editor.set_text(&text);
                 }
                 state.sync_slash_popup();
                 return false;
+            }
+            // Enter 一次直达:把输入补全为选中命令的完整文本,落到底部提交
+            // 分支执行(不再要求二次回车;想带参数先 Tab 补全再继续输入)
+            rpi_tui::Key::Enter if !state.slash_popup.is_exact_match() => {
+                match state.slash_popup.complete_text() {
+                    Some(text) => state.editor.set_text(text.trim_end()),
+                    None => return false,
+                }
             }
             rpi_tui::Key::Esc => {
                 state.slash_popup.dismiss();
@@ -616,11 +624,11 @@ async fn handle_session_event(
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageEnd { message }) => {
             match message.as_ref() {
-                // assistant 定稿:thinking 块 + 正文(markdown)落盘,后随空行
+                // assistant 定稿:thinking 块 + 正文(markdown)落盘;不追加
+                // 空行(用量行紧贴正文,pi 风格;后续条目自带间距)
                 rpi_agent::AgentMessage::Assistant(_) => {
                     commit_pending_thinking(state);
                     flush_stream(state);
-                    state.commit(TranscriptItem::Blank);
                 }
                 // 用户消息即时上屏(与回放一致;steering 亦可见)
                 rpi_agent::AgentMessage::User { content, .. } => {
@@ -628,9 +636,9 @@ async fn handle_session_event(
                     state.commit(TranscriptItem::User {
                         content: content.clone(),
                     });
-                    state.commit(TranscriptItem::Blank);
+                    state.commit_blank();
                 }
-                // 工具结果:标题(按终态着色)+ 输出块
+                // 工具结果:标题(按终态着色)+ 输出块(前置空行与正文分隔)
                 rpi_agent::AgentMessage::ToolResult {
                     tool_name,
                     is_error,
@@ -647,6 +655,7 @@ async fn handle_session_event(
                     } else {
                         ToolStatus::Success
                     };
+                    state.commit_blank();
                     state.commit(TranscriptItem::ToolCall { name, args, status });
                     state.commit(TranscriptItem::ToolResult {
                         output,

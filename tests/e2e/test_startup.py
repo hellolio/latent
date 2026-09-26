@@ -16,7 +16,7 @@ def test_startup_shows_banner_and_footer():
         # footer 第一行显示 cwd(workdir 尾段)
         tail = app.workdir.rstrip("/").split("/")[-1]
         app.expect_text(tail)
-        # footer 第二行显示模型(provider/model)
+        # footer 第三行右对齐显示模型(provider/model)
         app.expect_text("e2e-model")
     finally:
         app.close()

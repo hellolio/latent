@@ -101,15 +101,16 @@ fn replay_message(message: &AgentMessage, theme: &rpi_tui::Theme) -> Vec<Transcr
                 ))),
                 _ => {}
             }
-            items.push(TranscriptItem::Blank);
+            // 不追加尾随空行(与实时路径一致:用量/后续条目自带间距)
             items
         }
         AgentMessage::ToolResult { is_error, .. } => vec![
+            // 前置空行与正文分隔(与实时路径一致)
+            TranscriptItem::Blank,
             TranscriptItem::ToolResult {
                 output: message.tool_result_content().unwrap_or_default(),
                 is_error: *is_error,
             },
-            TranscriptItem::Blank,
         ],
         AgentMessage::BashExecution {
             command,

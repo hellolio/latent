@@ -53,6 +53,16 @@ pub struct Theme {
     pub border_bash: Color,
     pub spinner: Color,
     pub footer_cwd: Color,
+    /// footer token 段:输入 token(pi usageInput)
+    pub usage_input: Color,
+    /// footer token 段:输出 token(pi usageOutput)
+    pub usage_output: Color,
+    /// footer token 段:缓存命中率(pi usageCache)
+    pub usage_cache: Color,
+    /// footer token 段:花费(pi usageCost)
+    pub usage_cost: Color,
+    /// 补全弹窗边框(与 dim 区分的独立角色)
+    pub popup_border: Color,
     /// 深色/浅色主题标记(驱动 syntect 高亮主题选择)
     pub is_dark: bool,
 }

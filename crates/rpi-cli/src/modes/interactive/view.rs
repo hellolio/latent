@@ -95,25 +95,23 @@ pub fn render_transcript(
     out
 }
 
-/// user 消息背景块(pi userMessageBg):整行铺背景色。
+/// user 消息背景块(pi userMessageBg):整行铺背景色。背景覆盖包括行尾
+/// 在内的每一个单元格,保证块内背景完全一致(无终端底色缝隙)。
 pub fn user_block(content: &str, theme: &Theme, width: usize) -> Vec<UiLine> {
     let style = Style::new().fg(theme.user_text).bg(theme.user_bg);
-    let inner = width.saturating_sub(2).max(1);
     let mut out = Vec::new();
-    for raw in rpi_tui::wrap_to_width(content, inner) {
-        let pad = inner.saturating_sub(rpi_tui::display_width(&raw));
-        out.push(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(format!("{raw}{}", " ".repeat(pad)), style),
-            Span::raw(" "),
-        ]));
+    for raw in rpi_tui::wrap_to_width(content, width.max(1)) {
+        let pad = width.saturating_sub(rpi_tui::display_width(&raw));
+        out.push(Line::from(Span::styled(
+            format!("{raw}{}", " ".repeat(pad)),
+            style,
+        )));
     }
     if out.is_empty() {
-        out.push(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(" ", style),
-            Span::raw(" "),
-        ]));
+        out.push(Line::from(Span::styled(
+            " ".repeat(width.max(1)),
+            style,
+        )));
     }
     out
 }
@@ -177,18 +175,22 @@ pub fn viewport(
     let mut lines: Vec<UiLine> = Vec::new();
     let mut cursor: Option<(u16, u16)> = None;
 
-    // 1. 预览区:选择列表 > 流式文本尾部 > thinking/工具参数尾部
+    // 1. 预览区:选择列表 > 流式文本尾部 > thinking/工具参数尾部。
+    //    无选择列表时固定占满 preview_cap 行(内容不足补空行):视口高度
+    //    从此只随用户操作(多行输入/弹窗/选择列表)变化,模型回话全程
+    //    高度恒定,输入框不会因流式更新而跳动。
+    let mut preview: Vec<UiLine> = Vec::new();
     if let Some(select) = &state.select {
-        lines.push(Line::from(Span::styled(
+        preview.push(Line::from(Span::styled(
             select.prompt.clone(),
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         )));
-        lines.extend(rpi_tui::SelectList::render(&select.list, width, theme));
+        preview.extend(rpi_tui::SelectList::render(&select.list, width, theme));
     } else if !state.stream_text.is_empty() {
         let wrapped = rpi_tui::wrap_to_width(&state.stream_text, width);
         let skip = wrapped.len().saturating_sub(preview_cap);
         for row in wrapped.into_iter().skip(skip) {
-            lines.push(Line::from(Span::styled(
+            preview.push(Line::from(Span::styled(
                 row,
                 Style::new().fg(theme.assistant_text),
             )));
@@ -200,7 +202,7 @@ pub fn viewport(
     {
         let rows: Vec<&str> = text.lines().rev().take(preview_cap.min(3)).collect();
         for row in rows.into_iter().rev() {
-            lines.push(Line::from(vec![
+            preview.push(Line::from(vec![
                 Span::styled(
                     format!("  {} ", loader::THINKING_MARK),
                     Style::new().fg(theme.thinking),
@@ -213,12 +215,18 @@ pub fn viewport(
         }
     } else if let Some(partial) = partial {
         if let Some(args) = toolcall_args_preview(partial) {
-            lines.push(Line::from(Span::styled(
+            preview.push(Line::from(Span::styled(
                 format!("⚙ {args}"),
                 Style::new().fg(theme.dim),
             )));
         }
     }
+    if state.select.is_none() {
+        while preview.len() < preview_cap {
+            preview.push(Line::raw(""));
+        }
+    }
+    lines.extend(preview);
 
     // 2. 状态行(Codex 风格,busy 时一行;idle 不占行):
     //    `↻ Working (3s · esc to interrupt)` / `⏺ bash` / `aborted`
@@ -278,13 +286,15 @@ pub fn viewport(
         border_style,
     )));
 
-    // 7. footer 两行
+    // 7. footer 三行(cwd · 右对齐 token 段 · 右对齐模型)
     let footer = FooterData {
         cwd: state.cwd_display.clone(),
         git_branch: state.git_branch.clone(),
         session_label: state.session_label.clone(),
         input_tokens: state.usage.total.input,
         output_tokens: state.usage.total.output,
+        cache_read: state.usage.total.cache_read,
+        cache_write: state.usage.total.cache_write,
         cost_total: state.usage.total.cost.total,
         context_window: state.context_window,
         context_tokens: state.context_tokens,
@@ -303,12 +313,12 @@ pub fn viewport(
 }
 
 /// 状态行(Codex 风格:busy 时一行带 spinner 与 `esc to interrupt` 提示;
-/// idle 时不占行)。
+/// idle 时也恒占一行空占位,保证视口高度不随 busy↔idle 切换抖动)。
 fn status_line(state: &InteractiveState) -> Vec<UiLine> {
     let theme = &state.theme;
     let secs = state.spin * super::SPINNER_INTERVAL.as_millis() as usize / 1000;
     let (color, text) = match &state.status {
-        Status::Idle => return Vec::new(),
+        Status::Idle => return vec![Line::raw("")],
         Status::Thinking => (
             theme.spinner,
             format!(
@@ -390,9 +400,12 @@ mod tests {
         let lines = user_block("hello", &theme(), 40);
         assert_eq!(lines.len(), 1);
         let text = line_text(&lines[0]);
-        // 内容 + 补齐空格 + 两侧留白
+        // 内容 + 补齐空格,整行(含行尾)铺满背景
         assert_eq!(rpi_tui::display_width(&text), 40, "{text:?}");
-        assert!(text.trim().starts_with("hello"));
+        assert!(text.starts_with("hello"));
+        // 背景完全一致:整行单一 span,且带 bg 色(无终端底色缝隙)
+        assert_eq!(lines[0].spans.len(), 1);
+        assert_eq!(lines[0].spans[0].style.bg, Some(theme().user_bg));
     }
 
     #[test]
@@ -414,23 +427,48 @@ mod tests {
 
     #[test]
     fn viewport_layout_shape() {
-        let mut state = state();
-        state.editor.set_text("hi");
-        let frame = viewport(&state, None, 8, 6, 8);
-        // 空预览 + 顶边框 + 1 编辑行 + 底边框 + footer 2 行 = 5
+        let mut st = state();
+        st.editor.set_text("hi");
+        let frame = viewport(&st, None, 8, 6, 8);
+        // 预览 8(恒占)+ 状态 1(恒占)+ 边框 2 + 编辑行 1 + footer 3 = 15
         assert_eq!(
             frame.lines.len(),
-            5,
+            15,
             "{:?}",
             frame.lines.iter().map(line_text).collect::<Vec<_>>()
         );
-        assert_eq!(frame.height, 5);
-        // 光标在编辑器行(行 1),列 = 前缀 2 + "hi" 2 = 4
-        assert_eq!(frame.cursor, Some((4, 1)));
+        assert_eq!(frame.height, 15);
+        // 光标在编辑器行(行 10 = 预览 8 + 状态 1 + 顶边框),列 = 2 + 2 = 4
+        assert_eq!(frame.cursor, Some((4, 10)));
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert!(texts[0].starts_with("╭"), "{texts:?}");
-        assert!(texts[1].starts_with("❯ hi"));
-        assert!(texts[2].starts_with("╰"), "{texts:?}");
+        assert!(texts[9].starts_with("╭"), "{texts:?}");
+        assert!(texts[10].starts_with("❯ hi"));
+        assert!(texts[11].starts_with("╰"), "{texts:?}");
+        // idle 时预览与状态行均为空占位
+        for row in &texts[..9] {
+            assert!(row.trim().is_empty(), "空闲占位应为空行: {texts:?}");
+        }
+    }
+
+    #[test]
+    fn viewport_reserves_full_preview_height() {
+        // 预览区固定占 preview_cap 行(内容不足补空行):视口高度只随用户
+        // 操作变化,流式全程恒定,输入框不因高度抖动而闪烁
+        let st = state();
+        let frame = viewport(&st, None, 4, 6, 8);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        assert_eq!(frame.height, 4 + 1 + 2 + 1 + 3);
+        for row in &texts[..4] {
+            assert!(row.trim().is_empty(), "预览空位应为空行: {texts:?}");
+        }
+        // 内容增长但未超 cap:预览区行数不变
+        let mut st = state();
+        st.status = Status::Thinking;
+        st.stream_text = "line1\nline2".into();
+        let frame = viewport(&st, None, 4, 6, 8);
+        assert_eq!(frame.height, 4 + 1 + 2 + 1 + 3);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        assert!(texts.iter().take(4).any(|t| t.contains("line2")));
     }
 
     #[test]
@@ -448,8 +486,9 @@ mod tests {
     #[test]
     fn viewport_status_line_reflects_busy_state() {
         let mut state = state();
-        // idle:状态行不占位
-        assert_eq!(viewport(&state, None, 0, 6, 8).lines.len(), 5);
+        // idle:状态行为空占位(仍占一行)
+        assert_eq!(viewport(&state, None, 0, 6, 8).lines.len(), 7);
+        assert!(line_text(&viewport(&state, None, 0, 6, 8).lines[0]).trim().is_empty());
         state.status = Status::Thinking;
         state.spin = 25; // 25 * 120ms = 3s
         let frame = viewport(&state, None, 0, 6, 8);
@@ -466,7 +505,8 @@ mod tests {
     fn viewport_empty_editor_shows_placeholder() {
         let state = state();
         let frame = viewport(&state, None, 0, 6, 8);
-        let text = line_text(&frame.lines[1]);
+        // 预览 0 + 状态占位 1 + 顶边框 → 编辑器首行在 index 2
+        let text = line_text(&frame.lines[2]);
         assert!(text.starts_with("❯ "), "{text}");
         assert!(text.contains("Ask rpi to do anything"), "{text}");
     }

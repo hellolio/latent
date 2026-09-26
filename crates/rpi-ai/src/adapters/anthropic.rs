@@ -814,12 +814,21 @@ async fn stream_impl(
             defaults.insert(0, ("x-api-key", api_key.clone()));
         }
         let headers = crate::adapters::build_header_map(&defaults, &opts.headers);
-        let response = client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await;
+        let request = client.post(&url).headers(headers).json(&body);
+        // 连接/响应头阶段同样可取消:cancel 原本只在响应体读取时检查,
+        // 上游迟迟不响应时 abort 会一直卡在 send() 上(Ctrl+C 表现为无效)
+        let response = match opts.cancel.as_ref() {
+            Some(token) => {
+                tokio::select! {
+                    response = request.send() => response,
+                    _ = token.cancelled() => {
+                        yield aborted_error(&model);
+                        return;
+                    }
+                }
+            }
+            None => request.send().await,
+        };
         let response = match response {
             Ok(r) if !r.status().is_success() => {
                 let status = r.status();

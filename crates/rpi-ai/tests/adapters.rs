@@ -582,3 +582,105 @@ async fn anthropic_cache_retention_none_stream_succeeds() {
         Some(AssistantMessageEvent::Done(_))
     ));
 }
+
+/// 起一个"响应头挂住"的一次性 HTTP 服务器:读请求后延迟 `hold_head_ms`
+/// 才回响应头,模拟上游迟迟不响应(cancel 必须能在 send 阶段生效)。
+async fn spawn_slow_head_server(hold_head_ms: u64) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let timeout = tokio::time::sleep_until(deadline);
+            tokio::select! {
+                read = socket.read(&mut buf) => {
+                    match read {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            request.extend_from_slice(&buf[..n]);
+                            if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ = timeout => break,
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(hold_head_ms)).await;
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.flush().await;
+        tokio::time::sleep(Duration::from_millis(30_000)).await;
+    });
+    (format!("http://{addr}"), handle)
+}
+
+/// cancel 在响应头到达前触发:send 阶段(连接挂起)必须可中断并产出
+/// aborted 终态(此前 cancel 只覆盖响应体读取,上游不响应时 Ctrl+C 无效)。
+#[tokio::test]
+async fn cancel_before_response_head_yields_aborted_error_anthropic() {
+    let (base, server) = spawn_slow_head_server(30_000).await;
+    let cancel = CancellationToken::new();
+    let opts = StreamOptions {
+        api_key: Some("test-key".into()),
+        cancel: Some(cancel.clone()),
+        ..Default::default()
+    };
+    let stream = create_anthropic_adapter()
+        .stream(
+            &anthropic_model(&base),
+            TranscriptContext { messages: vec![] },
+            opts,
+        )
+        .await;
+    let handle = tokio::spawn(collect(stream));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+    let events = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    match events.last() {
+        Some(AssistantMessageEvent::Error(message)) => {
+            assert_eq!(message.stop_reason, StopReason::Aborted);
+        }
+        other => panic!("expected aborted error, got {other:?}"),
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancel_before_response_head_yields_aborted_error_openai() {
+    let (base, server) = spawn_slow_head_server(30_000).await;
+    let cancel = CancellationToken::new();
+    let opts = StreamOptions {
+        api_key: Some("test-key".into()),
+        cancel: Some(cancel.clone()),
+        ..Default::default()
+    };
+    let stream = create_openai_completions_adapter()
+        .stream(
+            &openai_model(&base),
+            TranscriptContext { messages: vec![] },
+            opts,
+        )
+        .await;
+    let handle = tokio::spawn(collect(stream));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+    let events = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    match events.last() {
+        Some(AssistantMessageEvent::Error(message)) => {
+            assert_eq!(message.stop_reason, StopReason::Aborted);
+        }
+        other => panic!("expected aborted error, got {other:?}"),
+    }
+    server.abort();
+}

@@ -129,7 +129,7 @@ impl CommandPopup {
         // 内容量:两侧边框各占 2 列
         let inner_w = width.saturating_sub(4).max(1);
 
-        let border = Style::new().fg(theme.dim);
+        let border = Style::new().fg(theme.popup_border);
         let mut lines = vec![Line::from(Span::styled(
             format!("╭{}", "─".repeat(width.saturating_sub(2))),
             border,
