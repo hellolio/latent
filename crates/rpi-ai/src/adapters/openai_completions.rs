@@ -11,8 +11,8 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::adapters::{
-    http_error_message, map_thinking_level, read_chunk, resolve_cache_retention, setup_error,
-    trim_base_url, ReadOutcome,
+    http_error_message, map_thinking_level, observe_payload, observe_provider_event,
+    observe_response, read_chunk, resolve_cache_retention, setup_error, trim_base_url, ReadOutcome,
 };
 use crate::json_parse::{parse_json_with_repair, parse_streaming_json};
 use crate::provider::{AssistantMessageEventStream, Provider};
@@ -784,7 +784,9 @@ async fn stream_impl(
         let compat = resolve_compat(&model);
         let _ = resolve_cache_retention(opts.cache_retention); // 保留 env 兼容行为;openai 侧 cacheRetention 由 compat 决定
         let normalized = resolve_transcript(context, compat.supports_mid_convo_system_messages);
-        let body = build_request_body(&model, &normalized, &opts, &compat);
+        let mut body = build_request_body(&model, &normalized, &opts, &compat);
+        // 请求体观察/替换(T3;panic 吞掉)
+        observe_payload(&opts.on_payload, &mut body);
 
         let Some(api_key) = crate::env_keys::resolve_api_key(&model.provider, opts.api_key.as_deref()) else {
             yield setup_error(&model, format!("No API key for provider: {}", model.provider));
@@ -816,7 +818,10 @@ async fn stream_impl(
                 yield setup_error(&model, http_error_message(status, &body));
                 return;
             }
-            Ok(r) => r,
+            Ok(r) => {
+                observe_response(&opts.on_response, r.status(), &url, r.headers());
+                r
+            }
             Err(err) => {
                 yield setup_error(&model, err.to_string());
                 return;
@@ -841,6 +846,8 @@ async fn stream_impl(
                             }
                             match parse_json_with_repair(&event.data) {
                                 Ok(chunk_value) => {
+                                    // 归一化前的原始 provider 事件观察(T3)
+                                    observe_provider_event(&opts.on_provider_stream_event, &chunk_value);
                                     let mut events_out = Vec::new();
                                     handle_chunk(&mut state, &model, &chunk_value, &mut events_out);
                                     for event in events_out {
@@ -866,6 +873,7 @@ async fn stream_impl(
                         if let Some(event) = sse_decoder.feed_line(&line) {
                             if event.data.trim() != "[DONE]" {
                                 if let Ok(chunk_value) = parse_json_with_repair(&event.data) {
+                                    observe_provider_event(&opts.on_provider_stream_event, &chunk_value);
                                     let mut events_out = Vec::new();
                                     handle_chunk(&mut state, &model, &chunk_value, &mut events_out);
                                     for event in events_out {

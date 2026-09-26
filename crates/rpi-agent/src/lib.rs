@@ -16,14 +16,15 @@ pub use agent::{
     AgentError, AgentState, AgentStateSnapshot, QueueMode, create_agent, Agent,
 };
 pub use declare::{declare_tool_changes, declared_tools};
-pub use event::{AgentEvent, SharedSubscriber, Subscriber};
+pub use event::{AgentEvent, MessageDeltaPayload, SharedPartial, SharedSubscriber, Subscriber};
 pub use hooks::{
     LoopHooks, PassthroughHooks, RequestUpdate, ToolBlock, ToolCallCtx, ToolPatch, ToolResultCtx,
     TurnCtx, TurnDecision, TurnUpdate,
 };
 pub use loop_::{
-    run_agent_loop, AgentContext, BudgetKind, LoopConfig, LoopOutput, Phase, RunStop, ToolOutcome,
-    TurnLimits, validate_arguments,
+    create_injection_endpoints, run_agent_loop, validate_arguments, AgentContext, BudgetKind,
+    InjectionDepth, InjectionReceiver, InjectionSender, LoopConfig, LoopOutput, Phase, RunStop,
+    ToolOutcome, TurnLimits, Wake,
 };
 pub use message::{now_ms, AgentMessage, CustomMessage};
 // rpi-ai 类型经 rpi-agent 再导出:下游(rpi-session/rpi-tools)只依赖本 crate 的类型

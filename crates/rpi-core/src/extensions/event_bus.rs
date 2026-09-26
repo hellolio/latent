@@ -591,11 +591,19 @@ impl Subscriber for ExtensionEventBus {
                 ExtensionEvent::TurnEnd,
                 json!({ "message": message, "toolResults": tool_results }),
             ),
-            AgentEvent::MessageStart { message } => {
+            AgentEvent::MessageStart { message, .. } => {
                 (ExtensionEvent::MessageStart, json!({ "message": message }))
             }
             AgentEvent::MessageDelta { delta } => {
-                (ExtensionEvent::MessageDelta, json!({ "delta": delta }))
+                // T2 类型化增量:Text 保持旧 wire 形态,Thinking/ToolCallArgs 各自展开
+                let payload = match delta {
+                    rpi_agent::MessageDeltaPayload::Text { delta } => json!({ "delta": delta }),
+                    rpi_agent::MessageDeltaPayload::Thinking { delta } => json!({ "thinking": delta }),
+                    rpi_agent::MessageDeltaPayload::ToolCallArgs { content_index, delta } => json!({
+                        "toolCall": { "contentIndex": content_index, "delta": delta }
+                    }),
+                };
+                (ExtensionEvent::MessageDelta, payload)
             }
             AgentEvent::MessageUpdate { message } => {
                 (ExtensionEvent::MessageUpdate, json!({ "message": message }))
@@ -742,14 +750,6 @@ impl LoopHooks for ExtensionHooks {
             Some(decision) => Some(decision),
             None => outcome.decision,
         }
-    }
-
-    async fn steering_messages(&self) -> Vec<AgentMessage> {
-        self.inner.steering_messages().await
-    }
-
-    async fn follow_up_messages(&self) -> Vec<AgentMessage> {
-        self.inner.follow_up_messages().await
     }
 
     async fn before_tool_call(&self, mut ctx: ToolCallCtx) -> Option<ToolBlock> {

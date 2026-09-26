@@ -262,7 +262,7 @@ async fn observation_events_forwarded_only_to_subscribers() {
     bus.on_event(&rpi_agent::AgentEvent::TurnStart).await;
     // 未订阅 → 不发
     bus.on_event(&rpi_agent::AgentEvent::AgentStart).await;
-    bus.on_event(&rpi_agent::AgentEvent::MessageDelta { delta: "x".into() }).await;
+    bus.on_event(&rpi_agent::AgentEvent::MessageDelta { delta: rpi_agent::MessageDeltaPayload::text("x") }).await;
     // 会话级:未订阅
     bus.on_session_event(&rpi_core::AgentSessionEvent::AgentSettled).await;
 
@@ -301,7 +301,7 @@ async fn high_frequency_events_require_opt_in() {
         create_diagnostics_sink(),
     );
 
-    bus.on_event(&rpi_agent::AgentEvent::MessageDelta { delta: "hi".into() }).await;
+    bus.on_event(&rpi_agent::AgentEvent::MessageDelta { delta: rpi_agent::MessageDeltaPayload::text("hi") }).await;
     for _ in 0..50 {
         if !opted.observation_events().is_empty() {
             break;
@@ -804,8 +804,7 @@ async fn extension_hooks_passes_inner_hooks_with_chained_args_and_inner_can_bloc
     // 内层看到的是扩展改参后的 args
     assert_eq!(*inner_seen.lock().unwrap(), vec![json!({"command": "rewritten"})]);
 
-    // 观察类/队列透传
-    assert!(hooks.steering_messages().await.is_empty());
+    // 观察类事件经总线透传(队列注入已改 mpsc 通道,不经过 hooks)
 
     connection.terminate();
     server.abort();

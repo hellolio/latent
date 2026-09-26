@@ -21,6 +21,7 @@ async fn build_with(provider: Arc<ScriptedProvider>) -> rpi_cli::assembly::Built
         model: test_model(),
         ui: Arc::new(rpi_core::NoopUi),
         extension_specs: Vec::new(),
+        spawn_hook: None,
     })
     .await
     .expect("build_session")
@@ -28,17 +29,19 @@ async fn build_with(provider: Arc<ScriptedProvider>) -> rpi_cli::assembly::Built
 
 /// 工具调用 + 文本两 turn 的脚本:覆盖 toolcall_* 事件线。
 fn two_turn_provider() -> Arc<ScriptedProvider> {
-    scripted_provider(vec![
-        ScriptedTurn::tool_calls(
-            &test_model(),
-            vec![ContentBlock::ToolCall {
-                id: "call-1".into(),
-                name: "bash".into(),
-                arguments: serde_json::json!({ "command": "echo mode-test" }),
-            }],
-        ),
-        ScriptedTurn::text(&test_model(), "all done"),
-    ])
+    let m = test_model();
+    // 首轮带已知 usage(T4:json 事件线的 usage 断言用)
+    let mut first = rpi_ai::assistant_message(
+        &m,
+        vec![ContentBlock::ToolCall {
+            id: "call-1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "echo mode-test" }),
+        }],
+        rpi_ai::StopReason::ToolUse,
+    );
+    first.usage = rpi_ai::Usage { input: 1, output: 1, total_tokens: 2, ..Default::default() };
+    scripted_provider(vec![ScriptedTurn::new(first), ScriptedTurn::text(&m, "all done")])
 }
 
 // ---- 内存 writer(json 模式用:std::io::Write) ----
@@ -143,6 +146,11 @@ async fn json_mode_emits_jsonl_without_streaming_partials() {
     assert!(!types.contains(&"message_delta"));
     assert!(!types.contains(&"message_update"));
     assert!(!output.contains("message_delta"));
+
+    // T4:usage 已随 turn_end 事件输出(数值与 provider 返回一致)
+    let turn_end = lines.iter().find(|v| v["type"] == "turn_end").expect("turn_end 事件");
+    assert_eq!(turn_end["message"]["usage"]["input"].as_u64(), Some(1));
+    assert_eq!(turn_end["message"]["usage"]["output"].as_u64(), Some(1));
 }
 
 #[tokio::test]
@@ -346,4 +354,53 @@ async fn print_mode_runs_one_prompt_to_completion() {
         .await
         .expect("print run");
     assert!(matches!(stop, rpi_agent::RunStop::EndTurn));
+}
+
+// ---- T9:PI_* 会话环境注入经 build_session 全链路 ----
+
+/// bash 工具回显 PI_MODEL:session 建好后 cell 已回填,执行时应拿到注入值。
+#[tokio::test]
+async fn bash_tool_receives_pi_session_env_via_build_session() {
+    let m = test_model();
+    let first = rpi_ai::assistant_message(
+        &m,
+        vec![ContentBlock::ToolCall {
+            id: "call-env".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "echo $PI_MODEL $PI_SESSION_ID" }),
+        }],
+        rpi_ai::StopReason::ToolUse,
+    );
+    let provider = scripted_provider(vec![ScriptedTurn::new(first), ScriptedTurn::text(&m, "done")]);
+    let built = build_with(provider).await;
+
+    // prompt 期间 bash 实际执行;工具结果经转录可查
+    let stop = built
+        .session
+        .prompt("run echo")
+        .await
+        .expect("prompt")
+        .stop();
+    assert_eq!(stop, rpi_agent::RunStop::EndTurn);
+
+    let tool_results: Vec<String> = built
+        .session
+        .agent()
+        .messages()
+        .iter()
+        .filter_map(|msg| match msg {
+            rpi_agent::AgentMessage::ToolResult { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|block| block.as_text().map(str::to_string))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert!(!tool_results.is_empty(), "应存在 bash 工具结果");
+    let echoed = &tool_results[0];
+    assert!(echoed.contains("test-model"), "PI_MODEL 应被注入: {echoed}");
+    assert!(!echoed.contains("$"), "变量应已展开: {echoed}");
 }

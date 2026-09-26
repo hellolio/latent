@@ -4,6 +4,7 @@
 //! 与 pi 完全一致,会话格式兼容优先(方针文档 §6)。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -476,8 +477,41 @@ pub enum CacheRetention {
     Long,
 }
 
-/// 流式请求选项(02 文档 §4.3 的 M1 子集;onPayload/onResponse 等
-/// 观察回调随 M4 补齐)。
+/// HTTP 响应观察载荷(on_response 回调;02 文档 §4.3)。
+#[derive(Debug, Clone)]
+pub struct ResponseObservation {
+    pub status: u16,
+    pub url: String,
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+/// 请求体观察/替换回调(pi 的 onPayload):装配后适配器在发送前调用,
+/// 可就地检查或替换 JSON 请求体。panic 被捕获吞掉,不击穿流。
+pub type OnPayload = Arc<dyn Fn(&mut serde_json::Value) + Send + Sync>;
+/// HTTP 响应观察回调(pi 的 onResponse)。
+pub type OnResponse = Arc<dyn Fn(&ResponseObservation) + Send + Sync>;
+/// 原始 provider 事件回调(pi 的 onProviderStreamEvent):归一化前的
+/// provider 原生事件 JSON。
+pub type OnProviderStreamEvent = Arc<dyn Fn(&serde_json::Value) + Send + Sync>;
+
+/// 异步长请求句柄(01 文档 §2 DeferredHandle):provider 侧后台任务的
+/// 可轮询凭据;M1 子集仅承载类型,按需接入适配器。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredHandle {
+    pub provider: String,
+    pub model_id: String,
+    pub api: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+/// 流式请求选项(02 文档 §4.3 的 M1 子集;观察回调为 11 计划 T3 增补)。
 #[derive(Clone, Default)]
 pub struct StreamOptions {
     pub api_key: Option<String>,
@@ -494,6 +528,14 @@ pub struct StreamOptions {
     pub sampling_params: serde_json::Map<String, serde_json::Value>,
     /// 中止令牌:取消后事件流以 aborted 终态收尾(不抛异常)
     pub cancel: Option<CancellationToken>,
+    /// 请求体观察/替换(发送前调用;None = 不装配,零开销)
+    pub on_payload: Option<OnPayload>,
+    /// HTTP 响应观察
+    pub on_response: Option<OnResponse>,
+    /// 归一化前的原始 provider 事件观察
+    pub on_provider_stream_event: Option<OnProviderStreamEvent>,
+    /// 异步长请求开关(DeferredHandle 类型已备,适配器接入按需)
+    pub deferred: bool,
 }
 
 /// 统一流协议(02 文档 §1.2):start 先行、done/error 终态,失败编码进流。

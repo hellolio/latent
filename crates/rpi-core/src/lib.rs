@@ -19,10 +19,11 @@ pub use extensions::{
     McpServerSpec, NoopUi,
 };
 pub use model::{create_model_resolver, default_model_for, ModelResolver};
-pub use retry::{create_retrying_provider, RetryHooks, RetryingProvider};
+pub use retry::{create_retrying_provider, RetryHooks};
 pub use session::{
     create_agent_session, create_session_retry_hooks, AgentSession, AgentSessionConfig,
-    AgentSessionEvent, CoreError, SessionSharedSubscriber, SessionSink, SessionSubscriber,
+    AgentSessionEvent, CoreError, PromptOutcome, SessionSharedSubscriber, SessionSink,
+    SessionSubscriber,
 };
 pub use system_prompt::{
     build_system_prompt_sections, build_system_prompt_state, diff_system_prompt_sections,

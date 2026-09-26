@@ -77,11 +77,110 @@ struct InteractiveState {
     status: String,
     /// 流式预览的未定稿文本(已在视口展示、尚未 commit)
     stream_buffer: String,
+    /// 用量追踪(T4):单回合用量行 + 会话累计
+    usage: UsageTracker,
     /// 活动选择列表;None = 无交互请求
     select: Option<SelectRequest>,
     /// 并发 UI 请求排队(选择列表同时只有一个在展示;先到的先渲染,
     /// 不会互相覆盖)
     select_queue: VecDeque<SelectRequest>,
+}
+
+/// T4 用量追踪:每回合终态(TurnEnd)推送一次 usage,渲染走差分路径
+/// (commit 单回合行 + 状态行累计摘要),不做每帧重算。
+#[derive(Default)]
+struct UsageTracker {
+    total: rpi_ai::Usage,
+}
+
+impl UsageTracker {
+    fn push(&mut self, usage: &rpi_ai::Usage) -> String {
+        accumulate(&mut self.total, usage);
+        format_usage_line(usage)
+    }
+
+    /// 会话累计摘要(状态行;无用量时空串)。
+    fn summary(&self) -> String {
+        if self.total.total_tokens == 0 && self.total.cost.total == 0.0 {
+            return String::new();
+        }
+        format!(
+            " · Σ {} tok ${:.6}",
+            self.total.total_tokens, self.total.cost.total
+        )
+    }
+}
+
+fn accumulate(total: &mut rpi_ai::Usage, usage: &rpi_ai::Usage) {
+    total.input += usage.input;
+    total.output += usage.output;
+    total.cache_read += usage.cache_read;
+    total.cache_write += usage.cache_write;
+    total.cache_write_1h = match (total.cache_write_1h, usage.cache_write_1h) {
+        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    total.reasoning = match (total.reasoning, usage.reasoning) {
+        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    total.total_tokens += usage.total_tokens;
+    total.cost.input += usage.cost.input;
+    total.cost.output += usage.cost.output;
+    total.cost.cache_read += usage.cost.cache_read;
+    total.cost.cache_write += usage.cost.cache_write;
+    total.cost.total += usage.cost.total;
+}
+
+/// 单回合用量行(T4):输入/输出/缓存读/缓存写(+reasoning)token 与费用。
+fn format_usage_line(usage: &rpi_ai::Usage) -> String {
+    let mut line = format!(
+        "{}[tokens] in {} · out {} · cache {}/{}",
+        rpi_tui::ansi::style::DIM,
+        usage.input,
+        usage.output,
+        usage.cache_read,
+        usage.cache_write
+    );
+    if let Some(reasoning) = usage.reasoning {
+        line.push_str(&format!(" · reasoning {reasoning}"));
+    }
+    line.push_str(&format!(" · ${:.6}{}", usage.cost.total, rpi_tui::ansi::style::RESET));
+    line
+}
+
+/// 从 partial 快照提取 thinking 预览(T2 快照读口的读侧)。
+fn thinking_preview(partial: &rpi_ai::AssistantMessage) -> Option<String> {
+    let thinking: String = partial
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            rpi_ai::ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!thinking.is_empty()).then_some(thinking)
+}
+
+/// 从 partial 快照提取 toolcall 参数预览(T2:参数逐块增长)。
+fn toolcall_preview(partial: &rpi_ai::AssistantMessage) -> Option<String> {
+    let args: String = partial
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            rpi_ai::ContentBlock::ToolCall { name, arguments, .. } => Some(format!(
+                "{}{}",
+                if name.is_empty() { String::new() } else { format!("{name} ") },
+                arguments
+            )),
+            _ => None,
+        })
+        .collect();
+    (!args.is_empty()).then_some(args)
 }
 
 struct SelectRequest {
@@ -142,6 +241,7 @@ pub async fn run_interactive_mode(
         editor: Editor::new(),
         status: "idle".into(),
         stream_buffer: String::new(),
+        usage: UsageTracker::default(),
         select: None,
         select_queue: VecDeque::new(),
     };
@@ -180,7 +280,8 @@ async fn event_loop(
     viewport_height: usize,
     width: usize,
 ) -> Result<(), String> {
-    render(state, tui, viewport_height, width);
+    let partial = session.agent().partial_message();
+    render(state, tui, partial.as_ref(), viewport_height, width);
 
     loop {
         tokio::select! {
@@ -195,7 +296,9 @@ async fn event_loop(
                 handle_ui_event(state, tui, event, viewport_height, width);
             }
         }
-        render(state, tui, viewport_height, width);
+        // T2 快照读口:UI 随帧读取"到目前为止"的 partial,不做每 delta 克隆
+        let partial = session.agent().partial_message();
+        render(state, tui, partial.as_ref(), viewport_height, width);
     }
 
     session.abort();
@@ -305,9 +408,17 @@ fn handle_ui_event(
 ) {
     match event {
         UiEvent::Session(session_event) => match session_event {
-            AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageDelta { delta }) => {
-                append_stream(state, tui, &delta, viewport_height, width);
-            }
+            AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageDelta { delta }) => match delta {
+                rpi_agent::MessageDeltaPayload::Text { delta } => {
+                    append_stream(state, tui, &delta, viewport_height, width);
+                }
+                rpi_agent::MessageDeltaPayload::Thinking { .. } => {
+                    state.status = "thinking …".into();
+                }
+                rpi_agent::MessageDeltaPayload::ToolCallArgs { .. } => {
+                    state.status = "tool call …".into();
+                }
+            },
             AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageEnd { message }) => {
                 // assistant 定稿:未定稿残余落盘,后随空行分段
                 if matches!(&*message, rpi_agent::AgentMessage::Assistant(_)) {
@@ -330,6 +441,11 @@ fn handle_ui_event(
             }
             AgentSessionEvent::Agent(rpi_agent::AgentEvent::ToolExecutionEnd { .. }) => {
                 state.status = "thinking …".into();
+            }
+            AgentSessionEvent::Agent(rpi_agent::AgentEvent::TurnEnd { message, .. }) => {
+                // T4:每回合终态展示一行用量,并累计进会话总量
+                let line = state.usage.push(&message.usage);
+                commit_wrapped(tui, &line, width);
             }
             AgentSessionEvent::AgentSettled => {
                 state.status = "idle".into();
@@ -418,12 +534,19 @@ fn commit_wrapped(tui: &mut dyn Tui, line: &str, width: usize) {
     }
 }
 
-/// 视口帧:状态行 + (选择列表或流式预览) + 空行填充 + 输入行。
-fn render(state: &InteractiveState, tui: &mut dyn Tui, viewport_height: usize, width: usize) {
+/// 视口帧:状态行 + (选择列表/流式预览/thinking 预览/工具参数预览) + 空行填充 + 输入行。
+fn render(
+    state: &InteractiveState,
+    tui: &mut dyn Tui,
+    partial: Option<&rpi_ai::AssistantMessage>,
+    viewport_height: usize,
+    width: usize,
+) {
+    let status_text = format!("{}{}", state.status, state.usage.summary());
     let status = format!(
         "{}{}{}",
         rpi_tui::ansi::style::DIM,
-        truncate(&state.status, width),
+        truncate(&status_text, width),
         rpi_tui::ansi::style::RESET
     );
 
@@ -436,6 +559,26 @@ fn render(state: &InteractiveState, tui: &mut dyn Tui, viewport_height: usize, w
     } else if !state.stream_buffer.is_empty() {
         for line in rpi_tui::wrap_to_width(&state.stream_buffer, width) {
             lines.push(line);
+        }
+    } else if let Some(partial) = partial {
+        // T2:文本未流式时,预览区展示 thinking / 工具参数的逐块增长
+        if let Some(thinking) = thinking_preview(partial) {
+            let tail: Vec<&str> = thinking.lines().rev().take(2).collect();
+            for line in tail.into_iter().rev() {
+                lines.push(format!(
+                    "{}{}{}",
+                    rpi_tui::ansi::style::DIM,
+                    truncate(line, width),
+                    rpi_tui::ansi::style::RESET
+                ));
+            }
+        } else if let Some(args) = toolcall_preview(partial) {
+            lines.push(format!(
+                "{}⚙ {}{}",
+                rpi_tui::ansi::style::DIM,
+                truncate(&args, width),
+                rpi_tui::ansi::style::RESET
+            ));
         }
     }
     // 输入行固定在末行;中间不足补空行,超出挤掉最早的中间行
@@ -529,6 +672,7 @@ mod tests {
             editor: Editor::new(),
             status: "idle".into(),
             stream_buffer: String::new(),
+            usage: UsageTracker::default(),
             select: None,
             select_queue: VecDeque::new(),
         }
@@ -594,6 +738,61 @@ mod tests {
         flush_stream(&mut state, &mut tui, 40);
         assert_eq!(state.stream_buffer, "");
         assert!(buffer.text().contains("partial text"));
+    }
+
+    #[test]
+    fn usage_tracker_formats_turn_line_and_accumulates() {
+        // T4:Mock 注入已知 usage,单回合行与累计摘要数值一致
+        let mut tracker = UsageTracker::default();
+        let usage = rpi_ai::Usage {
+            input: 100,
+            output: 20,
+            cache_read: 5,
+            cache_write: 10,
+            cache_write_1h: None,
+            reasoning: Some(8),
+            total_tokens: 135,
+            cost: rpi_ai::Cost { total: 0.0012, ..Default::default() },
+        };
+        let line = tracker.push(&usage);
+        assert!(line.contains("in 100"), "{line}");
+        assert!(line.contains("out 20"), "{line}");
+        assert!(line.contains("cache 5/10"), "{line}");
+        assert!(line.contains("reasoning 8"), "{line}");
+        assert!(line.contains("$0.001200"), "{line}");
+        // 第二回合同样数值:累计翻倍
+        tracker.push(&usage);
+        let summary = tracker.summary();
+        assert!(summary.contains("270 tok"), "{summary}");
+        assert!(summary.contains("$0.002400"), "{summary}");
+    }
+
+    #[test]
+    fn usage_tracker_zero_usage_has_empty_summary() {
+        let tracker = UsageTracker::default();
+        assert_eq!(tracker.summary(), "");
+    }
+
+    #[test]
+    fn partial_previews_extract_thinking_and_toolcall_args() {
+        // T2:partial 快照读口的读侧
+        let model = rpi_ai::Model::minimal("m", "mock", "mock");
+        let mut partial = rpi_ai::AssistantMessage::pending(&model);
+        assert_eq!(thinking_preview(&partial), None);
+        partial.content.push(rpi_ai::ContentBlock::Thinking {
+            thinking: "step 1".into(),
+            thinking_signature: None,
+            redacted: None,
+        });
+        assert_eq!(thinking_preview(&partial).as_deref(), Some("step 1"));
+        partial.content.push(rpi_ai::ContentBlock::ToolCall {
+            id: "t".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "ls"}),
+        });
+        let args = toolcall_preview(&partial).unwrap();
+        assert!(args.contains("bash"), "{args}");
+        assert!(args.contains("ls"), "{args}");
     }
 
     #[test]

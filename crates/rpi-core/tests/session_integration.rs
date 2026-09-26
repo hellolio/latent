@@ -72,7 +72,11 @@ impl EventLog {
 impl SessionSubscriber for EventLog {
     async fn on_session_event(&self, event: &AgentSessionEvent) {
         match event {
-            AgentSessionEvent::Agent(agent_event) => if let AgentEvent::MessageDelta { delta } = agent_event { self.record(format!("delta:{delta}")) },
+            AgentSessionEvent::Agent(agent_event) => {
+                if let AgentEvent::MessageDelta { delta: rpi_agent::MessageDeltaPayload::Text { delta } } = agent_event {
+                    self.record(format!("delta:{delta}"))
+                }
+            }
             AgentSessionEvent::AgentSettled => self.record("settled".into()),
             AgentSessionEvent::QueueUpdate { steering, follow_up } => {
                 self.record(format!("queue:{steering}/{follow_up}"));
@@ -135,8 +139,9 @@ async fn prompt_streams_through_session_events_and_persists() {
     )
     .await;
 
-    let stop = session.prompt("hello").await.unwrap();
-    assert_eq!(stop, rpi_agent::RunStop::EndTurn);
+    let outcome = session.prompt("hello").await.unwrap();
+    assert!(matches!(outcome, rpi_core::PromptOutcome::Started(_)), "非流式 prompt 应返回 Started");
+    assert_eq!(outcome.stop(), rpi_agent::RunStop::EndTurn);
     session.wait_idle().await;
 
     // 事件层:delta + settled
@@ -255,7 +260,7 @@ async fn overflow_recovery_trims_and_retries() {
     let log = Arc::new(EventLog::default());
     session.subscribe(log.clone());
 
-    let stop = session.prompt("开始").await.unwrap();
+    let stop = session.prompt("开始").await.unwrap().stop();
     assert_eq!(stop, rpi_agent::RunStop::EndTurn, "overflow 恢复后应正常结束");
 
     let events = log.events();
@@ -322,4 +327,40 @@ async fn extension_registered_tool_joins_session() {
     .await
     .unwrap();
     assert_eq!(session.agent().state_snapshot().tool_count, 1);
+}
+
+/// T8:流式中 prompt 返回 Enqueued(不再复用 RunStop::EndTurn 谎报),
+/// 空闲时返回 Started 携带 run 终止原因。
+#[tokio::test]
+async fn prompt_returns_enqueued_while_streaming_and_started_when_idle() {
+    let m = model();
+    // 延迟 turn:保证第一个 prompt 还在流式中,第二个 prompt 能命中入队路径
+    let (session, _log, _sink, _provider) = build_session(
+        vec![
+            ScriptedTurn::text(&m, "第一轮").with_delay(200),
+            ScriptedTurn::text(&m, "第二轮"),
+        ],
+        vec![],
+        None,
+        SystemPromptOptions::default(),
+    )
+    .await;
+
+    let session = Arc::new(session);
+    let first = tokio::spawn({
+        let session = session.clone();
+        async move { session.prompt("开始").await }
+    });
+    // 等 run 真正进入流式
+    while !session.agent().is_streaming() {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let second = session.prompt("中途插入").await.unwrap();
+    assert!(matches!(second, rpi_core::PromptOutcome::Enqueued), "流式中应返回 Enqueued: {second:?}");
+    assert_eq!(session.queue_depths(), (1, 0), "入队消息应计入 steering 深度");
+
+    let first = first.await.unwrap().unwrap();
+    assert!(matches!(first, rpi_core::PromptOutcome::Started(_)));
+    session.wait_idle().await;
 }

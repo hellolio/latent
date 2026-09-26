@@ -2,16 +2,41 @@
 //! 不用 broadcast channel(无序且不背压)。
 //!
 //! 事件集合对齐 pi 的 10 种 AgentEvent(01 文档 §3.3):
-//! `message_update` 仅 assistant 流式,携带快照;`tool_execution_end` 并行模式下
+//! `message_update` 仅 assistant 流式;`tool_execution_end` 并行模式下
 //! 按完成序,tool result 消息按源序(03 文档不变量 I4)。
+//!
+//! 流式增量(T2,03 §10.6 待定点②):**delta 为主 + 快照读口** ——
+//! MessageDelta 携带类型化增量(thinking/toolCall 参数),`message_start`
+//! 携带 `Arc<RwLock<AssistantMessage>>` 读口,循环在每个 delta 上原地更新
+//! partial,UI 随帧读取"到目前为止"的状态;终态快照仍由 message_update /
+//! message_end 权威定稿,增量不改变终态内容。
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use rpi_ai::AssistantMessage;
 
 use crate::message::AgentMessage;
+
+/// "到目前为止"的 partial 消息读口:循环在流式期间原地更新,UI 随帧读取。
+/// 不随每个 delta 携带整份快照(热路径分配,11 计划注意事项 5)。
+pub type SharedPartial = Arc<RwLock<AssistantMessage>>;
+
+/// 流式增量载荷(T2):文本 / thinking / toolCall 参数增量。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageDeltaPayload {
+    Text { delta: String },
+    Thinking { delta: String },
+    ToolCallArgs { content_index: usize, delta: String },
+}
+
+impl MessageDeltaPayload {
+    pub fn text(delta: impl Into<String>) -> Self {
+        MessageDeltaPayload::Text { delta: delta.into() }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -25,11 +50,17 @@ pub enum AgentEvent {
         message: Box<AssistantMessage>,
         tool_results: Vec<AgentMessage>,
     },
-    /// system/user/assistant/toolResult 消息进入转录
-    MessageStart { message: Box<AgentMessage> },
-    /// 流式文本增量(便于 UI 直接追加;完整快照见 MessageUpdate)
-    MessageDelta { delta: String },
-    /// 仅 assistant 流式:当前 partial 消息快照
+    /// system/user/assistant/toolResult 消息进入转录;assistant 流式时携带
+    /// partial 读口(`serde(skip)`:跨进程由 delta 重建)
+    MessageStart {
+        message: Box<AgentMessage>,
+        /// partial 读口仅进程内有效:serde 跳过(跨进程由 delta 重建)
+        #[serde(skip)]
+        partial: Option<SharedPartial>,
+    },
+    /// 流式增量(thinking/toolCall 参数逐块可见;完整快照经 partial 读口取用)
+    MessageDelta { delta: MessageDeltaPayload },
+    /// assistant 流式:当前 partial 消息快照(终态权威定稿)
     MessageUpdate { message: Box<AssistantMessage> },
     /// 消息定稿(全部消息类型)
     MessageEnd { message: Box<AgentMessage> },

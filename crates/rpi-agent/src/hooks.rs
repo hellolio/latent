@@ -3,6 +3,9 @@
 //! `convert_to_llm` 是唯一必填方法,其余全部带默认空实现;返回空值/None 是合法
 //! 语义,钩子不得 panic(方针文档 §2)。`after_tool_call` 的浅覆盖为**逐字段
 //! 显式 Patch**(Some 才覆盖,03 文档 §10.2.6 的语义模糊点由此消除)。
+//! steering/follow-up 注入不走钩子:T5 起为 mpsc 推送通道(03 §10.5),
+//! 轮询制 `steering_messages`/`follow_up_messages` 已移除(接缝变更见
+//! policy §3 登记表)。
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -133,16 +136,6 @@ pub trait LoopHooks: Send + Sync {
     /// turn 结束、turn_end 事件前;可返回 continue/end 决策。
     async fn finish_turn(&self, _ctx: TurnCtx) -> Option<TurnDecision> {
         None
-    }
-
-    /// 契约:返回空 vec 而不是 panic;steering 在循环开始与每个 turn 结束后轮询。
-    async fn steering_messages(&self) -> Vec<AgentMessage> {
-        vec![]
-    }
-
-    /// 契约:返回空 vec 而不是 panic;仅在 agent 本应停止时轮询。
-    async fn follow_up_messages(&self) -> Vec<AgentMessage> {
-        vec![]
     }
 
     /// 参数校验后调用;Some(block) 拦截执行。

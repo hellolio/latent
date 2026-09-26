@@ -30,8 +30,8 @@ pub use provider::{
     AssistantMessageEventStream, Provider, ProviderRegistry,
 };
 pub use retry::{
-    is_retryable_assistant_error, retry_assistant_call, retry_delay_ms, NoopCallbacks, RetryCallbacks,
-    RetryPolicy,
+    create_retrying_provider, is_retryable_assistant_error, retry_assistant_call, retry_delay_ms,
+    NoopCallbacks, RetryCallbacks, RetryPolicy,
 };
 pub use transcript::{
     collapse_system_messages, get_current_system_prompt, get_current_system_message, get_current_tools,

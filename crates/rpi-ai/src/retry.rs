@@ -3,13 +3,23 @@
 //! 指数退避 `baseDelayMs * 2^(attempt-1)`,封顶 `maxAgentDelayMs`;
 //! aborted 永不重试;退避中 abort → 归一化为 aborted 消息;
 //! quota/billing/订阅限额不可重试。
+//!
+//! 另含 `RetryingProvider`(11 计划 T1):流式重试装饰器,SSE 帧级缓冲 ——
+//! 提交点之前的帧(Start/*_start)先缓冲,首个内容 delta 到达时一次性放行
+//! 缓冲并开始逐帧直通;提交点前遇到可重试失败则静默截断整轮重试(下游无
+//! 重复 delta),提交点后失败按"失败编码进流"直通终止,不做中途重试
+//! (policy §4:不许偏离)。重试/overflow 属 ai 层(02 文档),rpi-core 保留
+//! 薄装配厂。
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
 use tokio_util::sync::CancellationToken;
 
-use crate::types::{AssistantMessage, StopReason};
+use crate::provider::{AssistantMessageEventStream, Provider};
+use crate::types::{
+    AssistantMessage, AssistantMessageEvent, Model, StopReason, StreamOptions, TranscriptContext,
+};
 
 fn build_pattern(patterns: &[&str]) -> Regex {
     Regex::new(&format!("(?i)(?:{})", patterns.join("|"))).expect("static retry pattern must compile")
@@ -207,6 +217,212 @@ where
             cb.on_retry_attempt_start();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// RetryingProvider:流式重试装饰器(11 计划 T1,SSE 帧级缓冲)
+// ---------------------------------------------------------------------------
+
+/// 工厂:带自动重试的流式装饰 provider。未启用重试时零改动直通。
+pub fn create_retrying_provider(
+    inner: Arc<dyn Provider>,
+    policy: RetryPolicy,
+    callbacks: Option<Arc<dyn RetryCallbacks>>,
+) -> Arc<dyn Provider> {
+    Arc::new(RetryingProvider { inner, policy, callbacks })
+}
+
+/// 流式重试装饰器:提交点(首个内容 delta)之前的帧先缓冲,可重试失败在
+/// 提交点前发生 → 静默截断整轮、退避后重试(下游看不到失败尝试的任何帧);
+/// 提交点后失败 → 按失败编码进流直通,不做中途重试(policy §4)。
+struct RetryingProvider {
+    inner: Arc<dyn Provider>,
+    policy: RetryPolicy,
+    callbacks: Option<Arc<dyn RetryCallbacks>>,
+}
+
+fn is_content_delta(event: &AssistantMessageEvent) -> bool {
+    matches!(
+        event,
+        AssistantMessageEvent::TextDelta { .. }
+            | AssistantMessageEvent::ThinkingDelta { .. }
+            | AssistantMessageEvent::ToolCallDelta { .. }
+    )
+}
+
+#[async_trait::async_trait]
+impl Provider for RetryingProvider {
+    async fn stream(
+        &self,
+        model: &Model,
+        ctx: TranscriptContext,
+        opts: StreamOptions,
+    ) -> AssistantMessageEventStream {
+        // 未启用重试:零改动直通,不引入任何缓冲
+        if !self.policy.enabled || self.policy.max_retries == 0 {
+            return self.inner.stream(model, ctx, opts).await;
+        }
+        let max_attempts = self.policy.max_retries;
+        let inner = self.inner.clone();
+        let model = model.clone();
+        let callbacks = self.callbacks.clone();
+        let policy = self.policy.clone();
+
+        Box::pin(async_stream::stream! {
+            let mut attempt: u32 = 0;
+            // (attempt, error):最终以失败收尾时上报
+            let mut last_retry: Option<(u32, String)> = None;
+            let mut final_success = false;
+
+            'attempts: loop {
+                let mut buffer: Vec<AssistantMessageEvent> = Vec::new();
+                let mut held_terminal: Option<AssistantMessageEvent> = None;
+                let mut committed = false;
+                let mut saw_terminal = false;
+
+                let stream = inner.stream(&model, clone_context(&ctx), opts.clone()).await;
+                let mut stream = std::pin::pin!(stream);
+                while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                    let is_terminal =
+                        matches!(event, AssistantMessageEvent::Done(_) | AssistantMessageEvent::Error(_));
+                    if !committed {
+                        if is_content_delta(&event) {
+                            // 提交点:先按原顺序放行缓冲帧,紧随放行本 delta,此后逐帧直通
+                            committed = true;
+                            for buffered in std::mem::take(&mut buffer) {
+                                yield buffered;
+                            }
+                            yield event;
+                        } else if is_terminal {
+                            held_terminal = Some(event);
+                            break;
+                        } else {
+                            buffer.push(event);
+                        }
+                        continue;
+                    }
+                    // 提交点后逐帧直通(含终态)
+                    final_success = is_terminal && matches!(event, AssistantMessageEvent::Done(_));
+                    if is_terminal {
+                        saw_terminal = true;
+                        // 回调先于终态 yield:消费端收到终态即可能停止 poll
+                        report_finished(&callbacks, &mut last_retry, final_success);
+                        yield event;
+                        break;
+                    }
+                    yield event;
+                }
+
+                if committed {
+                    // 内容已流给下游:无论终态成败都直通过了,不做中途重试(policy §4);
+                    // 流意外无终态时合成错误终态,保证下游流协议闭合(与未提交路径对称)
+                    if !saw_terminal {
+                        yield AssistantMessageEvent::Error(Box::new(AssistantMessage::error(
+                            &model,
+                            "stream ended without a terminal event",
+                            false,
+                        )));
+                    }
+                    break 'attempts;
+                }
+
+                // 未提交:流意外断掉时合成可分类的错误终态
+                let held = held_terminal.unwrap_or_else(|| {
+                    AssistantMessageEvent::Error(Box::new(AssistantMessage::error(
+                        &model,
+                        "stream ended without a terminal event",
+                        false,
+                    )))
+                });
+                let error_message: AssistantMessage = match &held {
+                    AssistantMessageEvent::Error(message) => (**message).clone(),
+                    AssistantMessageEvent::Done(_) => {
+                        // Done 终态但无内容 delta(空回复):按原顺序放行缓冲帧 + 终态
+                        // (终态必须 yield,否则下游按"流无终态"兜底成 error,P0 回归)
+                        final_success = true;
+                        report_finished(&callbacks, &mut last_retry, true);
+                        for buffered in buffer {
+                            yield buffered;
+                        }
+                        yield held;
+                        break 'attempts;
+                    }
+                    _ => unreachable!("held_terminal 只可能是终态事件"),
+                };
+
+                let cancelled = opts.cancel.as_ref().map(|c| c.is_cancelled()).unwrap_or(false);
+                let retryable = !cancelled
+                    && attempt < max_attempts
+                    && crate::retry::is_retryable_assistant_error(&error_message);
+                if !retryable {
+                    // 终态放行:缓冲帧(Start/*_start)+ 终态,顺序与原流一致
+                    report_finished(&callbacks, &mut last_retry, false);
+                    for buffered in buffer {
+                        yield buffered;
+                    }
+                    yield held;
+                    final_success = false;
+                    break 'attempts;
+                }
+
+                attempt += 1;
+                let error_text = error_message.error_message.clone().unwrap_or_default();
+                let delay_ms = retry_delay_ms(&policy, attempt);
+                if let Some(cb) = &callbacks {
+                    cb.on_retry_scheduled(attempt, max_attempts, delay_ms, &error_text);
+                }
+                // 退避中 abort → 归一化为 aborted 终态(retry_assistant_call 同语义)
+                let proceed = match &opts.cancel {
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        true
+                    }
+                    Some(token) => {
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => true,
+                            _ = token.cancelled() => false,
+                        }
+                    }
+                };
+                if !proceed {
+                    for buffered in buffer {
+                        yield buffered;
+                    }
+                    let aborted = AssistantMessage::error(&model, "aborted", true);
+                    yield AssistantMessageEvent::Error(Box::new(aborted));
+                    if let Some(cb) = &callbacks {
+                        cb.on_retry_finished(false, attempt, Some(error_text.as_str()));
+                    }
+                    break 'attempts;
+                }
+                if let Some(cb) = &callbacks {
+                    cb.on_retry_attempt_start();
+                }
+                last_retry = Some((attempt, error_text));
+                // 缓冲帧随失败尝试一并丢弃:下游无重复 delta
+            }
+
+            // 提交点后流意外断掉(无终态)的兜底上报;其余路径已在终态 yield 前上报
+            report_finished(&callbacks, &mut last_retry, final_success);
+        })
+    }
+}
+
+/// 收尾上报(恰一次):report 只发生在重试确实发生过的时候。
+fn report_finished(
+    callbacks: &Option<Arc<dyn RetryCallbacks>>,
+    last_retry: &mut Option<(u32, String)>,
+    success: bool,
+) {
+    if let Some((attempt, error)) = last_retry.take() {
+        if let Some(cb) = callbacks {
+            cb.on_retry_finished(success, attempt, (!success).then_some(error.as_str()));
+        }
+    }
+}
+
+fn clone_context(ctx: &TranscriptContext) -> TranscriptContext {
+    TranscriptContext { messages: ctx.messages.clone() }
 }
 
 #[cfg(test)]

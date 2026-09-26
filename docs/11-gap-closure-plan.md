@@ -17,22 +17,21 @@
 
 ## 1. 任务全景表
 
-| # | 任务 | crate | 源文档 | 优先级 |
-|---|---|---|---|---|
-| T1 | 真流式重试（SSE 帧级缓冲） | rpi-core + rpi-ai | 04 §踩坑① | 高 |
-| T2 | thinking/toolCall 流式增量 | rpi-ai + rpi-agent | 03 §踩坑② | 高 |
-| T3 | 观察回调 onPayload/onResponse/onProviderStreamEvent | rpi-ai | 02 §M4 | 高 |
-| T4 | 用量展示（token/缓存/费用） | rpi-cli | 用户决策 | 高 |
-| T5 | mpsc 推送式注入 + Phase 状态机 | rpi-agent | 03 §10.3/§10.5 | 高 |
-| T6 | I1–I6 property test | rpi-agent | 03 §10.1/§10.7 | 高 |
-| T7 | jsonschema 参数校验 | rpi-agent | 03 §踩坑③ | 中 |
-| T8 | PromptOutcome + wait_idle 去轮询 | rpi-core + rpi-agent | 04 §踩坑②③ | 中 |
-| T9 | PI_* 环境变量注入 | rpi-tools + rpi-core | 05 §踩坑③ | 中 |
-| T10 | spawnHook / commandPrefix | rpi-tools + rpi-core | 05 §踩坑③ | 中 |
-| T11 | bash 进程组杀灭（孙进程清理） | rpi-tools | 05 §踩坑② | 中 |
-| T12 | 文档更新与接缝登记 | docs/ | 07 §8.7、10 §3 | 收尾必做 |
+| # | 任务 | crate | 源文档 | 优先级 | 状态 |
+|---|---|---|---|---|---|
+| T1 | 真流式重试（SSE 帧级缓冲） | rpi-core + rpi-ai | 04 §踩坑① | 高 | ✅ 已完成（2026-09-26） |
+| T2 | thinking/toolCall 流式增量 | rpi-ai + rpi-agent | 03 §踩坑② | 高 | ✅ 已完成（2026-09-26） |
+| T3 | 观察回调 onPayload/onResponse/onProviderStreamEvent | rpi-ai | 02 §M4 | 高 | ✅ 已完成（2026-09-26） |
+| T4 | 用量展示（token/缓存/费用） | rpi-cli | 用户决策 | 高 | ✅ 已完成（2026-09-26） |
+| T5 | mpsc 推送式注入 + Phase 状态机 | rpi-agent | 03 §10.3/§10.5 | 高 | ✅ 已完成（2026-09-26） |
+| T6 | I1–I6 property test | rpi-agent | 03 §10.1/§10.7 | 高 | ✅ 已完成（2026-09-26） |
+| T7 | jsonschema 参数校验 | rpi-agent | 03 §踩坑③ | 中 | ✅ 已完成（2026-09-26） |
+| T8 | PromptOutcome + wait_idle 去轮询 | rpi-core + rpi-agent | 04 §踩坑②③ | 中 | ✅ 已完成（2026-09-26） |
+| T9 | PI_* 环境变量注入 | rpi-tools + rpi-core | 05 §踩坑③ | 中 | ✅ 已完成（2026-09-26） |
+| T10 | spawnHook / commandPrefix | rpi-tools + rpi-core | 05 §踩坑③ | 中 | ✅ 已完成（2026-09-26） |
+| T11 | bash 进程组杀灭（孙进程清理） | rpi-tools | 05 §踩坑② | 中 | ✅ 已完成（2026-09-26） |
 
-建议批次：**第一批 T1/T2/T4/T5/T6**（核心体验与硬性验收），**第二批 T3/T7/T8/T9/T10/T11**，T12 随每批收尾。
+第一批（T1–T6，T3 提前完成）与第二批（T7–T11）均已通过独立 reviewer 审查。
 
 ## 2. 各任务详细说明
 
@@ -151,13 +150,7 @@
 
 **验收**：测试里 spawn 会再 fork 子进程的脚本，超时后孙进程也被回收；正常结束路径不受影响。
 
-### T12 文档更新与接缝登记（#23，随批收尾）
-
-- `docs/07-extensions.md` §8.7 标题"实施步骤（未开始，实施时按序）"已过时——扩展 MCP 化（event_bus/mcp_host/mcp_tool、E2E）已落地，改为"已落地（2026-09-26），剩余子项见踩坑记录"。
-- `docs/02-ai-provider.md` M1 裁剪条目改为"经用户决策正式裁剪"：OAuth/8 适配器/模型目录不做，注明决策日期。
-- `docs/03-agent-loop.md` 待定点：①控制面出转录——**维持现状**（与 pi 一致；用户已放弃逐字节兼容）；②事件负载——**delta + 快照读口**（随 T2 落地）；③CheckpointStore——**推迟**。
-- `docs/10-implementation-policy.md` §3 接缝表登记本计划全部接缝变更：StreamOptions 观察回调、AgentEvent::MessageDelta 负载扩展、注入通道 mpsc、prompt() 返回 PromptOutcome、bash 工具配置项。
-- 每个完成的任务在对应功能文档（02/03/04/05）末尾"踩坑记录"追加条目，格式见流程第五步。
+> 文档更新与接缝登记（原 T12，2026-09-26 用户决策：07 §8.7 过时标注、02 裁剪条目、03 待定点）已完成并从本计划删除；接缝登记义务移入 §3 注意事项第 8 条。
 
 ## 3. 全局注意事项
 
@@ -168,12 +161,122 @@
 5. **性能是验收项不是事后项**：T2 的快照读口避免每 delta 整份克隆；T4 的用量行只随回合终态重算；T5 的 mpsc 接收不引入忙等。有疑问先测（大会话、高频 delta 场景）。
 6. **边界清单每项都要落测试**：空集合、None/Err 传播、流中断、重入、超长输入、schema 非法、钩子失败、断连。callback/hook 类新面必须验证"panic 不击穿宿主"。
 7. **版本 pin**：新增依赖 `proptest`、`jsonschema`、`nix` 一律 pin 精确版本（对齐 rmcp `=3.4.1` 的既有做法）。
-8. **每批收尾流程**：`cargo test --workspace` 全绿 + clippy → 派独立 reviewer 子代理（给改动文件列表 + 对应文档路径，要求对照文档与 pi 实现审实现与测试）→ 修完 reviewer 问题复测 → 文档更新（T12）→ 踩坑记录。
-9. **决策记录即时落盘**：本文 §0 与 T12 的"不做/推迟"清单是用户 2026-09-26 的正式决策，实现者不得自行翻案；若实现中发现某决策与文档硬约束冲突，停下来问用户。
+8. **每批收尾流程**：`cargo test --workspace` 全绿 + clippy → 派独立 reviewer 子代理（给改动文件列表 + 对应文档路径，要求对照文档与 pi 实现审实现与测试）→ 修完 reviewer 问题复测 → 踩坑记录。**接缝签名变更**（如 StreamOptions、AgentEvent 负载、prompt() 返回类型、bash 工具配置）必须同步在 `10-implementation-policy.md` §3 接缝表登记。
+9. **决策记录即时落盘**：本文 §0 的"不做/推迟"清单与各功能文档中已标注的 2026-09-26 决策是正式决策，实现者不得自行翻案；若实现中发现某决策与文档硬约束冲突，停下来问用户。
 
 ## 4. 验收总口径
 
 - 全部批次完成后：`cargo test --workspace` 与 clippy 零警告通过；
 - TUI 可见：流式 thinking/工具参数、每回合用量行、会话累计；
 - 配置重试后流式仍逐 delta（T1 的核心验收，最容易被悄悄退化回去，review 时重点盯）；
-- 10 §3 接缝表与各文档踩坑记录齐全，本文档中已完成的任务逐条勾销或标注完成日期。
+- 10 §3 接缝表与各文档踩坑记录齐全，本文档中已完成的任务逐条删除。
+
+## 5. 交接实施清单（2026-09-26，T7–T11 + 收尾；供后续实施者使用）
+
+> 第一批（T1/T2/T3/T4/T5/T6）已完成：`cargo test --workspace` 27 个测试二进制全绿、
+> `cargo clippy --workspace --all-targets` 零警告、独立 reviewer 审查通过（P0/P1 问题已修复），
+> 接缝变更已在 `10-implementation-policy.md` §3 登记，踩坑记录已落 02/03/04 文档。
+> **实施 T7–T11 前必读**：`10-implementation-policy.md` 全文 + 对应功能文档；遵循
+> `rpi-dev-workflow` 流程（读文档 → 编码+测试 → 全仓测试与 clippy 零警告 → 独立 reviewer
+> 子代理 → 接缝登记与踩坑记录）。
+
+### T7 jsonschema 参数校验（#8）
+
+- **落点**：`crates/rpi-agent/src/loop_.rs` 的 `pub fn validate_arguments(schema, args) -> Result<(), String>`
+  （当前是 type/required/嵌套 properties 子集，`integer` 放过任意 number）；调用点在 `prepare_call`
+  （初校验 + beforeToolCall 改参后重校验，两处）。
+- **做法**：rpi-agent 加 `jsonschema` 依赖，**pin 精确版本**（对齐 rmcp `=3.4.1` 的做法）；用
+  `jsonschema::JSONSchema::compile` 替换子集实现，保持函数签名与错误语义（Err(String)，
+  由现有路径转错误 ToolOutcome，不 panic、不改 Tool trait）。
+- **必须明确并测试**：schema 本身非法（compile 失败）时的行为——建议 fail-closed（返回 Err，
+  文案说明 schema 非法），并写测试钉住。
+- **验收**：enum/minimum/数组元素类型等此前漏过的非法参数在执行前被拦截；现有用例
+  `argument_validation_checks_type_required_and_nesting` 与全部既有测试不回归；schema 非法有明确测试。
+- **坑**：jsonschema 对内置 8 工具的 schema 必须照常通过——先跑全仓测试确认兼容。
+
+### T8 PromptOutcome + wait_idle 去轮询（#13）
+
+- **落点**：`crates/rpi-core/src/session.rs` 的 `AgentSession::prompt`（流式中复用
+  `RunStop::EndTurn` 表达"已入队"）；`crates/rpi-agent/src/agent.rs` 的 `wait_idle`（10ms 轮询）。
+- **做法**：
+  - 引入 `pub enum PromptOutcome { Started(RunStop), Enqueued }`，`AgentSession::prompt` 返回
+    `Result<PromptOutcome, CoreError>`；interactive/print/json/rpc 四个调用点同步更新。
+  - `Agent` 的 `streaming: AtomicBool` 改 `tokio::sync::watch<bool>`：`is_streaming()` 读 watch 值，
+    `wait_idle()` 用 `borrow_and_update() + changed().await`（无轮询、无丢失唤醒）；
+    run 生命周期里所有 `streaming.store` 点改为 `send`。
+  - **决策记录**：`Agent::prompt` 保持 inline await 整个 run（pi 的 prompt 即 await run 完成）；
+    计划里"run 生命周期 spawn 化"是去轮询的手段而非目标，若改 spawn 需重构 overflow 恢复
+    （`run_with_recovery` 依赖 RunStop），不做。
+- **接缝登记**：`AgentSession::prompt` 返回类型变更是 mode 面破坏性变更，须在 10 §3 登记表补条目。
+
+### T9 PI_* 环境变量注入（#14）
+
+- **落点**：`crates/rpi-tools/src/bash.rs`（`run()` 构造 `tokio::process::Command` 处）与工厂
+  （`create_bash_tool` / `create_shell_tool`）；`crates/rpi-cli/src/assembly.rs` 装配接线。
+- **pi 清单**（05 §4）：`PI_SESSION_ID`、`PI_SESSION_FILE`、`PI_PROVIDER`、`PI_MODEL`、
+  `PI_REASONING_LEVEL`，按 `exposeSessionEnvironment` 注入。
+- **做法**：
+  - rpi-tools 定义 `pub type SessionEnvFn = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>`，
+    工厂加 `create_bash_tool_with_session_env(cwd, env)`（powershell 同理）；`run()` 里对每项：
+    **用户进程环境已有同名变量则不覆盖**，否则 `.env(name, value)`。
+  - rpi-core/cli：装配期先建共享 cell（如 `Arc<Mutex<Weak<AgentSession>>>`），工具工厂拿
+    "读 cell 的闭包"，session 建好后回填 Weak；session 侧提供按需快照（provider/model/thinking
+    取 `agent().state_snapshot()`，session id/file 取 SessionManager）。
+  - **禁用可变全局状态**（policy §2）；注入走工具配置参数。
+- **验收**：脚本 `echo $PI_MODEL` 输出注入值；预设 `PI_MODEL=keep` 再执行验证不覆盖；
+  空 cell（无 session）时行为 = 现状。
+
+### T10 spawnHook / commandPrefix（#15）
+
+- **落点**：`crates/rpi-tools/src/bash.rs` 的 `ShellToolConfig` + `run()`；rpi-core 装配侧接线。
+- **做法**：
+  - `ShellToolConfig` 增加 `command_prefix: Option<String>` 与
+    `spawn_hook: Option<Arc<dyn ShellSpawnHook>>`；
+    `#[async_trait] pub trait ShellSpawnHook: Send + Sync { async fn rewrite(&self, command: String) -> Result<String, String>; }`。
+  - 语义：`final = prefix + hook(original)`（hook 先改写、prefix 最后前置，保证 hook 检查的是
+    用户命令）；空前缀 = 无操作。
+  - **钩子错误 = 拒绝执行**：返回 Err 时工具直接产出错误结果（文案含 hook 错误信息），
+    不 spawn——与扩展错误语义（07 §8.5 跳过+诊断、绝不击穿宿主）一致。
+  - rpi-core 装配：`AgentSessionConfig`/cli `BuildOptions` 增加可选 shell 命令配置通道
+    （prefix 来自 settings，hook 可接扩展管线经 LoopHooks 的改参链），接缝签名变更登记。
+- **验收**：prefix 生效（`echo` 变 `<prefix> echo` 仍成功）；hook 改写命令生效；
+  hook 返回 Err → 错误结果且无子进程产生（用副作用脚本验证）；bash/powershell 共用工厂两路都测。
+
+### T11 bash 进程组杀灭（#16）
+
+- **落点**：`crates/rpi-tools/src/bash.rs` 的 `run()`（`kill_on_drop(true)` 直接杀子进程，
+  孙进程残留）；`crates/rpi-tools/Cargo.toml`。
+- **做法**：
+  - rpi-tools 加 `nix` 依赖，**pin 精确版本**（如 `=0.27.1`，确认 API 后定），只进 rpi-tools
+    （可拆卸判据：移除 rpi-tools 其余 crate 零警告编译）。
+  - Unix：spawn 前 `Command::process_group(0)`（tokio::process 支持，等于 setpgid 自成进程组，
+    pgid = 子进程 pid）；超时/abort 分支先
+    `nix::sys::signal::kill(Pid::from_raw(-(child.id() as i32)), Signal::SIGKILL)` 清整棵树，
+    再 `child.wait()`；**kill_on_drop(true) 保留为兜底**。全部 `#[cfg(unix)]` 隔离，
+    非 Unix（含 powershell 路径）保持现状。
+  - 注意 pid 获取时机与错误处理（spawn 失败、wait 已返回后 killpg：进程已死 → 忽略 ESRCH）。
+- **验收**：命令 `sleep 300 & sleep 300`（孙进程）超时后两者都被回收——先让命令把子 pid 写
+  临时文件，超时后再执行一次 `kill -0 $(cat pidfile)` 断言失败（非零 exit）；
+  正常结束路径（echo 等）不受影响。
+
+### 收尾遗留（reviewer P2，非阻塞）
+
+1. `crates/rpi-ai/src/adapters/mod.rs` 的 `observe_payload`：panic 被吞后建议加一行
+   `eprintln!` 诊断（失败不抛异常 ≠ 不可观测）。
+2. interactive 的 TurnEnd 用量行：0 用量（错误回合）也打印，观感问题，可按
+   `usage.total_tokens == 0 && cost == 0` 跳过。
+3. 预算在首轮 AwaitingRequest 即耗尽时 `initial_prompts` 被丢弃（仅 max_turns=0 等配置可达）——
+   可并入 `LoopOutput::requeued_*` 机制。
+4. T1 装饰器缺"退避中 abort"专项测试（`retry_assistant_call` 有，装饰器没有）；
+   T6 property test 的 abort 配对路径已补（`pairing_abort_path_every_call_still_gets_result`）。
+5. proptest 使用注意（写新 property test 时）：`proptest!` 宏内**不能**给测试函数标返回类型；
+   断言表达式字符串含 `{ .. }` 会破坏宏的格式串（先把 `matches!` 结果存变量）；
+   用 `block_on(async { ...; Ok(()) }).unwrap_or_else(|e| panic!(...))` 模式包装 async。
+
+### 每批收尾流程（不变）
+
+`cargo test --workspace` 全绿 + `cargo clippy --workspace --all-targets` 零警告 → 派独立
+reviewer 子代理（给改动文件列表 + 对应文档路径，要求对照文档与 pi 实现审实现与测试）→
+修完 reviewer 问题复测 → **接缝签名变更在 10 §3 登记**（T8 的 prompt 返回类型、
+T10 的 bash 工具配置）→ 对应功能文档踩坑记录 → 本文档 §1 状态列更新、
+已完成条目按 §4 约定删除。

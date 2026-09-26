@@ -15,6 +15,9 @@ mod read;
 mod truncate;
 mod write;
 
+// T9/T10:shell 工具的会话环境/前缀/钩子工厂经 crate 根出厂(其余工具经
+// default_tools/all_tools 注册表工厂装配)
+pub use bash::{create_bash_tool_with_session_env, create_powershell_tool_with, SessionEnvFn, ShellSpawnHook, ShellSpawnOptions};
 pub use truncate::{truncate_head, truncate_line, truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, GREP_MAX_LINE_LENGTH};
 
 use std::path::Path;
@@ -54,8 +57,13 @@ pub fn create_default_tools() -> ToolRegistry {
 
 /// 工厂:以指定工作目录构造默认工具集(相对路径解析基于 cwd)。
 pub fn create_tools_at(cwd: &Path) -> ToolRegistry {
+    create_tools_at_with_shell(cwd, bash::ShellSpawnOptions::default())
+}
+
+/// 工厂:默认工具集 + shell 装配选项(T9/T10,cli 装配点使用)。
+pub fn create_tools_at_with_shell(cwd: &Path, shell: bash::ShellSpawnOptions) -> ToolRegistry {
     let mut registry = ToolRegistry::default();
-    for tool in default_tools(cwd) {
+    for tool in default_tools_with_shell(cwd, shell) {
         registry.register(tool);
     }
     registry
@@ -66,6 +74,16 @@ pub fn default_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
     vec![
         read::create_read_tool(cwd),
         bash::create_bash_tool(cwd),
+        edit::create_edit_tool(cwd),
+        write::create_write_tool(cwd),
+    ]
+}
+
+/// 默认工具列表 + shell 装配选项(T9 会话环境注入 / T10 前缀与改写钩子)。
+pub fn default_tools_with_shell(cwd: &Path, shell: bash::ShellSpawnOptions) -> Vec<Arc<dyn Tool>> {
+    vec![
+        read::create_read_tool(cwd),
+        bash::create_bash_tool_with(cwd, shell),
         edit::create_edit_tool(cwd),
         write::create_write_tool(cwd),
     ]
@@ -143,5 +161,42 @@ mod tests {
         let mut registry = create_default_tools();
         let duplicate = read::create_read_tool(Path::new("."));
         registry.register(duplicate);
+    }
+}
+
+#[cfg(test)]
+mod shell_validation_tests {
+    use super::*;
+
+    /// T7 坑位(reviewer P2):全部 8 个内置工具的**真实 schema** 必须能过
+    /// jsonschema 编译——错误信息以 "invalid tool schema" 开头即 compile 失败。
+    #[test]
+    fn all_builtin_tool_schemas_pass_jsonschema() {
+        for tool in all_tools(Path::new(".")) {
+            let schema = tool.schema();
+            let empty = serde_json::json!({});
+            let outcome = rpi_agent::validate_arguments(&schema, &empty);
+            if let Err(message) = outcome {
+                assert!(
+                    !message.starts_with("invalid tool schema"),
+                    "工具 `{}` 的 schema 无法编译: {message}",
+                    tool.name()
+                );
+            }
+        }
+    }
+
+    /// 合法参数经真实 schema 校验通过(bash/read 各一)。
+    #[test]
+    fn valid_arguments_pass_real_tool_schemas() {
+        let registry = create_tools_at(Path::new("."));
+        let bash = registry.get("bash").unwrap();
+        assert!(
+            rpi_agent::validate_arguments(&bash.schema(), &serde_json::json!({"command": "ls"})).is_ok()
+        );
+        let read = registry.get("read").unwrap();
+        assert!(
+            rpi_agent::validate_arguments(&read.schema(), &serde_json::json!({"path": "a.txt", "offset": 1})).is_ok()
+        );
     }
 }

@@ -1,18 +1,13 @@
-//! provider 级自动重试(04 文档 §2.5 auto retry;pi 的 retryAssistantCall 由
-//! harness/coding-agent 层经 streamFn 注入,低层循环无内建重试 —— 不变量 I2)。
+//! provider 级自动重试(04 文档 §2.5 auto retry)—— 薄装配厂。
 //!
-//! 装饰 `Provider`:内部消费整段流,若终态为可重试错误则按指数退避重试;
-//! 只把**最后一次成功尝试**的事件回放给循环(UI 不看到失败尝试的增量)。
-//! aborted 终态、不可重试错误(配额/账单)立即放行(rpi-ai retry 语义)。
+//! 重试逻辑本体在 rpi-ai(02 文档把重试/overflow 划给 ai 层;11 计划 T1 注意
+//! 事项 3):本 crate 只把 session 的 `RetryHooks`(AutoRetry 事件面)适配为
+//! rpi-ai 的 `RetryCallbacks` 并委托装配。流式语义(SSE 帧级缓冲、提交点前
+//! 静默重试)见 `rpi-ai::retry` 模块文档。
 
-use std::future::Future;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use rpi_ai::{
-    is_retryable_assistant_error, retry_delay_ms, AssistantMessage, AssistantMessageEvent,
-    AssistantMessageEventStream, Model, Provider, RetryPolicy, StreamOptions, TranscriptContext,
-};
+use rpi_ai::{Provider, RetryPolicy};
 
 /// 重试过程回调:session 用它发 `auto_retry_start/end` 事件。
 pub trait RetryHooks: Send + Sync {
@@ -22,137 +17,43 @@ pub trait RetryHooks: Send + Sync {
     fn on_retry_finished(&self, _success: bool, _attempt: u32, _final_error: Option<&str>) {}
 }
 
+struct HooksAdapter(Arc<dyn RetryHooks>);
+
+impl rpi_ai::RetryCallbacks for HooksAdapter {
+    fn on_retry_scheduled(&self, attempt: u32, max_attempts: u32, delay_ms: u64, error: &str) {
+        self.0.on_retry_scheduled(attempt, max_attempts, delay_ms, error);
+    }
+
+    fn on_retry_finished(&self, success: bool, attempt: u32, final_error: Option<&str>) {
+        self.0.on_retry_finished(success, attempt, final_error);
+    }
+}
+
 /// 工厂:带自动重试的装饰 provider(不联网语义与 inner 一致)。
 pub fn create_retrying_provider(
     inner: Arc<dyn Provider>,
     policy: RetryPolicy,
     hooks: Option<Arc<dyn RetryHooks>>,
 ) -> Arc<dyn Provider> {
-    Arc::new(RetryingProvider { inner, policy, hooks })
-}
-
-pub struct RetryingProvider {
-    inner: Arc<dyn Provider>,
-    policy: RetryPolicy,
-    hooks: Option<Arc<dyn RetryHooks>>,
-}
-
-impl RetryingProvider {
-    /// 消费一次完整尝试;终态事件已缓冲(含全部流事件),成功时原样回放。
-    fn consume_attempt(
-        &self,
-        model: &Model,
-        ctx: TranscriptContext,
-        opts: &StreamOptions,
-    ) -> impl Future<Output = Vec<AssistantMessageEvent>> + Send + '_ {
-        let inner = self.inner.clone();
-        let model = model.clone();
-        let opts = opts.clone();
-        async move {
-            let stream = inner.stream(&model, ctx, opts).await;
-            let mut stream = std::pin::pin!(stream);
-            let mut events: Vec<AssistantMessageEvent> = Vec::new();
-            while let Some(event) = futures::StreamExt::next(&mut stream).await {
-                let terminal =
-                    matches!(event, AssistantMessageEvent::Done(_) | AssistantMessageEvent::Error(_));
-                events.push(event);
-                if terminal {
-                    break;
-                }
-            }
-            events
-        }
-    }
-}
-
-#[async_trait]
-impl Provider for RetryingProvider {
-    async fn stream(
-        &self,
-        model: &Model,
-        ctx: TranscriptContext,
-        opts: StreamOptions,
-    ) -> AssistantMessageEventStream {
-        let max_attempts = if self.policy.enabled { self.policy.max_retries } else { 0 };
-        let mut attempt: u32 = 0;
-        let mut last_retry: Option<(u32, String)> = None;
-        let replay: Vec<AssistantMessageEvent>;
-
-        loop {
-            let events = self.consume_attempt(model, clone_context(&ctx), &opts).await;
-            let terminal_error: Option<AssistantMessage> = events.iter().find_map(|event| match event {
-                AssistantMessageEvent::Error(message) => Some((**message).clone()),
-                _ => None,
-            });
-
-            let retryable = terminal_error
-                .as_ref()
-                .map(is_retryable_assistant_error)
-                .unwrap_or(false);
-            if !retryable || attempt >= max_attempts {
-                if let Some((attempt, _)) = last_retry {
-                    let final_error = terminal_error
-                        .as_ref()
-                        .and_then(|m| m.error_message.clone());
-                    // success = 最终尝试不是 error 终态(rpi-ai retry_assistant_call 同语义)
-                    let success = final_error.is_none();
-                    if let Some(hooks) = &self.hooks {
-                        hooks.on_retry_finished(success, attempt, final_error.as_deref());
-                    }
-                }
-                replay = events;
-                break;
-            }
-
-            attempt += 1;
-            let error_message = terminal_error
-                .as_ref()
-                .and_then(|m| m.error_message.clone())
-                .unwrap_or_else(|| "unknown error".into());
-            let delay_ms = retry_delay_ms(&self.policy, attempt);
-            if let Some(hooks) = &self.hooks {
-                hooks.on_retry_scheduled(attempt, max_attempts, delay_ms, &error_message);
-            }
-            // 退避中 abort → 归一化为 aborted 终态(rpi-ai retry 语义)
-            if let Some(cancel) = &opts.cancel {
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
-                    _ = cancel.cancelled() => {
-                        replay = vec![AssistantMessageEvent::Error(Box::new(
-                            AssistantMessage::error(model, "aborted", true),
-                        ))];
-                        break;
-                    }
-                }
-            } else {
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            }
-            last_retry = Some((attempt, error_message));
-        }
-
-        Box::pin(async_stream::stream! {
-            for event in replay {
-                yield event;
-            }
-        })
-    }
-}
-
-fn clone_context(ctx: &TranscriptContext) -> TranscriptContext {
-    TranscriptContext { messages: ctx.messages.clone() }
+    let callbacks: Option<Arc<dyn rpi_ai::RetryCallbacks>> =
+        hooks.map(|hooks| Arc::new(HooksAdapter(hooks)) as _);
+    rpi_ai::create_retrying_provider(inner, policy, callbacks)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rpi_ai::{ContentBlock, MockProvider, ScriptedProvider, ScriptedTurn, StopReason};
+    use rpi_ai::{
+        AssistantMessageEvent, ContentBlock, MockProvider, Model, ScriptedProvider, ScriptedTurn,
+        StopReason, StreamOptions, TranscriptContext,
+    };
     use std::sync::atomic::{AtomicU32, Ordering};
 
     fn model() -> Model {
         Model::minimal("mock-1", "mock", "mock")
     }
 
-    async fn terminal_of(stream: &mut AssistantMessageEventStream) -> AssistantMessageEvent {
+    async fn terminal_of(stream: &mut rpi_ai::AssistantMessageEventStream) -> AssistantMessageEvent {
         use futures::StreamExt;
         let mut last = None;
         while let Some(event) = stream.next().await {

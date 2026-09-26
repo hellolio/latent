@@ -253,8 +253,15 @@ async fn dispatch(
         let session = session.clone();
         let writer = writer.clone();
         return Some(tokio::spawn(async move {
+            // T8:PromptOutcome 区分"新启动的 run"与"已入队(steering)";
+            // 旧实现入队时谎报 end_turn,现如实上报 enqueued
             let response = match session.prompt(message).await {
-                Ok(stop) => RpcResponse::ok(id, json!({ "stopReason": stop_reason(&stop) })),
+                Ok(rpi_core::PromptOutcome::Started(stop)) => {
+                    RpcResponse::ok(id, json!({ "stopReason": stop_reason(&stop) }))
+                }
+                Ok(rpi_core::PromptOutcome::Enqueued) => {
+                    RpcResponse::ok(id, json!({ "stopReason": "enqueued" }))
+                }
                 Err(error) => RpcResponse::err(id, error.to_string()),
             };
             write_response(&writer, response).await;

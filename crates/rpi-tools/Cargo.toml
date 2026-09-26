@@ -14,6 +14,10 @@ tokio.workspace = true
 uuid.workspace = true
 regex.workspace = true
 ignore.workspace = true
+# T11 bash 进程组杀灭(11 计划:pin 精确版本;只进 rpi-tools,可拆卸判据 =
+# 移除本 crate 后其余 crate 零警告编译)
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", features = ["signal"] }
 
 [features]
 default = ["process"]

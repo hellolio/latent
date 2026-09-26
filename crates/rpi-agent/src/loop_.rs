@@ -1,22 +1,30 @@
-//! agent 循环(03 文档 §3 伪代码逐行实现)。
+//! agent 循环(03 文档 §10.3 显式状态机 + §10.5 推送式注入)。
 //!
-//! 双层 while:内层"有工具调用或待注入消息就继续 turn",外层"follow-up /
-//! 显式 continue 唤醒";`error`/`aborted` 是唯一硬退出(不碰任何队列,不变量 I3);
+//! 控制流是真实的 step 状态机:`Phase` 枚举 + `step_*` 转移函数,调度器退化
+//! 为 match 循环;三种 `Wake`(steering / follow-up / 显式 continue)是不同
+//! 类型,注入路径只有一条 —— pi 的 `pendingMessages` 单通道、补轮询与
+//! continue 配额补丁(03 §10.2.2)由此消失。
+//!
+//! 注入通道是 mpsc(§10.5):循环在流式期间 `select!` 接收 steering(收到即
+//! 缓存,下个 turn 边界注入 —— 真正的中途注入受 provider 限制仍做不到);
+//! turn 边界按 `QueueMode` 批量整流。`error`/`aborted` 是唯一硬退出,不碰
+//! 任何注入通道(不变量 I3)。
+//!
 //! 工具执行四阶段 prepare→execute→finalize→result,批结果以 `Vec<ToolOutcome>`
 //! 返回 —— 长度恒等于 toolCall 数,"每个 toolCall 恰好一个 toolResult" 是类型
-//! 不变量(03 文档 §10.4,修复 pi 串行 abort 缺口的类型化方案)。
-//!
-//! 护栏内建:`TurnLimits`(max_turns/max_tool_calls/max_total_tokens/deadline/
-//! max_truncation_retries),超限以 `RunStop::BudgetExhausted` 可区分终止,不伪装
-//! 成 error。低层无内建 provider 重试(不变量 I2)—— 重试经装饰 `Provider` 在
-//! 上层注入(pi 的 retryAssistantCall 等价物)。
+//! 不变量(03 文档 §10.4,修复 pi 串行 abort 缺口的类型化方案)。护栏
+//! `TurnLimits` 超限以 `RunStop::BudgetExhausted` 可区分终止。低层无内建
+//! provider 重试(不变量 I2)—— 重试经装饰 `Provider` 在上层注入。
 
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use futures::FutureExt;
 use futures::StreamExt;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use rpi_ai::{
@@ -24,13 +32,174 @@ use rpi_ai::{
     Provider, StopReason, StreamOptions, ThinkingLevel, Tool as DeclaredTool, TranscriptContext,
 };
 
+use crate::agent::QueueMode;
 use crate::declare::declare_tool_changes;
-use crate::event::{AgentEvent, Subscriber};
+use crate::event::{AgentEvent, MessageDeltaPayload, SharedPartial, Subscriber};
 use crate::hooks::{
     LoopHooks, ToolCallCtx, ToolPatch, ToolResultCtx, TurnCtx, TurnDecision, TurnUpdate,
 };
 use crate::message::{now_ms, AgentMessage};
 use crate::tool::{Tool, ToolCall, ToolError, ToolExecution, ToolOutput, ToolUpdater};
+
+// ---------------------------------------------------------------------------
+// 注入通道(03 §10.5):发送端在宿主,接收端随 run 进入循环
+// ---------------------------------------------------------------------------
+
+/// 注入深度计数(UI/会话镜像;发送端递增,循环消费时递减)。
+#[derive(Debug, Default)]
+pub struct InjectionDepth {
+    steering: AtomicUsize,
+    follow_up: AtomicUsize,
+}
+
+impl InjectionDepth {
+    pub fn steering(&self) -> usize {
+        self.steering.load(Ordering::SeqCst)
+    }
+
+    pub fn follow_up(&self) -> usize {
+        self.follow_up.load(Ordering::SeqCst)
+    }
+}
+
+/// 注入发送端(宿主持有;run 期间也可 push,消息缓冲在通道里)。
+#[derive(Clone)]
+pub struct InjectionSender {
+    steering: mpsc::UnboundedSender<AgentMessage>,
+    follow_up: mpsc::UnboundedSender<AgentMessage>,
+    depth: Arc<InjectionDepth>,
+}
+
+impl InjectionSender {
+    pub fn steer(&self, message: AgentMessage) {
+        let _ = self.steering.send(message);
+        self.depth.steering.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn follow_up(&self, message: AgentMessage) {
+        let _ = self.follow_up.send(message);
+        self.depth.follow_up.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 深度计数句柄(宿主镜像读口;与 receiver 在途与否无关)。
+    pub fn depth(&self) -> Arc<InjectionDepth> {
+        self.depth.clone()
+    }
+
+    /// 重新入队(不增计数):循环异常终止时把已取出未消费的消息放回通道
+    /// (深度计数仍算在这些消息上,归还后镜像保持一致)。
+    pub fn requeue_steering(&self, message: AgentMessage) {
+        let _ = self.steering.send(message);
+    }
+
+    pub fn requeue_follow_up(&self, message: AgentMessage) {
+        let _ = self.follow_up.send(message);
+    }
+}
+
+/// 注入接收端(run 开始时移交给循环)。
+pub struct InjectionReceiver {
+    steering: mpsc::UnboundedReceiver<AgentMessage>,
+    follow_up: mpsc::UnboundedReceiver<AgentMessage>,
+    depth: Arc<InjectionDepth>,
+}
+
+impl InjectionReceiver {
+    /// 深度镜像(steering, follow_up)。
+    pub fn depths(&self) -> (usize, usize) {
+        (self.depth.steering(), self.depth.follow_up())
+    }
+
+    fn dec_steering(&self) {
+        self.depth.steering.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn dec_follow_up(&self) {
+        self.depth.follow_up.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// 流式期间 select! 接收一条 steering(消费计数延迟到注入时递减)。
+    pub async fn recv_steering(&mut self) -> Option<AgentMessage> {
+        self.steering.recv().await
+    }
+
+    /// 取走通道中现存的全部 steering(进入本地缓冲)。
+    pub fn poll_steering(&mut self, buffer: &mut Vec<AgentMessage>) {
+        while let Ok(message) = self.steering.try_recv() {
+            buffer.push(message);
+        }
+    }
+
+    /// 非阻塞取一条 steering(one-at-a-time 批量模式;通道余量原地保留,
+    /// 硬退出时不会丢失)。
+    pub fn take_one_steering(&mut self) -> Option<AgentMessage> {
+        self.steering.try_recv().ok()
+    }
+
+    /// 取走全部 follow-up(agent 本应停止时)。
+    pub fn drain_follow_up(&mut self) -> Vec<AgentMessage> {
+        let mut out = Vec::new();
+        while let Ok(message) = self.follow_up.try_recv() {
+            out.push(message);
+        }
+        out
+    }
+
+    /// 通道排空(仅限 idle 时清理)。
+    pub fn clear(&mut self) {
+        while self.steering.try_recv().is_ok() {
+            self.dec_steering();
+        }
+        while self.follow_up.try_recv().is_ok() {
+            self.dec_follow_up();
+        }
+        self.depth.steering.store(0, Ordering::SeqCst);
+        self.depth.follow_up.store(0, Ordering::SeqCst);
+    }
+}
+
+/// 工厂:创建注入通道端点对(发送端归宿主,接收端随 run 进循环)。
+pub fn create_injection_endpoints() -> (InjectionSender, InjectionReceiver) {
+    let (steering_tx, steering_rx) = mpsc::unbounded_channel();
+    let (follow_up_tx, follow_up_rx) = mpsc::unbounded_channel();
+    let depth = Arc::new(InjectionDepth::default());
+    (
+        InjectionSender { steering: steering_tx, follow_up: follow_up_tx, depth: depth.clone() },
+        InjectionReceiver { steering: steering_rx, follow_up: follow_up_rx, depth },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// 循环状态机(03 §10.3)
+// ---------------------------------------------------------------------------
+
+/// 唤醒原因(03 §10.3):三种类型不同,注入路径只有一条。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Wake {
+    /// turn 边界收到的 steering(携带首条,其余仍在本地缓冲/通道)。
+    /// 当前实现里 steering 走自然续跑(wake=None)注入,本变体保留以对齐
+    /// 03 §10.3 的 Wake 三类型(供显式 wake 语义扩展使用)。
+    Steering(AgentMessage),
+    /// agent 本应停止时收到的 follow-up(携带首条)
+    FollowUp(AgentMessage),
+    /// finishTurn 的显式 continue(无新消息的"仅上下文"一轮)
+    ExplicitContinue,
+}
+
+/// 显式状态阶段(03 文档 §10.3):真实控制流,`step_*` 是转移函数。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Phase {
+    /// 即将注入消息并发起请求(Box 压缩变体尺寸:调度器每轮 match 复制 Phase)
+    AwaitingRequest { wake: Option<Box<Wake>> },
+    /// LLM 流式中
+    Streaming,
+    /// 工具批执行中
+    ExecutingTools,
+    /// turn 收尾决策点
+    Settling,
+    /// 终态(调度器退出)
+    Done(RunStop),
+}
 
 /// 循环的一次输入快照(pi 的 createContextSnapshot:messages.slice(),09 A2 接缝 2)
 #[derive(Clone, Default)]
@@ -71,6 +240,8 @@ pub struct LoopConfig {
     pub thinking: Option<ThinkingLevel>,
     pub limits: TurnLimits,
     pub stream_options: StreamOptions,
+    /// steering 批量模式(03 文档 QueueMode;Agent 默认 one-at-a-time)
+    pub steering_mode: QueueMode,
 }
 
 impl LoopConfig {
@@ -80,19 +251,9 @@ impl LoopConfig {
             thinking: None,
             limits: TurnLimits::default(),
             stream_options: StreamOptions::default(),
+            steering_mode: QueueMode::OneAtATime,
         }
     }
-}
-
-/// 显式状态阶段(03 文档 §10.3):观察/调试用;控制流由双层 while 表达,
-/// Phase 标注当前所处阶段供宿主日志与断言。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    Prompt,
-    Streaming,
-    ExecutingTools,
-    Settling,
-    Done,
 }
 
 /// 超限的护栏种类(可区分终止,不伪装成 error)。
@@ -121,6 +282,10 @@ pub enum RunStop {
 pub struct LoopOutput {
     pub messages: Vec<AgentMessage>,
     pub stop: RunStop,
+    /// run 终止时"已从通道取出但未消费"的注入消息(硬退出/预算耗尽路径),
+    /// 宿主应经 InjectionSender::requeue_* 放回 —— 已消费即丢失会违反 I3 精神。
+    pub requeued_steering: Vec<AgentMessage>,
+    pub requeued_follow_up: Vec<AgentMessage>,
 }
 
 /// 单个工具调用的结算结果(03 文档 §10.4):批结果 Vec 长度恒等于 toolCall 数。
@@ -177,8 +342,144 @@ struct ToolBatch {
     terminate: bool,
 }
 
-/// 主循环。签名即接缝:快照进(`AgentContext`)、事件出(`Subscriber`)、
-/// 无可变全局状态(09 A4)。
+/// 状态机的全部可变状态(03 §10.3:状态只有 LoopState 一份)。
+struct LoopState {
+    hooks: Arc<dyn LoopHooks>,
+    provider: Arc<dyn Provider>,
+    sink: Arc<dyn Subscriber>,
+    cancel: CancellationToken,
+    system: Option<String>,
+    tools: Vec<Arc<dyn Tool>>,
+    stream_options: StreamOptions,
+    limits: TurnLimits,
+    steering_mode: QueueMode,
+
+    model: Model,
+    thinking: Option<ThinkingLevel>,
+    /// 模型可见转录(单一真相,不变量 I1)
+    current: Vec<AgentMessage>,
+    new_messages: Vec<AgentMessage>,
+    last_turn: Option<(AssistantMessage, Vec<AgentMessage>)>,
+
+    /// 流式期间 select! 收到的 steering(注入路径的本地缓冲)
+    deferred_steering: Vec<AgentMessage>,
+    /// 首轮一次性载荷(prompts;与批量通道分开,不受 QueueMode 影响)
+    initial_prompts: Vec<AgentMessage>,
+    /// agent 本应停止时整流出的 follow-up(注入前暂存)
+    follow_up_batch: Vec<AgentMessage>,
+    receiver: InjectionReceiver,
+
+    /// 当前 turn 的活动 assistant 消息(Streaming → ExecutingTools → Settling 载荷)
+    active_message: Option<AssistantMessage>,
+    tool_batch: Option<ToolBatch>,
+
+    first_turn: bool,
+    turn_count: u32,
+    tool_call_count: u32,
+    total_tokens: u64,
+    truncation_turns: u32,
+}
+
+impl LoopState {
+    fn budget_stop(&self) -> Option<RunStop> {
+        if self.limits.max_turns.is_some_and(|max| self.turn_count >= max) {
+            return Some(RunStop::BudgetExhausted(BudgetKind::MaxTurns));
+        }
+        if self.limits.max_tool_calls.is_some_and(|max| self.tool_call_count >= max) {
+            return Some(RunStop::BudgetExhausted(BudgetKind::MaxToolCalls));
+        }
+        if self.limits.max_total_tokens.is_some_and(|max| self.total_tokens >= max) {
+            return Some(RunStop::BudgetExhausted(BudgetKind::MaxTotalTokens));
+        }
+        if self
+            .limits
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return Some(RunStop::BudgetExhausted(BudgetKind::Deadline));
+        }
+        if self.truncation_turns > self.limits.max_truncation_retries {
+            return Some(RunStop::BudgetExhausted(BudgetKind::TruncationRetries));
+        }
+        None
+    }
+
+    /// 注入一条消息(message_start/message_end 事件 + 转录 + new_messages)。
+    async fn inject(&mut self, message: AgentMessage) {
+        emit_message_events(&self.sink, &message).await;
+        self.current.push(message.clone());
+        self.new_messages.push(message);
+    }
+
+    /// turn 边界取 steering 批(one-at-a-time 只取一条;通道余量原地保留,
+    /// 硬退出时不会丢失)。
+    async fn take_steering_batch(&mut self) -> Vec<AgentMessage> {
+        let mut batch = Vec::new();
+        match self.steering_mode {
+            QueueMode::All => {
+                self.receiver.poll_steering(&mut self.deferred_steering);
+                batch.append(&mut self.deferred_steering);
+            }
+            QueueMode::OneAtATime => {
+                if self.deferred_steering.is_empty() {
+                    if let Some(message) = self.receiver.take_one_steering() {
+                        batch.push(message);
+                    }
+                } else {
+                    batch.push(self.deferred_steering.remove(0));
+                }
+            }
+        }
+        for _ in &batch {
+            self.receiver.dec_steering();
+        }
+        batch
+    }
+
+    /// turn 边界收集注入内容:prepared + wake 载荷 + follow-up 批 + steering 批。
+    /// follow-up 消费计数在本函数递减(注入时点;requeue 路径不重复计)。
+    async fn collect_injectables(
+        &mut self,
+        wake: Option<Box<Wake>>,
+        prepared: Vec<AgentMessage>,
+    ) -> Vec<AgentMessage> {
+        let mut injectables = prepared;
+        match wake.map(|boxed| *boxed) {
+            Some(Wake::Steering(message)) => {
+                self.receiver.dec_steering();
+                injectables.push(message);
+            }
+            Some(Wake::FollowUp(message)) => {
+                self.receiver.dec_follow_up();
+                injectables.push(message);
+            }
+            Some(Wake::ExplicitContinue) | None => {}
+        }
+        // follow-up 批量模式:All 整批,OneAtATime 每轮一条(余量原地保留)
+        match self.steering_mode {
+            QueueMode::All => {
+                for _ in 0..self.follow_up_batch.len() {
+                    self.receiver.dec_follow_up();
+                }
+                injectables.append(&mut self.follow_up_batch);
+            }
+            QueueMode::OneAtATime => {
+                if !self.follow_up_batch.is_empty() {
+                    let message = self.follow_up_batch.remove(0);
+                    self.receiver.dec_follow_up();
+                    injectables.push(message);
+                }
+            }
+        }
+        let steering = self.take_steering_batch().await;
+        injectables.extend(steering);
+        injectables
+    }
+}
+
+/// 主循环入口(调度器:状态只有一份,Phase 驱动 step 转移;快照进、事件出,
+/// 无可变全局状态,09 A4)。
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_loop(
     prompts: Vec<AgentMessage>,
     context: AgentContext,
@@ -187,248 +488,301 @@ pub async fn run_agent_loop(
     provider: Arc<dyn Provider>,
     sink: Arc<dyn Subscriber>,
     cancel: CancellationToken,
-) -> LoopOutput {
-    let tools = context.tools;
-    let system = context.system;
-    let mut current: Vec<AgentMessage> = context.messages;
-    let mut model = config.model;
-    let mut thinking = config.thinking;
-    let stream_options = config.stream_options;
-    let limits = config.limits;
-
-    let mut new_messages: Vec<AgentMessage> = Vec::new();
-    let mut last_turn: Option<(AssistantMessage, Vec<AgentMessage>)> = None;
-    let mut explicit_continuation = false;
-    // 循环开始即轮询一次 steering(用户可能已在等待期输入,03 §3)
-    let mut pending: Vec<AgentMessage> = hooks.steering_messages().await;
-    let mut turn_count: u32 = 0;
-    let mut tool_call_count: u32 = 0;
-    let mut total_tokens: u64 = 0;
-    let mut truncation_turns: u32 = 0;
+    receiver: InjectionReceiver,
+) -> (LoopOutput, InjectionReceiver) {
+    let mut state = LoopState {
+        hooks,
+        provider,
+        sink: sink.clone(),
+        cancel,
+        system: context.system,
+        tools: context.tools,
+        stream_options: config.stream_options.clone(),
+        limits: config.limits,
+        steering_mode: config.steering_mode,
+        model: config.model,
+        thinking: config.thinking,
+        current: context.messages,
+        new_messages: Vec::new(),
+        last_turn: None,
+        deferred_steering: Vec::new(),
+        initial_prompts: prompts,
+        follow_up_batch: Vec::new(),
+        receiver,
+        active_message: None,
+        tool_batch: None,
+        first_turn: true,
+        turn_count: 0,
+        tool_call_count: 0,
+        total_tokens: 0,
+        truncation_turns: 0,
+    };
 
     sink.on_event(&AgentEvent::AgentStart).await;
 
-    // 首个 turn:turn_start → 注入 prompts + 初始 steering(注入前声明工具集增量)
-    sink.on_event(&AgentEvent::TurnStart).await;
-    let initial: Vec<AgentMessage> = prompts.into_iter().chain(pending.drain(..)).collect();
-    for message in declare_tool_changes(&current, &tools, initial) {
-        emit_message_events(&sink, &message).await;
-        current.push(message.clone());
-        new_messages.push(message);
-    }
-
-    let budget_stop =
-        |turn_count: u32, tool_call_count: u32, total_tokens: u64, truncation_turns: u32| -> Option<RunStop> {
-            if limits.max_turns.is_some_and(|max| turn_count >= max) {
-                return Some(RunStop::BudgetExhausted(BudgetKind::MaxTurns));
-            }
-            if limits.max_tool_calls.is_some_and(|max| tool_call_count >= max) {
-                return Some(RunStop::BudgetExhausted(BudgetKind::MaxToolCalls));
-            }
-            if limits.max_total_tokens.is_some_and(|max| total_tokens >= max) {
-                return Some(RunStop::BudgetExhausted(BudgetKind::MaxTotalTokens));
-            }
-            if limits.deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-                return Some(RunStop::BudgetExhausted(BudgetKind::Deadline));
-            }
-            if truncation_turns > limits.max_truncation_retries {
-                return Some(RunStop::BudgetExhausted(BudgetKind::TruncationRetries));
-            }
-            None
+    // 初始 prompts 作为首轮注入载荷(独立于批量通道,不受 QueueMode 影响)
+    let mut phase = Phase::AwaitingRequest { wake: None };
+    let stop = loop {
+        phase = match phase {
+            Phase::AwaitingRequest { wake } => step_awaiting_request(&mut state, wake).await,
+            Phase::Streaming => step_streaming(&mut state).await,
+            Phase::ExecutingTools => step_executing_tools(&mut state).await,
+            Phase::Settling => step_settling(&mut state).await,
+            Phase::Done(stop) => break stop,
         };
-
-    let stop = 'outer: loop {
-        let mut has_more_tool_calls = true;
-
-        while has_more_tool_calls || !pending.is_empty() {
-            // 预算检查在 drain/prepareNextTurn/TurnStart 之前:耗尽时不丢已入队的
-            // 消息、不发无法配对的 TurnStart(03 文档护栏语义)
-            if let Some(budget) = budget_stop(turn_count, tool_call_count, total_tokens, truncation_turns) {
-                break 'outer budget;
-            }
-            let mut prepared_messages: Vec<AgentMessage> = Vec::new();
-            if let Some((message, tool_results)) = last_turn.clone() {
-                // prepareNextTurn:可追加消息、切换 model/thinking(03 §3 ②)
-                let update = hooks
-                    .prepare_next_turn(TurnCtx {
-                        message: Box::new(message),
-                        tool_results: tool_results.clone(),
-                        new_messages: new_messages.clone(),
-                    })
-                    .await;
-                if let Some(TurnUpdate { messages, model: m, thinking_level: t }) = update {
-                    if let Some(messages) = messages {
-                        prepared_messages = messages;
-                    }
-                    if let Some(m) = m {
-                        model = m;
-                    }
-                    if let Some(t) = t {
-                        thinking = t;
-                    }
-                }
-                // 补轮询仅当前次为空:one-at-a-time 防双注入(03 §3,pi :203-205)
-                if pending.is_empty() {
-                    pending = hooks.steering_messages().await;
-                }
-                sink.on_event(&AgentEvent::TurnStart).await;
-            }
-
-            // ① 注入待处理消息(prepared + pending),注入前声明工具集增量
-            let mut injectables = prepared_messages;
-            injectables.append(&mut pending);
-            for message in declare_tool_changes(&current, &tools, injectables) {
-                emit_message_events(&sink, &message).await;
-                current.push(message.clone());
-                new_messages.push(message);
-            }
-            pending.clear();
-
-            // ② 每次请求前(含第一次)的 prepareRequest
-            if let Some(update) = hooks.prepare_request(&model, thinking).await {
-                if let Some(m) = update.model {
-                    model = m;
-                }
-                if let Some(t) = update.thinking_level {
-                    thinking = t;
-                }
-            }
-
-            // ③ 流式请求 LLM(partial buffer 于循环局部,done 后一次性 push,09 B5.2)
-            let message = stream_assistant_response(
-                &current,
-                system.as_deref(),
-                &tools,
-                &hooks,
-                &model,
-                thinking,
-                &stream_options,
-                &provider,
-                &sink,
-                &cancel,
-            )
-            .await;
-            current.push(AgentMessage::Assistant(Box::new(message.clone())));
-            new_messages.push(AgentMessage::Assistant(Box::new(message.clone())));
-            total_tokens = total_tokens.saturating_add(message.usage.total_tokens);
-            turn_count += 1;
-            if message.stop_reason == StopReason::Length && message.has_tool_calls() {
-                truncation_turns += 1;
-            }
-
-            // ④ 硬退出:error / aborted —— 不执行工具、不轮询任何队列(不变量 I3);
-            // finishTurn 仍会调用,但返回的决策被忽略(03 §3 ④,pi :245-255)
-            if matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
-                let _ignored = hooks
-                    .finish_turn(TurnCtx {
-                        message: Box::new(message.clone()),
-                        tool_results: Vec::new(),
-                        new_messages: new_messages.clone(),
-                    })
-                    .await;
-                sink.on_event(&AgentEvent::TurnEnd {
-                    message: Box::new(message.clone()),
-                    tool_results: Vec::new(),
-                })
-                .await;
-                break 'outer match message.stop_reason {
-                    StopReason::Aborted => RunStop::Aborted,
-                    _ => RunStop::Error(
-                        message.error_message.clone().unwrap_or_else(|| "provider error".into()),
-                    ),
-                };
-            }
-
-            // ⑤ 工具调用
-            let calls: Vec<ToolCall> = message
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolCall { id, name, arguments } => Some(ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        args: arguments.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect();
-            let mut tool_results: Vec<AgentMessage> = Vec::new();
-            has_more_tool_calls = false;
-            if !calls.is_empty() {
-                tool_call_count += calls.len() as u32;
-                let batch = if message.stop_reason == StopReason::Length {
-                    // 截断防御:全部拒执行,terminate=false 让模型重发(不变量 I5)
-                    fail_tool_calls_from_truncated(&calls, &sink, &mut current, &mut new_messages).await
-                } else {
-                    execute_tool_calls(&calls, &tools, &hooks, &sink, &cancel, &mut current, &mut new_messages)
-                        .await
-                };
-                tool_results = batch.messages;
-                has_more_tool_calls = !batch.terminate;
-            }
-
-            // ⑤.5 工具批执行期间 abort:结果已配对结算,run 以 aborted 硬退出
-            // (不轮询任何队列,不变量 I3)
-            if cancel.is_cancelled() {
-                sink.on_event(&AgentEvent::TurnEnd { message: Box::new(message.clone()), tool_results })
-                    .await;
-                break 'outer RunStop::Aborted;
-            }
-
-            // ⑥ turn 收尾:finishTurn → turn_end → 预算检查 → 决策 → steering 轮询
-            last_turn = Some((message.clone(), tool_results.clone()));
-            let decision = hooks
-                .finish_turn(TurnCtx {
-                    message: Box::new(message.clone()),
-                    tool_results: tool_results.clone(),
-                    new_messages: new_messages.clone(),
-                })
-                .await;
-            sink.on_event(&AgentEvent::TurnEnd { message: Box::new(message.clone()), tool_results })
-                .await;
-
-            if let Some(budget) = budget_stop(turn_count, tool_call_count, total_tokens, truncation_turns) {
-                break 'outer budget;
-            }
-            if decision == Some(TurnDecision::End) {
-                break 'outer RunStop::EndTurn;
-            }
-            explicit_continuation = decision == Some(TurnDecision::Continue);
-            pending = hooks.steering_messages().await;
-            if has_more_tool_calls || !pending.is_empty() {
-                // 有自然请求时,"continue" 配额被自然消耗,不再额外发一次
-                explicit_continuation = false;
-            }
-        }
-
-        // —— 内层退出:agent 本应停止 ——
-        let follow_ups = hooks.follow_up_messages().await;
-        if !follow_ups.is_empty() {
-            explicit_continuation = false;
-            pending = follow_ups;
-            continue 'outer;
-        }
-        if explicit_continuation {
-            // 无自然请求时,用"仅上下文"的一轮兑现 continue
-            explicit_continuation = false;
-            continue 'outer;
-        }
-        break 'outer RunStop::EndTurn;
     };
 
     // agent_end 是 run 的最后事件(此前全部 listener 已串行完成,结算语义成立)
-    sink.on_event(&AgentEvent::AgentEnd { messages: new_messages.clone() }).await;
-    LoopOutput { messages: new_messages, stop }
+    sink.on_event(&AgentEvent::AgentEnd { messages: state.new_messages.clone() }).await;
+    // 硬退出/预算路径:已取出未消费的注入消息交还宿主重新入队(不静默丢失)
+    let requeued_steering = std::mem::take(&mut state.deferred_steering);
+    let requeued_follow_up = std::mem::take(&mut state.follow_up_batch);
+    (
+        LoopOutput { messages: state.new_messages, stop, requeued_steering, requeued_follow_up },
+        state.receiver,
+    )
+}
+
+/// AwaitingRequest:预算检查 → prepareNextTurn → TurnStart → 注入 → prepareRequest。
+async fn step_awaiting_request(state: &mut LoopState, wake: Option<Box<Wake>>) -> Phase {
+    // 预算检查在 drain/TurnStart 之前:耗尽时不丢已入队的消息、不发无法配对的
+    // TurnStart(03 文档护栏语义)
+    if let Some(budget) = state.budget_stop() {
+        return Phase::Done(budget);
+    }
+
+    let mut prepared: Vec<AgentMessage> = Vec::new();
+    if state.first_turn {
+        state.first_turn = false;
+    } else if let Some((message, tool_results)) = state.last_turn.clone() {
+        // prepareNextTurn:可追加消息、切换 model/thinking(03 §3 ②)
+        let update = state
+            .hooks
+            .prepare_next_turn(TurnCtx {
+                message: Box::new(message),
+                tool_results: tool_results.clone(),
+                new_messages: state.new_messages.clone(),
+            })
+            .await;
+        if let Some(TurnUpdate { messages, model: m, thinking_level: t }) = update {
+            if let Some(messages) = messages {
+                prepared = messages;
+            }
+            if let Some(m) = m {
+                state.model = m;
+            }
+            if let Some(t) = t {
+                state.thinking = t;
+            }
+        }
+    }
+
+    state.sink.on_event(&AgentEvent::TurnStart).await;
+
+    // 注入(初始 prompts + prepared + wake 载荷 + follow-up/steering 批),
+    // 注入前声明工具集增量
+    let mut injectables = std::mem::take(&mut state.initial_prompts);
+    injectables.extend(state.collect_injectables(wake, prepared).await);
+    for message in declare_tool_changes(&state.current, &state.tools, injectables) {
+        state.inject(message).await;
+    }
+
+    // prepareRequest(每次请求前,含第一次)
+    if let Some(update) = state.hooks.prepare_request(&state.model, state.thinking).await {
+        if let Some(m) = update.model {
+            state.model = m;
+        }
+        if let Some(t) = update.thinking_level {
+            state.thinking = t;
+        }
+    }
+
+    Phase::Streaming
+}
+
+/// Streaming:流式请求 + select! 接收 steering;终态后进入工具/硬退出决策。
+async fn step_streaming(state: &mut LoopState) -> Phase {
+    let message = stream_assistant_response(
+        &state.current,
+        state.system.as_deref(),
+        &state.tools,
+        &state.hooks,
+        &state.model,
+        state.thinking,
+        &state.stream_options,
+        &state.provider,
+        &state.sink,
+        &state.cancel,
+        &mut state.receiver,
+        &mut state.deferred_steering,
+    )
+    .await;
+    state.total_tokens = state.total_tokens.saturating_add(message.usage.total_tokens);
+    state.turn_count += 1;
+    if message.stop_reason == StopReason::Length && message.has_tool_calls() {
+        state.truncation_turns += 1;
+    }
+
+    // 硬退出:error / aborted —— 不执行工具、不碰任何注入通道(不变量 I3);
+    // finishTurn 仍会调用,但返回的决策被忽略(03 §3 ④)
+    if matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
+        let _ignored = state
+            .hooks
+            .finish_turn(TurnCtx {
+                message: Box::new(message.clone()),
+                tool_results: Vec::new(),
+                new_messages: state.new_messages.clone(),
+            })
+            .await;
+        state
+            .sink
+            .on_event(&AgentEvent::TurnEnd {
+                message: Box::new(message.clone()),
+                tool_results: Vec::new(),
+            })
+            .await;
+        state.current.push(AgentMessage::Assistant(Box::new(message.clone())));
+        state.new_messages.push(AgentMessage::Assistant(Box::new(message.clone())));
+        return Phase::Done(match message.stop_reason {
+            StopReason::Aborted => RunStop::Aborted,
+            _ => RunStop::Error(
+                message.error_message.clone().unwrap_or_else(|| "provider error".into()),
+            ),
+        });
+    }
+
+    state.current.push(AgentMessage::Assistant(Box::new(message.clone())));
+    state.new_messages.push(AgentMessage::Assistant(Box::new(message.clone())));
+    state.active_message = Some(message);
+    Phase::ExecutingTools
+}
+
+/// ExecutingTools:截断防御或工具批执行;批执行中 abort → aborted 硬退出。
+async fn step_executing_tools(state: &mut LoopState) -> Phase {
+    let message = state.active_message.clone().expect("active message set by Streaming");
+    let calls: Vec<ToolCall> = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolCall { id, name, arguments } => Some(ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                args: arguments.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+
+    // 无工具调用:terminate=true 使 has_more_tool_calls=false,内层自然停止
+    // (pi :266-268 的 hasMoreToolCalls=false 语义)
+    let batch = if calls.is_empty() {
+        ToolBatch { messages: Vec::new(), terminate: true }
+    } else {
+        state.tool_call_count += calls.len() as u32;
+        if message.stop_reason == StopReason::Length {
+            // 截断防御:全部拒执行,terminate=false 让模型重发(不变量 I5)
+            fail_tool_calls_from_truncated(
+                &calls,
+                &state.sink,
+                &mut state.current,
+                &mut state.new_messages,
+            )
+            .await
+        } else {
+            execute_tool_calls(
+                &calls,
+                &state.tools,
+                &state.hooks,
+                &state.sink,
+                &state.cancel,
+                &mut state.current,
+                &mut state.new_messages,
+            )
+            .await
+        }
+    };
+
+    // 工具批执行期间 abort:结果已配对结算,run 以 aborted 硬退出(不碰队列,I3)
+    if state.cancel.is_cancelled() {
+        state
+            .sink
+            .on_event(&AgentEvent::TurnEnd {
+                message: Box::new(message.clone()),
+                tool_results: batch.messages,
+            })
+            .await;
+        return Phase::Done(RunStop::Aborted);
+    }
+
+    state.tool_batch = Some(batch);
+    Phase::Settling
+}
+
+/// Settling:finishTurn → turn_end → 预算/决策 → 下一个 Phase(wake 显式化)。
+async fn step_settling(state: &mut LoopState) -> Phase {
+    let message = state.active_message.clone().expect("active message set by Streaming");
+    let batch = state.tool_batch.take().expect("tool batch set by ExecutingTools");
+    let has_more_tool_calls = !batch.terminate;
+
+    state.last_turn = Some((message.clone(), batch.messages.clone()));
+    let decision = state
+        .hooks
+        .finish_turn(TurnCtx {
+            message: Box::new(message.clone()),
+            tool_results: batch.messages.clone(),
+            new_messages: state.new_messages.clone(),
+        })
+        .await;
+    state
+        .sink
+        .on_event(&AgentEvent::TurnEnd {
+            message: Box::new(message.clone()),
+            tool_results: batch.messages,
+        })
+        .await;
+
+    if let Some(budget) = state.budget_stop() {
+        return Phase::Done(budget);
+    }
+    if decision == Some(TurnDecision::End) {
+        return Phase::Done(RunStop::EndTurn);
+    }
+
+    // 自然请求:工具批继续,或 steering 已在途 —— continue 配额被自然消耗
+    state.receiver.poll_steering(&mut state.deferred_steering);
+    let natural = has_more_tool_calls
+        || !state.deferred_steering.is_empty()
+        || !state.follow_up_batch.is_empty();
+    if natural {
+        return Phase::AwaitingRequest { wake: None };
+    }
+
+    // agent 本应停止:follow-up 优先于显式 continue(pi :301);
+    // 首条经 wake 注入,余量按 QueueMode 逐轮消费(collect_injectables)
+    let follow_ups = state.receiver.drain_follow_up();
+    if !follow_ups.is_empty() {
+        state.follow_up_batch = follow_ups;
+        let first = state.follow_up_batch.remove(0);
+        return Phase::AwaitingRequest { wake: Some(Box::new(Wake::FollowUp(first))) };
+    }
+    if decision == Some(TurnDecision::Continue) {
+        // 无自然请求时,用"仅上下文"的一轮兑现 continue(显式 wake,非补丁)
+        return Phase::AwaitingRequest { wake: Some(Box::new(Wake::ExplicitContinue)) };
+    }
+    Phase::Done(RunStop::EndTurn)
 }
 
 async fn emit_message_events(sink: &Arc<dyn Subscriber>, message: &AgentMessage) {
-    sink.on_event(&AgentEvent::MessageStart { message: Box::new(message.clone()) }).await;
+    sink.on_event(&AgentEvent::MessageStart { message: Box::new(message.clone()), partial: None }).await;
     sink.on_event(&AgentEvent::MessageEnd { message: Box::new(message.clone()) }).await;
 }
 
 /// 流式处理(03 文档 §4):折叠转录 → 请求 → 事件转发 → 终态消息。
-/// partial 不占转录末位(09 B5.2 决策):文本增量经 `MessageDelta` 转发,
-/// 终态后 `MessageUpdate`(快照)+ `MessageEnd`。
+/// partial 不占转录末位(09 B5.2 决策):增量经类型化 `MessageDelta` 转发
+/// (T2:thinking/toolCall 参数逐块可见),同时原地更新 `SharedPartial`
+/// 快照读口供 UI 随帧取用;终态后 `MessageUpdate`(快照)+ `MessageEnd`。
+/// 流式期间 `select!` 接收 steering(§10.5 推送式注入):收到即缓存到
+/// `deferred`,当前 turn 结束后注入。
 #[allow(clippy::too_many_arguments)]
 async fn stream_assistant_response(
     current: &[AgentMessage],
@@ -441,6 +795,8 @@ async fn stream_assistant_response(
     provider: &Arc<dyn Provider>,
     sink: &Arc<dyn Subscriber>,
     cancel: &CancellationToken,
+    receiver: &mut InjectionReceiver,
+    deferred: &mut Vec<AgentMessage>,
 ) -> AssistantMessage {
     let transformed = hooks.transform_context(current.to_vec()).await;
     let llm_messages = hooks.convert_to_llm(&transformed);
@@ -463,25 +819,79 @@ async fn stream_assistant_response(
 
     let stream = provider.stream(model, transcript, opts).await;
     let mut stream = std::pin::pin!(stream);
+    let shared_partial: SharedPartial = Arc::new(RwLock::new(AssistantMessage::pending(model)));
+    let mut toolcall_json: HashMap<usize, String> = HashMap::new();
     let mut started = false;
     let mut final_message: Option<AssistantMessage> = None;
+    let mut steering_closed = false;
 
-    while let Some(event) = stream.next().await {
+    loop {
+        // 推送式注入:流式期间收到 steering 即缓存(03 §10.5 select! 草图)
+        let event = if steering_closed {
+            stream.next().await
+        } else {
+            tokio::select! {
+                event = stream.next() => event,
+                message = receiver.recv_steering() => {
+                    match message {
+                        Some(message) => {
+                            deferred.push(message);
+                            continue;
+                        }
+                        None => {
+                            // 通道关闭且为空:退出 select(防忙等)
+                            steering_closed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+        };
+        let Some(event) = event else { break };
         match event {
             AssistantMessageEvent::Start => {
                 started = true;
                 sink.on_event(&AgentEvent::MessageStart {
                     message: Box::new(AgentMessage::Assistant(Box::new(AssistantMessage::pending(model)))),
+                    partial: Some(shared_partial.clone()),
                 })
                 .await;
             }
-            AssistantMessageEvent::TextDelta { delta, .. } => {
-                sink.on_event(&AgentEvent::MessageDelta { delta }).await;
+            AssistantMessageEvent::TextDelta { ref delta, .. } => {
+                {
+                    let mut partial = shared_partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    apply_event_to_partial(&mut partial, &mut toolcall_json, &event);
+                }
+                sink.on_event(&AgentEvent::MessageDelta {
+                    delta: MessageDeltaPayload::Text { delta: delta.clone() },
+                })
+                .await;
+            }
+            AssistantMessageEvent::ThinkingDelta { ref delta, .. } => {
+                {
+                    let mut partial = shared_partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    apply_event_to_partial(&mut partial, &mut toolcall_json, &event);
+                }
+                sink.on_event(&AgentEvent::MessageDelta {
+                    delta: MessageDeltaPayload::Thinking { delta: delta.clone() },
+                })
+                .await;
+            }
+            AssistantMessageEvent::ToolCallDelta { content_index, ref delta } => {
+                {
+                    let mut partial = shared_partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    apply_event_to_partial(&mut partial, &mut toolcall_json, &event);
+                }
+                sink.on_event(&AgentEvent::MessageDelta {
+                    delta: MessageDeltaPayload::ToolCallArgs { content_index, delta: delta.clone() },
+                })
+                .await;
             }
             AssistantMessageEvent::Done(message) | AssistantMessageEvent::Error(message) => {
                 if !started {
                     sink.on_event(&AgentEvent::MessageStart {
                         message: Box::new(AgentMessage::Assistant(Box::new(AssistantMessage::pending(model)))),
+                        partial: Some(shared_partial.clone()),
                     })
                     .await;
                 }
@@ -491,17 +901,18 @@ async fn stream_assistant_response(
                 })
                 .await;
                 final_message = Some(*message);
+                break;
             }
-            // thinking/toolcall 的 start/end 不逐个转发:thinking/toolcall 快照
-            // 随终态 MessageUpdate 一次性可见(M5 TUI 需要逐块增量时再扩展事件)
+            // *_start/*_end:权威内容随终态快照;这里仅更新 partial 读口
             AssistantMessageEvent::TextStart { .. }
             | AssistantMessageEvent::TextEnd { .. }
             | AssistantMessageEvent::ThinkingStart { .. }
-            | AssistantMessageEvent::ThinkingDelta { .. }
             | AssistantMessageEvent::ThinkingEnd { .. }
             | AssistantMessageEvent::ToolCallStart { .. }
-            | AssistantMessageEvent::ToolCallDelta { .. }
-            | AssistantMessageEvent::ToolCallEnd { .. } => {}
+            | AssistantMessageEvent::ToolCallEnd { .. } => {
+                let mut partial = shared_partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                apply_event_to_partial(&mut partial, &mut toolcall_json, &event);
+            }
         }
     }
 
@@ -512,14 +923,96 @@ async fn stream_assistant_response(
             let message = AssistantMessage::error(model, "stream ended without a terminal event", false);
             sink.on_event(&AgentEvent::MessageStart {
                 message: Box::new(AgentMessage::Assistant(Box::new(AssistantMessage::pending(model)))),
+                partial: Some(shared_partial.clone()),
             })
             .await;
+            // 与终态路径事件序一致:update(快照) 先于 end
+            sink.on_event(&AgentEvent::MessageUpdate { message: Box::new(message.clone()) }).await;
             sink.on_event(&AgentEvent::MessageEnd {
                 message: Box::new(AgentMessage::Assistant(Box::new(message.clone()))),
             })
             .await;
             message
         }
+    }
+}
+
+/// 把统一流事件应用到 partial 快照(T2:快照读口的写侧)。
+/// text/thinking 从 `*_start` 空串随 `*_delta` 增长,`*_end` 权威定稿;
+/// toolcall 参数从 `toolcall_delta` 尽力解析(与适配器修复解析同语义,
+/// 这里仅供 UI 预览,终态以 provider 定稿为准)。
+fn apply_event_to_partial(
+    partial: &mut AssistantMessage,
+    toolcall_json: &mut HashMap<usize, String>,
+    event: &AssistantMessageEvent,
+) {
+    match event {
+        AssistantMessageEvent::TextStart { content_index } => {
+            ensure_block(partial, *content_index, || ContentBlock::text(String::new()));
+        }
+        AssistantMessageEvent::TextDelta { content_index, delta } => {
+            if let Some(ContentBlock::Text { text, .. }) = partial.content.get_mut(*content_index) {
+                text.push_str(delta);
+            }
+        }
+        AssistantMessageEvent::TextEnd { content_index, content } => {
+            if let Some(ContentBlock::Text { text, .. }) = partial.content.get_mut(*content_index) {
+                *text = content.clone();
+            }
+        }
+        AssistantMessageEvent::ThinkingStart { content_index } => {
+            ensure_block(partial, *content_index, || ContentBlock::Thinking {
+                thinking: String::new(),
+                thinking_signature: None,
+                redacted: None,
+            });
+        }
+        AssistantMessageEvent::ThinkingDelta { content_index, delta } => {
+            if let Some(ContentBlock::Thinking { thinking, .. }) = partial.content.get_mut(*content_index) {
+                thinking.push_str(delta);
+            }
+        }
+        AssistantMessageEvent::ThinkingEnd { content_index, content } => {
+            if let Some(ContentBlock::Thinking { thinking, .. }) = partial.content.get_mut(*content_index) {
+                *thinking = content.clone();
+            }
+        }
+        AssistantMessageEvent::ToolCallStart { content_index } => {
+            ensure_block(partial, *content_index, || ContentBlock::ToolCall {
+                id: String::new(),
+                name: String::new(),
+                arguments: serde_json::json!({}),
+            });
+            toolcall_json.entry(*content_index).or_default().clear();
+        }
+        AssistantMessageEvent::ToolCallDelta { content_index, delta } => {
+            let raw = toolcall_json.entry(*content_index).or_default();
+            raw.push_str(delta);
+            if let Some(ContentBlock::ToolCall { arguments, .. }) = partial.content.get_mut(*content_index) {
+                *arguments = serde_json::from_str(raw)
+                    .unwrap_or_else(|_| serde_json::Value::String(raw.clone()));
+            }
+        }
+        AssistantMessageEvent::ToolCallEnd { content_index, tool_call } => {
+            if partial.content.len() > *content_index {
+                partial.content[*content_index] = tool_call.clone();
+            } else {
+                partial.content.push(tool_call.clone());
+            }
+            toolcall_json.remove(content_index);
+        }
+        _ => {}
+    }
+}
+
+/// 确保 partial.content[index] 存在(适配器 content_index 稠密;防御性补位)。
+/// 补位块是空 Text;若目标槽位仍是补位空 Text 则替换为新块。
+fn ensure_block(partial: &mut AssistantMessage, index: usize, make: impl FnOnce() -> ContentBlock) {
+    while partial.content.len() <= index {
+        partial.content.push(ContentBlock::text(String::new()));
+    }
+    if partial.content[index] == ContentBlock::text(String::new()) {
+        partial.content[index] = make();
     }
 }
 
@@ -886,46 +1379,20 @@ async fn emit_tool_end_for_outcome(sink: &Arc<dyn Subscriber>, outcome: &ToolOut
     emit_tool_end(sink, call, &output, is_error).await;
 }
 
-/// 参数校验(JSON Schema 子集:type / required / 嵌套 properties)。
-/// 完整 JSON Schema 校验待引入 jsonschema crate 后替换(09 B2)。
+/// 参数校验(T7,11 计划):`jsonschema` crate 完整 JSON Schema 校验,替换原
+/// type/required/嵌套 properties 子集。schema 未声明(Value::Null / boolean true)
+/// 不校验;schema 本身非法(compile 失败)fail-closed 返回 Err。错误语义不变:
+/// Err(String) 由 prepare_call 转错误 ToolOutcome,不 panic、不改 Tool trait。
 pub fn validate_arguments(schema: &serde_json::Value, args: &serde_json::Value) -> Result<(), String> {
-    use serde_json::Value;
-    let Some(schema_obj) = schema.as_object() else {
+    // 工具未声明 schema(或恒真 schema):无约束,不校验(既有测试钉住)
+    if schema.is_null() || schema == &serde_json::Value::Bool(true) {
         return Ok(());
-    };
-    if let Some(expected) = schema_obj.get("type").and_then(Value::as_str) {
-        let ok = match expected {
-            "object" => args.is_object(),
-            "string" => args.is_string(),
-            "number" | "integer" => args.is_number(),
-            "boolean" => args.is_boolean(),
-            "array" => args.is_array(),
-            "null" => args.is_null(),
-            _ => true,
-        };
-        if !ok {
-            return Err(format!("expected {expected}, got {args}"));
-        }
     }
-    if let Some(required) = schema_obj.get("required").and_then(Value::as_array) {
-        for key in required {
-            if let Some(key) = key.as_str() {
-                if args.get(key).map(Value::is_null).unwrap_or(true) {
-                    return Err(format!("missing required argument `{key}`"));
-                }
-            }
-        }
-    }
-    if let Some(properties) = schema_obj.get("properties").and_then(Value::as_object) {
-        if let Some(args_obj) = args.as_object() {
-            for (key, property_schema) in properties {
-                if let Some(value) = args_obj.get(key) {
-                    if !value.is_null() {
-                        validate_arguments(property_schema, value)?;
-                    }
-                }
-            }
-        }
+    let validator = jsonschema::validator_for(schema)
+        .map_err(|error| format!("invalid tool schema: {error}"))?;
+    let mut errors = validator.iter_errors(args);
+    if let Some(first) = errors.next() {
+        return Err(first.to_string());
     }
     Ok(())
 }
@@ -955,5 +1422,62 @@ mod tests {
         assert!(validate_arguments(&schema, &serde_json::json!("boom")).is_err());
         // 无 schema 不校验
         assert!(validate_arguments(&serde_json::Value::Null, &serde_json::json!(1)).is_ok());
+    }
+
+    #[test]
+    fn argument_validation_rejects_enum_range_and_array_items() {
+        // T7:此前子集实现放过的三类非法参数,现在执行前拦截
+        let enum_schema = serde_json::json!({"type": "string", "enum": ["a", "b"]});
+        assert!(validate_arguments(&enum_schema, &serde_json::json!("a")).is_ok());
+        assert!(validate_arguments(&enum_schema, &serde_json::json!("c")).is_err());
+
+        let minimum_schema = serde_json::json!({"type": "integer", "minimum": 1});
+        assert!(validate_arguments(&minimum_schema, &serde_json::json!(1)).is_ok());
+        assert!(validate_arguments(&minimum_schema, &serde_json::json!(0)).is_err());
+
+        let array_schema =
+            serde_json::json!({"type": "array", "items": {"type": "string"}});
+        assert!(validate_arguments(&array_schema, &serde_json::json!(["x"])).is_ok());
+        assert!(validate_arguments(&array_schema, &serde_json::json!(["x", 1])).is_err());
+    }
+
+    #[test]
+    fn invalid_schema_fails_closed() {
+        // T7:schema 本身非法 → Err(fail-closed),由调用方转错误 ToolOutcome
+        let broken = serde_json::json!({"type": "not-a-json-schema-type"});
+        assert!(validate_arguments(&broken, &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn argument_validation_common_tool_schema_shapes() {
+        // T7 坑位:内置 8 工具同形的 schema 形状必须照常通过(jsonschema 兼容性;
+        // 真实 schema 的端到端断言在 rpi-tools 侧,依赖方向不允许反向引用)
+        let schemas: Vec<serde_json::Value> = vec![
+            serde_json::json!({"type": "object", "required": ["command"], "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}}}),
+            serde_json::json!({"type": "object", "required": ["path", "edits"], "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "required": ["oldText", "newText"], "properties": {"oldText": {"type": "string"}, "newText": {"type": "string"}}}}}}),
+            serde_json::json!({"type": "object", "required": ["path", "content"], "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}),
+        ];
+        for schema in &schemas {
+            assert!(validate_arguments(schema, &serde_json::json!({})).is_err(), "缺 required 应拦截: {schema}");
+        }
+        // 合法参数照常通过
+        assert!(validate_arguments(&schemas[0], &serde_json::json!({"command": "ls"})).is_ok());
+        assert!(validate_arguments(&schemas[1], &serde_json::json!({"path": "a", "edits": [{"oldText": "x", "newText": "y"}]})).is_ok());
+        assert!(validate_arguments(&schemas[2], &serde_json::json!({"path": "a", "content": "b"})).is_ok());
+    }
+
+    #[test]
+    fn injection_endpoints_track_depth() {
+        let (sender, mut receiver) = create_injection_endpoints();
+        sender.steer(AgentMessage::user("a"));
+        sender.steer(AgentMessage::user("b"));
+        sender.follow_up(AgentMessage::user("c"));
+        assert_eq!(receiver.depth.steering(), 2);
+        assert_eq!(receiver.depth.follow_up(), 1);
+        let drained = receiver.drain_follow_up();
+        assert_eq!(drained.len(), 1);
+        receiver.clear();
+        assert_eq!(receiver.depth.steering(), 0);
+        assert_eq!(receiver.depth.follow_up(), 0);
     }
 }

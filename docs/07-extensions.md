@@ -198,7 +198,7 @@ async fn dispatch(&self, ev: ExtensionEvent, payload: Value) -> EventOutcome
 - 接缝 #2 `LoopHooks::before_tool_call` 的返回类型 `ToolBlock` 增加 `args: Option<serde_json::Value>` 字段:使 tool_call 事件支持改参(对齐 pi 原地改 `event.input`;字段缺省 None = 不改)。登记于 10 §3,实现时更新全部构造点(默认实现不受影响);
 - 接缝 #5 `ExtensionUi` 增加 `select`/`input` 方法(带默认 no-op 实现,print/json 零改动;interactive 真 UI 随 M5)。
 
-### 8.7 实施步骤(未开始,实施时按序)
+### 8.7 实施步骤(**已于 2026-09-26 全部落地**,下文保留当时的步骤与风险记录;剩余子项见踩坑记录)
 
 1. `ToolBlock.args` 接缝修改 + `ExtensionUi::select/input`;
 2. `rpi-core::extensions` 升目录模块:`event_bus.rs`(ExtensionEvent 枚举 + ExtensionEventBus + ExtensionDiagnostic)、`mcp_host.rs`(连接管理/rpi/register/rpi/event)、`mcp_tool.rs`(McpTool 桥);`create_agent_session` 改逐扩展独立工具缓冲 + init 失败跳过诊断;

@@ -44,7 +44,7 @@ impl Subscriber for Collector {
             AgentEvent::AgentStart => self.record("agent_start".into()),
             AgentEvent::TurnStart => self.record("turn_start".into()),
             AgentEvent::TurnEnd { .. } => self.record("turn_end".into()),
-            AgentEvent::MessageStart { message } => {
+            AgentEvent::MessageStart { message, .. } => {
                 let role = match &**message {
                     AgentMessage::User { .. } => "user",
                     AgentMessage::Assistant(_) => "assistant",
@@ -159,6 +159,19 @@ async fn run_loop_full(
     tools: Vec<Arc<dyn Tool>>,
     hooks: Arc<dyn LoopHooks>,
 ) -> rpi_agent::LoopOutput {
+    let (sender, receiver) = rpi_agent::create_injection_endpoints();
+    let _ = sender;
+    run_loop_full_with(receiver, provider, prompts, tools, hooks).await.0
+}
+
+/// 推送式注入版:接收端随循环进入,返回 (output, receiver) 供队列断言。
+async fn run_loop_full_with(
+    receiver: rpi_agent::InjectionReceiver,
+    provider: Arc<ScriptedProvider>,
+    prompts: Vec<AgentMessage>,
+    tools: Vec<Arc<dyn Tool>>,
+    hooks: Arc<dyn LoopHooks>,
+) -> (rpi_agent::LoopOutput, rpi_agent::InjectionReceiver) {
     let model = model();
     let sink: SharedSubscriber = Arc::new(Collector::default());
     rpi_agent::run_agent_loop(
@@ -169,8 +182,18 @@ async fn run_loop_full(
         provider,
         sink,
         CancellationToken::new(),
+        receiver,
     )
     .await
+}
+
+async fn run_loop_with(
+    receiver: rpi_agent::InjectionReceiver,
+    provider: ScriptedProvider,
+    prompts: Vec<AgentMessage>,
+    tools: Vec<Arc<dyn Tool>>,
+) -> rpi_agent::LoopOutput {
+    run_loop_full_with(receiver, Arc::new(provider), prompts, tools, Arc::new(PassthroughHooks)).await.0
 }
 
 fn text_turn(m: &Model, text: &str) -> ScriptedTurn {
@@ -421,7 +444,7 @@ async fn parallel_dual_ordering_end_events_by_completion_messages_by_source() {
     );
 
     let collector = Arc::new(Collector::default());
-    let output = rpi_agent::run_agent_loop(
+    let (output, _receiver) = rpi_agent::run_agent_loop(
         vec![AgentMessage::user("hi")],
         rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![slow.clone(), fast.clone()] },
         Arc::new(PassthroughHooks),
@@ -429,6 +452,7 @@ async fn parallel_dual_ordering_end_events_by_completion_messages_by_source() {
         Arc::new(provider),
         collector.clone(),
         CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
 
@@ -480,30 +504,6 @@ async fn terminate_batch_ends_run_without_extra_request() {
 // steering / follow-up / 硬退出不碰队列(不变量 I3)
 // ---------------------------------------------------------------------------
 
-struct QueueHooks {
-    steering: Mutex<Vec<AgentMessage>>,
-    follow_up: Mutex<Vec<AgentMessage>>,
-}
-
-impl QueueHooks {
-    fn new() -> Arc<Self> {
-        Arc::new(QueueHooks { steering: Mutex::new(Vec::new()), follow_up: Mutex::new(Vec::new()) })
-    }
-}
-
-#[async_trait]
-impl LoopHooks for QueueHooks {
-    fn convert_to_llm(&self, msgs: &[AgentMessage]) -> Vec<rpi_ai::Message> {
-        PassthroughHooks.convert_to_llm(msgs)
-    }
-    async fn steering_messages(&self) -> Vec<AgentMessage> {
-        std::mem::take(&mut *self.steering.lock().unwrap())
-    }
-    async fn follow_up_messages(&self) -> Vec<AgentMessage> {
-        std::mem::take(&mut *self.follow_up.lock().unwrap())
-    }
-}
-
 #[tokio::test]
 async fn steering_injected_at_turn_boundary_and_follow_up_wakes_stopped_agent() {
     let m = model();
@@ -511,13 +511,12 @@ async fn steering_injected_at_turn_boundary_and_follow_up_wakes_stopped_agent() 
         &m,
         vec![text_turn(&m, "一"), text_turn(&m, "二"), text_turn(&m, "三")],
     );
-    let hooks = QueueHooks::new();
-    // 循环开始前已有 steering:第一轮注入
-    hooks.steering.lock().unwrap().push(AgentMessage::user("先说这个"));
-    // follow-up:agent 本应停止时唤醒
-    hooks.follow_up.lock().unwrap().push(AgentMessage::user("继续"));
+    // 推送式注入(03 §10.5):循环开始前 push steering;follow-up 在停止点整流
+    let (sender, receiver) = rpi_agent::create_injection_endpoints();
+    sender.steer(AgentMessage::user("先说这个"));
+    sender.follow_up(AgentMessage::user("继续"));
 
-    let output = run_loop(provider, Vec::new(), vec![], hooks.clone()).await;
+    let output = run_loop_with(receiver, provider, Vec::new(), vec![]).await;
     assert_eq!(output.stop, rpi_agent::RunStop::EndTurn);
     // 消费了 3 个脚本 turn:初始 + steering 注入轮 + follow-up 唤醒轮
     let user_texts: Vec<&str> = output
@@ -531,21 +530,114 @@ async fn steering_injected_at_turn_boundary_and_follow_up_wakes_stopped_agent() 
     assert_eq!(user_texts, vec!["先说这个", "继续"]);
 }
 
+/// 推送式注入(03 §10.5,T5 验收):流式期间 push 的 steering 在下个 turn
+/// 边界生效 —— 轮询制下这是做不到的。
+#[tokio::test]
+async fn steering_pushed_mid_stream_is_injected_at_turn_boundary() {
+    let m = model();
+    let provider = Arc::new(ScriptedProvider::new(
+        &m,
+        vec![ScriptedTurn::text(&m, "slow first").with_delay(80), text_turn(&m, "second")],
+    ));
+    let (sender, receiver) = rpi_agent::create_injection_endpoints();
+    let sink: SharedSubscriber = Arc::new(Collector::default());
+    let handle = tokio::spawn({
+        let provider = provider.clone();
+        async move {
+            rpi_agent::run_agent_loop(
+                vec![AgentMessage::user("hi")],
+                rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![] },
+                Arc::new(PassthroughHooks),
+                rpi_agent::LoopConfig::new(model()),
+                provider,
+                sink,
+                CancellationToken::new(),
+                receiver,
+            )
+            .await
+            .0
+        }
+    });
+    // turn 1 流式期间(80ms 延迟内)推送 steering
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    sender.steer(AgentMessage::user("插话"));
+    let output = handle.await.unwrap();
+    let user_texts: Vec<&str> = output
+        .messages
+        .iter()
+        .filter_map(|msg| match msg {
+            AgentMessage::User { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_texts, vec!["hi", "插话"], "流式期间的 steering 应在下个 turn 注入");
+    assert_eq!(output.stop, rpi_agent::RunStop::EndTurn);
+}
+
+/// P1-1 回归:流式期间已消费的 steering,在硬退出时经 requeued 交还宿主
+/// (不静默丢失,深度镜像不泄漏)。
+#[tokio::test]
+async fn steering_consumed_mid_stream_is_requeued_on_hard_exit() {
+    let m = model();
+    // turn 1 流式挂住后以 error 终态收尾
+    let provider = Arc::new(ScriptedProvider::new(
+        &m,
+        vec![ScriptedTurn::error(&m, "boom 503").with_delay(80)],
+    ));
+    let (sender, receiver) = rpi_agent::create_injection_endpoints();
+    let sink: SharedSubscriber = Arc::new(Collector::default());
+    let handle = tokio::spawn({
+        let provider = provider.clone();
+        async move {
+            rpi_agent::run_agent_loop(
+                vec![AgentMessage::user("hi")],
+                rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![] },
+                Arc::new(PassthroughHooks),
+                rpi_agent::LoopConfig::new(model()),
+                provider,
+                sink,
+                CancellationToken::new(),
+                receiver,
+            )
+            .await
+        }
+    });
+    // 流式期间 push steering:被 select! 消费进 deferred,随后流 error 硬退出
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    sender.steer(AgentMessage::user("不该丢"));
+    let (output, receiver) = handle.await.unwrap();
+    assert_eq!(output.stop, rpi_agent::RunStop::Error("boom 503".into()));
+    assert_eq!(output.requeued_steering.len(), 1, "已消费未注入的 steering 应交还宿主");
+    assert!(
+        !output.messages.iter().any(|msg| matches!(msg, AgentMessage::User { content, .. } if content == "不该丢")),
+        "该消息不应被注入"
+    );
+    assert_eq!(receiver.depths().0, 1, "深度计数不应泄漏");
+}
+
 #[tokio::test]
 async fn provider_error_hard_exits_without_touching_queues() {
     let m = model();
     let provider = ScriptedProvider::new(&m, vec![ScriptedTurn::error(&m, "boom 503")]);
-    let hooks = QueueHooks::new();
-    hooks.steering.lock().unwrap().push(AgentMessage::user("不该被消费"));
+    // one-at-a-time:初始边界只取一条注入;其余留在通道里(硬退出不消费,I3)
+    let (sender, receiver) = rpi_agent::create_injection_endpoints();
+    sender.steer(AgentMessage::user("不该被消费"));
+    sender.steer(AgentMessage::user("也不该被消费"));
 
-    let output = run_loop_full(Arc::new(provider), vec![AgentMessage::user("hi")], vec![], hooks.clone()).await;
+    let (output, receiver) =
+        run_loop_full_with(receiver, Arc::new(provider), vec![AgentMessage::user("hi")], vec![], Arc::new(PassthroughHooks)).await;
     match &output.stop {
         rpi_agent::RunStop::Error(message) => assert!(message.contains("503")),
         other => panic!("expected error stop, got {other:?}"),
     }
-    // 循环开始处的初始轮询(pi :175)drain 预载 steering 并在首请求前注入;
-    // error 硬退出后不再轮询任何队列(I3)—— 队列不会被再次消费
-    assert_eq!(hooks.steering.lock().unwrap().len(), 0);
+    // error 硬退出后不消费任何注入通道(I3):第二条仍在通道里
+    let (steering_depth, follow_up_depth) = receiver.depths();
+    assert_eq!(steering_depth, 1, "剩余 steering 不应被硬退出消费");
+    assert_eq!(follow_up_depth, 0, "follow-up 不应被碰");
+    assert!(
+        !output.messages.iter().any(|msg| matches!(msg, AgentMessage::User { content, .. } if content == "也不该被消费")),
+        "第二条 steering 不应被注入"
+    );
     assert!(output.messages.iter().any(|msg| matches!(msg, AgentMessage::User { content, .. } if content == "不该被消费")));
     // 错误 assistant 消息已进转录(错误编码进流)
     let last = output.messages.last().expect("messages");
@@ -573,7 +665,7 @@ async fn max_turns_budget_stops_infinite_tool_loop() {
     );
     let config_limits = rpi_agent::TurnLimits { max_turns: Some(3), ..Default::default() };
     let model2 = model();
-    let output = rpi_agent::run_agent_loop(
+    let (output, _receiver) = rpi_agent::run_agent_loop(
         vec![AgentMessage::user("hi")],
         rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![tool] },
         Arc::new(PassthroughHooks),
@@ -581,6 +673,7 @@ async fn max_turns_budget_stops_infinite_tool_loop() {
         Arc::new(provider),
         Arc::new(Collector::default()),
         CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
     assert_eq!(
@@ -617,7 +710,7 @@ async fn tool_changes_declared_into_transcript_on_injection() {
     let provider = ScriptedProvider::new(&m, vec![text_turn(&m, "ok")]);
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(LoopTool("read".into())), Arc::new(LoopTool("bash".into()))];
     let collector = Arc::new(Collector::default());
-    let output = rpi_agent::run_agent_loop(
+    let (output, _receiver) = rpi_agent::run_agent_loop(
         vec![AgentMessage::user("hi")],
         rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: tools.clone() },
         Arc::new(PassthroughHooks),
@@ -625,6 +718,7 @@ async fn tool_changes_declared_into_transcript_on_injection() {
         Arc::new(provider),
         collector.clone(),
         CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
 
@@ -890,6 +984,7 @@ async fn provider_sees_tools_equal_to_context_tools() {
         provider.clone(),
         sink,
         CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
     assert_eq!(*provider.seen.lock().unwrap(), vec![vec!["read".to_string()]]);
@@ -932,7 +1027,7 @@ async fn serial_batch_interleaves_events_and_stays_paired() {
         ],
     );
     let collector = Arc::new(Collector::default());
-    let output = rpi_agent::run_agent_loop(
+    let (output, _receiver) = rpi_agent::run_agent_loop(
         vec![AgentMessage::user("hi")],
         rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![slow.clone(), fast.clone()] },
         Arc::new(SerialHooks),
@@ -940,6 +1035,7 @@ async fn serial_batch_interleaves_events_and_stays_paired() {
         Arc::new(provider),
         collector.clone(),
         CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
 
@@ -993,7 +1089,7 @@ async fn serial_batch_cancel_midway_still_pairs_all_results() {
             ScriptedTurn::error(&m, "不应再请求"),
         ],
     );
-    let output = rpi_agent::run_agent_loop(
+    let (output, _receiver) = rpi_agent::run_agent_loop(
         vec![AgentMessage::user("hi")],
         rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![t1, t2] },
         Arc::new(CancelOnFirstHooks { cancel: cancel.clone() }),
@@ -1001,6 +1097,7 @@ async fn serial_batch_cancel_midway_still_pairs_all_results() {
         Arc::new(provider),
         Arc::new(Collector::default()),
         cancel,
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
     // abort 后 run 终止
@@ -1043,7 +1140,7 @@ async fn tool_panic_becomes_error_result() {
             text_turn(&m, "recovered"),
         ],
     );
-    let output = rpi_agent::run_agent_loop(
+    let (output, _receiver) = rpi_agent::run_agent_loop(
         vec![AgentMessage::user("hi")],
         rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![Arc::new(PanicTool)] },
         Arc::new(PassthroughHooks),
@@ -1051,6 +1148,7 @@ async fn tool_panic_becomes_error_result() {
         Arc::new(provider),
         Arc::new(Collector::default()),
         CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
     let results: Vec<String> = output
@@ -1075,7 +1173,7 @@ async fn max_tool_calls_budget_stops_batch_loops() {
             .collect(),
     );
     let limits = rpi_agent::TurnLimits { max_tool_calls: Some(4), ..Default::default() };
-    let output = rpi_agent::run_agent_loop(
+    let (output, _receiver) = rpi_agent::run_agent_loop(
         vec![AgentMessage::user("hi")],
         rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![tool] },
         Arc::new(PassthroughHooks),
@@ -1083,6 +1181,7 @@ async fn max_tool_calls_budget_stops_batch_loops() {
         Arc::new(provider),
         Arc::new(Collector::default()),
         CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
     assert_eq!(
@@ -1105,7 +1204,7 @@ async fn max_truncation_retries_budget_stops_oscillation() {
             .collect(),
     );
     // 默认 max_truncation_retries=3:第 4 次 length 轮后应停止
-    let output = rpi_agent::run_agent_loop(
+    let (output, _receiver) = rpi_agent::run_agent_loop(
         vec![AgentMessage::user("hi")],
         rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![tool] },
         Arc::new(PassthroughHooks),
@@ -1113,10 +1212,46 @@ async fn max_truncation_retries_budget_stops_oscillation() {
         Arc::new(provider),
         Arc::new(Collector::default()),
         CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
     )
     .await;
     assert_eq!(
         output.stop,
         rpi_agent::RunStop::BudgetExhausted(rpi_agent::BudgetKind::TruncationRetries)
     );
+}
+
+/// T8:wait_idle 经 watch 等待(去 10ms 轮询):流式中阻塞,run 结束后立即返回。
+#[tokio::test]
+async fn wait_idle_blocks_until_run_finishes_without_polling() {
+    let m = model();
+    let provider = Arc::new(ScriptedProvider::new(
+        &m,
+        vec![ScriptedTurn::text(&m, "慢回复").with_delay(100)],
+    ));
+    let agent = create_agent(provider.clone(), Arc::new(PassthroughHooks));
+    agent.set_model(m);
+
+    let run = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.prompt("开始").await }
+    });
+    while !agent.is_streaming() {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    let waiter = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.wait_idle().await }
+    });
+    // 流式中 wait_idle 尚未返回
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!waiter.is_finished(), "流式中 wait_idle 应阻塞");
+
+    run.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("run 结束后 wait_idle 应及时返回")
+        .unwrap();
+    assert!(!agent.is_streaming());
 }

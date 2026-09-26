@@ -7,17 +7,20 @@
 
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use futures::FutureExt;
 use rpi_ai::{Model, Provider, StreamOptions, ThinkingLevel};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::event::{AgentEvent, SharedSubscriber, Subscriber};
+use crate::event::{AgentEvent, SharedPartial, SharedSubscriber, Subscriber};
 use crate::hooks::LoopHooks;
-use crate::loop_::{run_agent_loop, AgentContext, LoopConfig, RunStop, TurnLimits};
+use crate::loop_::{
+    create_injection_endpoints, run_agent_loop, AgentContext, InjectionReceiver, InjectionSender,
+    LoopConfig, RunStop, TurnLimits,
+};
 use crate::message::AgentMessage;
 use crate::tool::Tool;
 
@@ -27,34 +30,6 @@ pub enum QueueMode {
     #[default]
     All,
     OneAtATime,
-}
-
-#[derive(Default)]
-struct Queues {
-    steering: Vec<AgentMessage>,
-    follow_up: Vec<AgentMessage>,
-    steering_mode: QueueMode,
-    follow_up_mode: QueueMode,
-}
-
-impl Queues {
-    fn drain_steering(&mut self) -> Vec<AgentMessage> {
-        match self.steering_mode {
-            QueueMode::All => std::mem::take(&mut self.steering),
-            QueueMode::OneAtATime => self.steering.drain(..1.min(self.steering.len())).collect(),
-        }
-    }
-
-    fn drain_follow_up(&mut self) -> Vec<AgentMessage> {
-        match self.follow_up_mode {
-            QueueMode::All => std::mem::take(&mut self.follow_up),
-            QueueMode::OneAtATime => self.follow_up.drain(..1.min(self.follow_up.len())).collect(),
-        }
-    }
-
-    fn drain_all(&mut self) -> (Vec<AgentMessage>, Vec<AgentMessage>) {
-        (std::mem::take(&mut self.steering), std::mem::take(&mut self.follow_up))
-    }
 }
 
 #[derive(Default)]
@@ -68,6 +43,8 @@ pub struct AgentState {
     pub tools: Vec<Arc<dyn Tool>>,
     /// 流式中的 partial 消息快照(message_end 后清空)
     pub streaming_message: Option<rpi_ai::AssistantMessage>,
+    /// "到目前为止"的 partial 读口(T2):循环原地更新,UI 随帧取用
+    pub streaming_partial: Option<SharedPartial>,
     pub pending_tool_calls: HashSet<String>,
     pub error_message: Option<String>,
 }
@@ -84,23 +61,10 @@ pub enum AgentError {
     Panicked,
 }
 
-/// 队列 drain 与用户 hooks 的绑定(pi 的 createLoopConfig;09 B3:
-/// "steering_messages() 默认实现即 self.steering.drain()")。
+/// 用户 hooks 的透传绑定(pi 的 createLoopConfig;steering/follow-up 走
+/// mpsc 注入通道,不再经钩子)。
 struct AgentHookAdapter {
     inner: Arc<dyn LoopHooks>,
-    queues: Arc<Mutex<Queues>>,
-    /// `continue()` 预载的注入消息(pi 的 skipInitialSteeringPoll 场景)
-    preload: Mutex<Vec<AgentMessage>>,
-}
-
-impl AgentHookAdapter {
-    fn take_preload(&self) -> Vec<AgentMessage> {
-        std::mem::take(&mut *self.preload.lock().unwrap())
-    }
-
-    fn set_preload(&self, messages: Vec<AgentMessage>) {
-        *self.preload.lock().unwrap() = messages;
-    }
 }
 
 #[async_trait]
@@ -136,16 +100,6 @@ impl LoopHooks for AgentHookAdapter {
         self.inner.finish_turn(ctx).await
     }
 
-    async fn steering_messages(&self) -> Vec<AgentMessage> {
-        let mut messages = self.take_preload();
-        messages.extend(self.queues.lock().unwrap().drain_steering());
-        messages
-    }
-
-    async fn follow_up_messages(&self) -> Vec<AgentMessage> {
-        self.queues.lock().unwrap().drain_follow_up()
-    }
-
     async fn before_tool_call(&self, ctx: crate::hooks::ToolCallCtx) -> Option<crate::hooks::ToolBlock> {
         self.inner.before_tool_call(ctx).await
     }
@@ -161,13 +115,24 @@ impl LoopHooks for AgentHookAdapter {
 
 pub struct Agent {
     state: Mutex<AgentState>,
-    queues: Arc<Mutex<Queues>>,
+    /// 注入通道发送端(steer/follow_up 任意时刻可 push;panic 恢复时可整体重建)
+    sender: Mutex<InjectionSender>,
+    /// 深度镜像读口(与 sender/receiver 共享 Arc;run 期间也可读)
+    depth: Arc<crate::loop_::InjectionDepth>,
+    /// 注入通道接收端(run 进行中被移交给循环)
+    receiver: Mutex<Option<InjectionReceiver>>,
+    /// 批量模式(pi :247-248 默认两者都 one-at-a-time),随 LoopConfig 进循环
+    steering_mode: Mutex<QueueMode>,
+    follow_up_mode: Mutex<QueueMode>,
     subscribers: Mutex<Vec<SharedSubscriber>>,
     provider: Arc<dyn Provider>,
     adapter: Arc<AgentHookAdapter>,
     limits: Mutex<TurnLimits>,
     stream_options: Mutex<StreamOptions>,
-    streaming: AtomicBool,
+    /// streaming 标志(T8):watch 化,`wait_idle` 经 receiver 等待、零轮询;
+    /// Sender 加锁串行化"检查-置位"(替代 AtomicBool 的 compare_exchange)
+    streaming: Mutex<watch::Sender<bool>>,
+    streaming_rx: watch::Receiver<bool>,
     cancel: Mutex<CancellationToken>,
     self_weak: Weak<Agent>,
 }
@@ -179,25 +144,24 @@ pub fn create_agent(provider: Arc<dyn Provider>, hooks: Arc<dyn LoopHooks>) -> A
 
 impl Agent {
     fn new(provider: Arc<dyn Provider>, hooks: Arc<dyn LoopHooks>, self_weak: Weak<Agent>) -> Self {
-        let queues = Arc::new(Mutex::new(Queues {
-            steering_mode: QueueMode::OneAtATime,
-            follow_up_mode: QueueMode::OneAtATime,
-            ..Queues::default()
-        }));
-        let adapter = Arc::new(AgentHookAdapter {
-            inner: hooks.clone(),
-            queues: queues.clone(),
-            preload: Mutex::new(Vec::new()),
-        });
+        let (sender, receiver) = create_injection_endpoints();
+        let depth = sender.depth();
+        let adapter = Arc::new(AgentHookAdapter { inner: hooks.clone() });
+        let (streaming, streaming_rx) = watch::channel(false);
         Self {
             state: Mutex::new(AgentState::default()),
-            queues,
+            depth,
+            sender: Mutex::new(sender),
+            receiver: Mutex::new(Some(receiver)),
+            steering_mode: Mutex::new(QueueMode::OneAtATime),
+            follow_up_mode: Mutex::new(QueueMode::OneAtATime),
             subscribers: Mutex::new(Vec::new()),
             provider,
             adapter,
             limits: Mutex::new(TurnLimits::default()),
             stream_options: Mutex::new(StreamOptions::default()),
-            streaming: AtomicBool::new(false),
+            streaming: Mutex::new(streaming),
+            streaming_rx,
             cancel: Mutex::new(CancellationToken::new()),
             self_weak,
         }
@@ -231,11 +195,11 @@ impl Agent {
         *self.stream_options.lock().unwrap() = options;
     }
 
-    /// 队列模式(默认 both one-at-a-time;pi :247-248)
+    /// 队列模式(默认 both one-at-a-time;pi :247-248)。
+    /// steering 模式随 LoopConfig 进循环;follow-up 在停止点整批整流。
     pub fn set_queue_modes(&self, steering: QueueMode, follow_up: QueueMode) {
-        let mut queues = self.queues.lock().unwrap();
-        queues.steering_mode = steering;
-        queues.follow_up_mode = follow_up;
+        *self.steering_mode.lock().unwrap() = steering;
+        *self.follow_up_mode.lock().unwrap() = follow_up;
     }
 
     /// 状态快照仅供 UI/装配读取;订阅者应消费事件而非共享引用(09 B2)
@@ -248,7 +212,7 @@ impl Agent {
             tool_count: state.tools.len(),
             pending_tool_calls: state.pending_tool_calls.len(),
             error_message: state.error_message.clone(),
-            is_streaming: self.streaming.load(Ordering::SeqCst),
+            is_streaming: *self.streaming.lock().unwrap().borrow(),
         }
     }
 
@@ -279,30 +243,30 @@ impl Agent {
         state.messages.drain(start..len.saturating_sub(keep_last));
     }
 
+    /// steer:推送进 mpsc 注入通道(03 §10.5;run 期间也可调用,循环在
+    /// 流式期间 select! 接收)。
     pub fn steer(&self, msg: AgentMessage) {
-        self.queues.lock().unwrap().steering.push(msg);
+        self.sender.lock().unwrap().steer(msg);
     }
 
+    /// followUp:推送进 mpsc 注入通道(agent 本应停止时整流)。
     pub fn follow_up(&self, msg: AgentMessage) {
-        self.queues.lock().unwrap().follow_up.push(msg);
+        self.sender.lock().unwrap().follow_up(msg);
     }
 
     pub fn has_queued_messages(&self) -> bool {
-        let queues = self.queues.lock().unwrap();
-        !queues.steering.is_empty() || !queues.follow_up.is_empty()
+        self.queue_depths() != (0, 0)
     }
 
-    /// 队列深度(steering 优先展示,pi :330-333 peekQueuedMessages)
+    /// 队列深度(发送递增、循环消费递减的镜像计数;run 期间也可读)
     pub fn queue_depths(&self) -> (usize, usize) {
-        let queues = self.queues.lock().unwrap();
-        (queues.steering.len(), queues.follow_up.len())
+        (self.depth.steering(), self.depth.follow_up())
     }
 
     pub fn clear_all_queues(&self) {
-        let mut queues = self.queues.lock().unwrap();
-        queues.steering.clear();
-        queues.follow_up.clear();
-        self.adapter.set_preload(Vec::new());
+        if let Some(receiver) = &mut *self.receiver.lock().unwrap() {
+            receiver.clear();
+        }
     }
 
     pub fn abort(&self) {
@@ -310,13 +274,18 @@ impl Agent {
     }
 
     pub fn is_streaming(&self) -> bool {
-        self.streaming.load(Ordering::SeqCst)
+        *self.streaming.lock().unwrap().borrow()
     }
 
-    /// 等 run 结束(订阅者在每个事件内串行完成,agent_end 返回时结算已发生)
+    /// 等 run 结束(T8 去轮询):watch 的 `borrow_and_update + changed` 等待,
+    /// 无忙等、无丢失唤醒(04 文档踩坑③)。
     pub async fn wait_idle(&self) {
-        while self.streaming.load(Ordering::SeqCst) {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let mut rx = self.streaming_rx.clone();
+        while *rx.borrow_and_update() {
+            if rx.changed().await.is_err() {
+                // Sender 随 Agent 存活,正常不会走这里;兜底防自旋
+                break;
+            }
         }
     }
 
@@ -333,8 +302,9 @@ impl Agent {
         self.run_with_lifecycle(messages).await
     }
 
-    /// 续跑(pi :384-411):最后一条是 assistant 时先耗 steering 队列、再耗
-    /// follow-up,都为空则报错;否则纯续跑(最后一条 user/toolResult = 重试)。
+    /// 续跑(pi :384-411):最后一条是 assistant 时要求注入通道非空
+    /// (steering/follow-up 由循环在边界/停止点整流);否则纯续跑
+    /// (最后一条 user/toolResult = 重试)。
     pub async fn continue_run(&self) -> Result<RunStop, AgentError> {
         let last_is_assistant = self
             .state
@@ -344,21 +314,10 @@ impl Agent {
             .last()
             .map(|m| matches!(m, AgentMessage::Assistant(_)))
             .unwrap_or(false);
-        if last_is_assistant {
-            let (steering, follow_up) = self.queues.lock().unwrap().drain_all();
-            if steering.is_empty() && follow_up.is_empty() {
-                return Err(AgentError::NothingToContinue);
-            }
-            let mut preload = steering;
-            preload.extend(follow_up);
-            self.adapter.set_preload(preload);
+        if last_is_assistant && !self.has_queued_messages() {
+            return Err(AgentError::NothingToContinue);
         }
-        let result = self.run_with_lifecycle(Vec::new()).await;
-        // 仅在 run 实际启动后清理 preload;NoModel 等早退时保留,供重试使用
-        if result.is_ok() {
-            self.adapter.set_preload(Vec::new());
-        }
-        result
+        self.run_with_lifecycle(Vec::new()).await
     }
 
     /// reset(03 §8.1):保留重放后的首条 system 消息作 baseline;run 存在时报错。
@@ -386,12 +345,13 @@ impl Agent {
     /// run 生命周期(pi 的 runWithLifecycle):isStreaming=true → 循环 → 复位;
     /// panic 兜底 = handleRunFailure(合成 error assistant 消息,03 §8.3)。
     async fn run_with_lifecycle(&self, prompts: Vec<AgentMessage>) -> Result<RunStop, AgentError> {
-        if self
-            .streaming
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
+        // 检查-置位在锁内串行(替代 compare_exchange;watch Sender 加锁)
         {
-            return Err(AgentError::AlreadyRunning);
+            let streaming = self.streaming.lock().unwrap();
+            if *streaming.borrow() {
+                return Err(AgentError::AlreadyRunning);
+            }
+            let _ = streaming.send(true);
         }
 
         let cancel = {
@@ -402,7 +362,7 @@ impl Agent {
             cancel.clone()
         };
 
-        let (system, model, thinking, tools, transcript, limits, stream_options) = {
+        let (system, model, thinking, tools, transcript, limits, stream_options, steering_mode) = {
             let state = self.state.lock().unwrap();
             (
                 state.system.clone(),
@@ -412,24 +372,34 @@ impl Agent {
                 state.messages.clone(),
                 *self.limits.lock().unwrap(),
                 self.stream_options.lock().unwrap().clone(),
+                *self.steering_mode.lock().unwrap(),
             )
         };
         let Some(model) = model else {
-            self.streaming.store(false, Ordering::SeqCst);
+            let _ = self.streaming.lock().unwrap().send(false);
             return Err(AgentError::NoModel);
         };
 
+        // 注入接收端移交给循环;run 结束后放回(期间 steer 走发送端缓冲)
+        let receiver = self
+            .receiver
+            .lock()
+            .unwrap()
+            .take()
+            .expect("injection receiver available outside run");
+
         // pi 的 createContextSnapshot:拿快照进、发事件出,无可变全局(09 A4)
         let context = AgentContext { system, messages: transcript, tools };
-        let config = LoopConfig { model, thinking, limits, stream_options };
+        let config = LoopConfig { model, thinking, limits, stream_options, steering_mode };
         let sink: Arc<dyn Subscriber> = match self.self_weak.upgrade() {
             Some(this) => this,
             None => {
-                self.streaming.store(false, Ordering::SeqCst);
+                let _ = self.streaming.lock().unwrap().send(false);
                 return Err(AgentError::Panicked);
             }
         };
 
+        // 接收端移交给循环,run 结束后归还(未消费的注入消息保留到下一 run / clear)
         let future = run_agent_loop(
             prompts,
             context,
@@ -438,10 +408,35 @@ impl Agent {
             self.provider.clone(),
             sink,
             cancel,
+            receiver,
         );
-        let result = AssertUnwindSafe(future).catch_unwind().await;
+        let (result, receiver) = match AssertUnwindSafe(future).catch_unwind().await {
+            Ok((output, receiver)) => {
+                // 异常终止路径:已取出未消费的注入消息放回通道(不静默丢失;
+                // 计数仍算在这些消息上,故用 requeue_* 不增计数)
+                let sender = self.sender.lock().unwrap();
+                let (requeued_steering, requeued_follow_up) =
+                    (output.requeued_steering.clone(), output.requeued_follow_up.clone());
+                for message in requeued_steering {
+                    sender.requeue_steering(message);
+                }
+                for message in requeued_follow_up {
+                    sender.requeue_follow_up(message);
+                }
+                (Ok(output), receiver)
+            }
+            Err(panic) => {
+                // 循环 panic 时接收端随 future 丢弃:重建端点(宿主下一次 steer
+                // 从干净状态开始,与 handleRunFailure 的合成兜底同级)
+                let (sender, fresh) = create_injection_endpoints();
+                *self.sender.lock().unwrap() = sender;
+                (Err(panic), fresh)
+            }
+        };
 
-        self.streaming.store(false, Ordering::SeqCst);
+        // 接收端放回
+        *self.receiver.lock().unwrap() = Some(receiver);
+        let _ = self.streaming.lock().unwrap().send(false);
 
         match result {
             Ok(output) => {
@@ -476,7 +471,7 @@ impl Agent {
         self.state.lock().unwrap().error_message = Some(message.to_string());
         let assistant = rpi_ai::AssistantMessage::error(&model, message, false);
         let entry = AgentMessage::Assistant(Box::new(assistant.clone()));
-        let start = AgentEvent::MessageStart { message: Box::new(entry.clone()) };
+        let start = AgentEvent::MessageStart { message: Box::new(entry.clone()), partial: None };
         let end = AgentEvent::MessageEnd { message: Box::new(entry.clone()) };
         let turn_end = AgentEvent::TurnEnd { message: Box::new(assistant), tool_results: Vec::new() };
         let agent_end = AgentEvent::AgentEnd { messages: vec![entry] };
@@ -490,7 +485,8 @@ impl Agent {
     fn reduce(&self, event: &AgentEvent) {
         let mut state = self.state.lock().unwrap();
         match event {
-            AgentEvent::MessageStart { message } => {
+            AgentEvent::MessageStart { message, partial } => {
+                state.streaming_partial = partial.clone();
                 if let AgentMessage::Assistant(assistant) = &**message {
                     state.streaming_message = Some((**assistant).clone());
                 }
@@ -500,6 +496,7 @@ impl Agent {
             }
             AgentEvent::MessageEnd { message } => {
                 state.streaming_message = None;
+                state.streaming_partial = None;
                 state.messages.push((**message).clone());
             }
             AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
@@ -514,9 +511,19 @@ impl Agent {
             }
             AgentEvent::AgentEnd { .. } => {
                 state.streaming_message = None;
+                state.streaming_partial = None;
             }
             _ => {}
         }
+    }
+
+    /// "到目前为止"的 partial 消息(T2 快照读口;UI 随帧读取,clone 一次)。
+    pub fn partial_message(&self) -> Option<rpi_ai::AssistantMessage> {
+        let state = self.state.lock().unwrap();
+        state
+            .streaming_partial
+            .as_ref()
+            .and_then(|partial| partial.read().ok().map(|p| p.clone()))
     }
 
     /// 仅供测试/装配检查;订阅者应消费事件而非查询状态

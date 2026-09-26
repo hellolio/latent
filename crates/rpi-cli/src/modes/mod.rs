@@ -46,7 +46,7 @@ fn agent_event_to_json(event: &AgentEvent) -> Option<Value> {
             "message": message,
             "tool_results": tool_results,
         })),
-        AgentEvent::MessageStart { message } => {
+        AgentEvent::MessageStart { message, .. } => {
             Some(json!({ "type": "message_start", "message": message }))
         }
         // 流式 partial:剥离(08 文档 json 模式语义)

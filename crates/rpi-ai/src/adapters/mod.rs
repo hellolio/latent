@@ -104,3 +104,46 @@ pub(crate) fn map_thinking_level(model: &Model, level: crate::types::ThinkingLev
     }
     level.as_str().to_string()
 }
+
+/// 观察回调装配辅助(11 计划 T3):回调 panic 一律吞掉(policy §2:trait
+/// 方法不得 panic 约束的宿主侧兜底),不装配时零开销。
+pub(crate) fn observe_payload(
+    callback: &Option<crate::types::OnPayload>,
+    body: &mut serde_json::Value,
+) {
+    if let Some(callback) = callback {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(body)));
+    }
+}
+
+pub(crate) fn observe_response(
+    callback: &Option<crate::types::OnResponse>,
+    status: reqwest::StatusCode,
+    url: &str,
+    headers: &reqwest::header::HeaderMap,
+) {
+    if let Some(callback) = callback {
+        let observation = crate::types::ResponseObservation {
+            status: status.as_u16(),
+            url: url.to_string(),
+            headers: headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    let value = value.to_str().ok()?;
+                    Some((name.as_str().to_string(), value.to_string()))
+                })
+                .collect(),
+        };
+        let _ =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&observation)));
+    }
+}
+
+pub(crate) fn observe_provider_event(
+    callback: &Option<crate::types::OnProviderStreamEvent>,
+    event: &serde_json::Value,
+) {
+    if let Some(callback) = callback {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
+    }
+}

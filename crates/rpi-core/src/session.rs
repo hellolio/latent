@@ -97,6 +97,26 @@ struct SessionRuntime {
     overflow_recovery_attempted: bool,
 }
 
+/// prompt 结果(T8,04 文档踩坑②):流式中按 streamingBehavior 转 steer 时返回
+/// `Enqueued`,调用方不再需要以 `is_streaming()` 二次区分。
+#[derive(Debug, Clone)]
+pub enum PromptOutcome {
+    /// 本次调用启动了一个新 run,携带 run 终止原因
+    Started(RunStop),
+    /// agent 正在流式,消息已入队(steering)
+    Enqueued,
+}
+
+impl PromptOutcome {
+    /// 兼容旧调用形态的便捷取值:Enqueued 视作 EndTurn(旧语义)。
+    pub fn stop(self) -> RunStop {
+        match self {
+            PromptOutcome::Started(stop) => stop,
+            PromptOutcome::Enqueued => RunStop::EndTurn,
+        }
+    }
+}
+
 /// pi AgentSession 的 Rust 版:持有 `Agent`,向 mode 暴露 prompt/steer/事件流。
 pub struct AgentSession {
     agent: Arc<rpi_agent::Agent>,
@@ -273,15 +293,30 @@ impl AgentSession {
     }
 
     /// prompt(pi @1606):流式中默认转 steer(可再暴露 streamingBehavior 配置)。
-    pub async fn prompt(&self, text: impl Into<String>) -> Result<RunStop, CoreError> {
+    /// 返回 `PromptOutcome`(T8):Started 携带 run 终止原因;Enqueued = 已入队。
+    pub async fn prompt(&self, text: impl Into<String>) -> Result<PromptOutcome, CoreError> {
         if self.agent.is_streaming() {
             self.steer(text).await;
-            return Ok(RunStop::EndTurn);
+            return Ok(PromptOutcome::Enqueued);
         }
-        let mut messages = std::mem::take(&mut self.runtime.lock().unwrap().pending_system_messages);
-        messages.push(AgentMessage::user(text));
+        let text = text.into();
+        let system_messages =
+            std::mem::take(&mut self.runtime.lock().unwrap().pending_system_messages);
+        let mut messages = system_messages.clone();
+        messages.push(AgentMessage::user(text.clone()));
         let run = self.agent.prompt_messages(messages);
-        self.run_with_recovery(run).await
+        match self.run_with_recovery(run).await {
+            Ok(stop) => Ok(PromptOutcome::Started(stop)),
+            // TOCTOU:is_streaming 检查后并发 prompt 抢先启动了 run →
+            // 按流式语义转 steer(reviewer P2);系统 patch 退回待注入队列,
+            // 随下一次成功启动的 prompt 进转录
+            Err(CoreError::Agent(AgentError::AlreadyRunning)) => {
+                self.runtime.lock().unwrap().pending_system_messages = system_messages;
+                self.steer(text).await;
+                Ok(PromptOutcome::Enqueued)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// steer(pi @1860):push 进 agent 队列 + session 深度镜像 → QueueUpdate。

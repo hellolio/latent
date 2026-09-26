@@ -342,7 +342,7 @@ trait Hook: Send + Sync {
 | M2+ | I1-I6 不变量写成 property test(尤其 I6 工具声明重放、工具结果配对) |
 | M4/M5 | 推送式注入(§10.5)+ 钩子链,届时以真实扩展需求验证接口 |
 
-**取舍待定点**(开发到对应阶段再定):① 控制面是否出转录(§10.2.8)——取决于是否要求与 pi 会话文件双向兼容;② 事件负载 delta vs 快照;③ `CheckpointStore` 放低层还是留给 rpi-session 层。
+**取舍待定点**(2026-09-26 决策):① 控制面出转录**维持现状**(与 pi 一致;已决定不要求与 pi 会话文件双向兼容);② 事件负载定为 **delta 为主 + 快照读口**(文档推荐方案,待实施,见 `docs/11-gap-closure-plan.md` T2);③ `CheckpointStore` **推迟**,本批不做。
 
 ## 踩坑记录
 
@@ -351,3 +351,8 @@ trait Hook: Send + Sync {
 - **2026-09-25 预算检查位置导致已 drain 的 steering 消息静默丢失**:预算检查最初放在 `prepare_next_turn`/steering 补轮询与 `TurnStart` 之后 —— 命中时队列已被 drain、TurnStart 已发出却没有配对的 TurnEnd。解法:预算检查移到 while 循环体最前(drain 之前)。(关联文件:`crates/rpi-agent/src/loop_.rs`)
 - **2026-09-25 thunk panic 会击穿 JoinSet 的配对保证**:`JoinSet::join_next` 对 panic 只返回 `JoinError`,拿不到对应 toolCall,无法发配对的 `tool_execution_end`。解法:thunk 内部用 `AssertUnwindSafe(..).catch_unwind()` 自捕获,panic 转错误 `ToolOutcome` 并正常发 end 事件。(关联文件:`crates/rpi-agent/src/loop_.rs`)
 - **2026-09-25 有意保留的取舍(对照 03 §10.3/§10.5)**:①循环控制流仍按 §3 伪代码的双层 while 实现,`Phase` 枚举目前仅作观察/断言用途,§10.3 的完整 step 函数状态机推迟到推送式注入(M4/M5)一并落地 —— 届时注入通道改 mpsc,`pending` 单通道与 explicitContinuation 补丁才会被真正移除;②`message_update` 只在终态携带完整快照,流式中文本增量走 `MessageDelta`,thinking/toolCall 的逐块增量转发待 TUI(05)需要时扩展 rpi-ai 事件负载;③`validate_arguments` 是 JSON Schema 子集(type/required/嵌套 properties,`integer` 接受任意 number),待引入 jsonschema crate 后替换。
+- **2026-09-26 T5 落地：循环重写为 Phase 状态机 + mpsc 推送注入**：`pending`/`explicit_continuation` 补丁符号已消失；`Wake` 三类型（Steering/FollowUp/ExplicitContinue）+ `step_*` 转移函数。要点：①空工具批必须 `terminate=true`（pi 的 hasMoreToolCalls=false），否则无工具调用的 turn 会被误判自然续跑、多烧一轮脚本；②one-at-a-time 语义改为循环侧"整流进本地缓冲、每轮注入一条"，通道余量原地保留——硬退出时未消费消息不丢；③`LoopHooks` 删除两个轮询方法（接缝 #2 登记），`run_agent_loop` 接收 `InjectionReceiver` 并在返回时归还（Agent 在 run 期间把 receiver 从槽位移出）。（关联文件：`crates/rpi-agent/src/loop_.rs`、`agent.rs`、`hooks.rs`）
+- **2026-09-26 T5 流式期间已消费的 steering 在硬退出时会静默丢失**：现象：select! 把 steering 从通道搬进 `deferred_steering` 后流以 error/aborted 收尾，消息既不在通道也不在转录，深度计数永久泄漏（`has_queued_messages` 恒真）→ 原因：I3 只保证"不再继续消费"，没保证"已消费不丢" → 解法：`LoopOutput` 携带 `requeued_steering`/`requeued_follow_up`，Agent 经 `InjectionSender::requeue_*(不增计数)` 放回；深度计数统一在**注入时点**递减。专项测试 `steering_consumed_mid_stream_is_requeued_on_hard_exit`。（关联文件：`crates/rpi-agent/src/loop_.rs`、`agent.rs`）
+- **2026-09-26 T2 落地：delta 为主 + SharedPartial 读口**：`MessageStart` 携带 `Arc<RwLock<AssistantMessage>>`（serde skip），循环在每个 delta 上原地更新，UI 随帧经 `Agent::partial_message()` 克隆读取；`MessageDeltaPayload` 三变体（Text/Thinking/ToolCallArgs）。写侧 RwLock 用 `unwrap_or_else(|e| e.into_inner())` 防"订阅者持锁 panic 中毒后每个 delta 都 panic"。toolcall 参数增量尽力解析仅供 UI 预览，终态以 provider 定稿为准。（关联文件：`crates/rpi-agent/src/event.rs`、`loop_.rs`、`agent.rs`）
+- **2026-09-25 的取舍③（validate_arguments 子集）就此作废**：T7 已引入 `jsonschema =0.58.0` 完整校验，enum/minimum/数组元素等此前漏过的非法参数在执行前拦截；schema 非法（compile 失败）fail-closed 返回 Err。要点：①`Value::Null` / `Bool(true)` schema 视为"未声明，不校验"（既有测试钉住）；②每次工具调用现场 compile schema（工具调用低频，不在热路径），真实内置 schema 的兼容性断言放 rpi-tools 侧（rpi-agent 不能反向依赖 rpi-tools）。（关联文件：`crates/rpi-agent/src/loop_.rs`、`crates/rpi-tools/src/lib.rs`）
+- **2026-09-26 T8 落地：streaming 标志 watch 化，wait_idle 去轮询**：`AtomicBool` 改 `Mutex<watch::Sender<bool>>` + receiver——"检查-置位"在锁内串行化补上 watch 没有的 CAS 语义，`wait_idle` 用 `borrow_and_update() + changed().await`（克隆一个 receiver，clone 后 run 结束不丢唤醒；`changed()` Err 兜底 break 防自旋）。`Agent::prompt` 维持 inline await 整个 run（pi 同构），"run spawn 化"按 11 §5 决策记录不实施。（关联文件：`crates/rpi-agent/src/agent.rs`）

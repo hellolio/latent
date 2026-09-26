@@ -32,5 +32,5 @@ pub async fn build_bare_session(
     ui: Arc<dyn rpi_core::ExtensionUi>,
     extension_specs: Vec<McpServerSpec>,
 ) -> Result<crate::assembly::BuiltSession, String> {
-    build_session(BuildOptions { provider, model, ui, extension_specs }).await
+    build_session(BuildOptions { provider, model, ui, extension_specs, spawn_hook: None }).await
 }

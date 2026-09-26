@@ -25,9 +25,9 @@ pub async fn run_json_mode(
     let subscriber: SessionSharedSubscriber = Arc::new(JsonEventSubscriber { out });
     built.session.subscribe(subscriber);
 
-    let stop = built.session.prompt(prompt).await.map_err(|e| e.to_string())?;
+    let outcome = built.session.prompt(prompt).await.map_err(|e| e.to_string())?;
     built.session.wait_idle().await;
-    Ok(stop)
+    Ok(outcome.stop())
 }
 
 /// json 模式纯函数面:装配好的 session + 单条 prompt → JSONL(测试用;
@@ -39,9 +39,9 @@ pub async fn run_json_mode_with_session(
 ) -> Result<RunStop, String> {
     let subscriber: SessionSharedSubscriber = Arc::new(JsonEventSubscriber { out });
     session.subscribe(subscriber);
-    let stop = session.prompt(prompt).await.map_err(|e| e.to_string())?;
+    let outcome = session.prompt(prompt).await.map_err(|e| e.to_string())?;
     session.wait_idle().await;
-    Ok(stop)
+    Ok(outcome.stop())
 }
 
 struct JsonEventSubscriber {

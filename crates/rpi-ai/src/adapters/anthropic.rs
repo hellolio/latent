@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::adapters::{
-    aborted_error, http_error_message, map_thinking_level, read_chunk, resolve_cache_retention,
-    setup_error, trim_base_url, ByteStream, ReadOutcome,
+    aborted_error, http_error_message, map_thinking_level, observe_payload, observe_provider_event,
+    observe_response, read_chunk, resolve_cache_retention, setup_error, trim_base_url, ByteStream,
+    ReadOutcome,
 };
 use crate::json_parse::{parse_json_with_repair, parse_streaming_json};
 use crate::provider::{AssistantMessageEventStream, Provider};
@@ -436,6 +437,7 @@ fn handle_sse_event(
     model: &Model,
     event: &crate::sse::SseEvent,
     events_out: &mut Vec<AssistantMessageEvent>,
+    raw_event_observer: &Option<crate::types::OnProviderStreamEvent>,
 ) -> Result<(), String> {
     if event.event.as_deref() == Some("error") {
         return Err(event.data.clone());
@@ -443,6 +445,8 @@ fn handle_sse_event(
     // pi 语义:SSE event 字段只用于识别 error;分发按 JSON 的 type 字段
     let data: Value = parse_json_with_repair(&event.data)
         .map_err(|e| format!("Could not parse Anthropic SSE event: {e}; data={}", event.data))?;
+    // 归一化前的原始 provider 事件观察(T3)
+    observe_provider_event(raw_event_observer, &data);
     let name = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match name {
         "message_start" => {
@@ -648,7 +652,9 @@ async fn stream_impl(
         let cache_retention = resolve_cache_retention(opts.cache_retention);
         let cache_control = cache_control_value(cache_retention, compat.supports_long_cache_retention);
         let normalized = resolve_transcript(context, compat.supports_mid_convo_system_messages);
-        let body = build_request_body(&model, &normalized, &opts, &compat, cache_control.as_ref());
+        let mut body = build_request_body(&model, &normalized, &opts, &compat, cache_control.as_ref());
+        // 请求体观察/替换(T3;panic 吞掉)
+        observe_payload(&opts.on_payload, &mut body);
 
         let Some(api_key) = crate::env_keys::resolve_api_key(&model.provider, opts.api_key.as_deref()) else {
             yield setup_error(&model, format!("No API key for provider: {}", model.provider));
@@ -681,7 +687,10 @@ async fn stream_impl(
                 yield setup_error(&model, http_error_message(status, &body));
                 return;
             }
-            Ok(r) => r,
+            Ok(r) => {
+                observe_response(&opts.on_response, r.status(), &url, r.headers());
+                r
+            }
             Err(err) => {
                 yield setup_error(&model, err.to_string());
                 return;
@@ -704,7 +713,9 @@ async fn stream_impl(
                     for line in line_decoder.feed(&chunk) {
                         if let Some(event) = sse_decoder.feed_line(&line) {
                             let mut events_out = Vec::new();
-                            if let Err(message) = handle_sse_event(&mut state, &model, &event, &mut events_out) {
+                            if let Err(message) =
+                                handle_sse_event(&mut state, &model, &event, &mut events_out, &opts.on_provider_stream_event)
+                            {
                                 terminal = Some(AssistantMessageEvent::Error(Box::new(
                                     AssistantMessage::error(&model, message, false),
                                 )));
@@ -723,7 +734,9 @@ async fn stream_impl(
                     if let Some(line) = line_decoder.finish() {
                         if let Some(event) = sse_decoder.feed_line(&line) {
                             let mut events_out = Vec::new();
-                            if let Err(message) = handle_sse_event(&mut state, &model, &event, &mut events_out) {
+                            if let Err(message) =
+                                handle_sse_event(&mut state, &model, &event, &mut events_out, &opts.on_provider_stream_event)
+                            {
                                 terminal = Some(AssistantMessageEvent::Error(Box::new(
                                     AssistantMessage::error(&model, message, false),
                                 )));
