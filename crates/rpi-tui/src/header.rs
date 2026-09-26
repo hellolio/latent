@@ -23,7 +23,7 @@ pub fn banner(version: &str, expanded: bool, width: usize, theme: &Theme) -> Vec
         &[
             ("esc", "interrupt"),
             ("ctrl+c/ctrl+d", "clear/exit"),
-            ("/", "commands"),
+            ("/", "slash 补全"),
             ("!", "bash"),
             ("ctrl+o", "more"),
         ],
@@ -104,11 +104,11 @@ pub fn resources(
     out
 }
 
-/// 全宽分隔线(pi 消息区与输入区的视觉分界)。
+/// 全宽分隔线(pi 消息区与输入区的视觉分界;用 dim 弱化,不与边框争抢)。
 pub fn separator(width: usize, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width.max(1)),
-        Style::new().fg(theme.md_code_block_border),
+        Style::new().fg(theme.dim),
     ))
 }
 

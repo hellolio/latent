@@ -46,11 +46,42 @@ pub async fn handle_key(
         return false;
     }
 
+    // 斜杠补全弹窗跟随编辑器内容(直接 set_text 的路径也同步)
+    state.sync_slash_popup();
+
+    // 弹窗可见时的 Codex 交互:↑/↓ 选择、Tab/Enter 补全、Esc 关闭;
+    // 查询已与命令名完全一致时 Enter 不拦截,落入提交分支直接执行
+    if state.slash_popup.visible() {
+        match key {
+            rpi_tui::Key::Up => {
+                state.slash_popup.move_up();
+                return false;
+            }
+            rpi_tui::Key::Down => {
+                state.slash_popup.move_down();
+                return false;
+            }
+            rpi_tui::Key::Tab | rpi_tui::Key::Enter if !state.slash_popup.is_exact_match() => {
+                if let Some(text) = state.slash_popup.complete_text() {
+                    state.editor.set_text(&text);
+                }
+                state.sync_slash_popup();
+                return false;
+            }
+            rpi_tui::Key::Esc => {
+                state.slash_popup.dismiss();
+                return false;
+            }
+            _ => {}
+        }
+    }
+
     match key {
         rpi_tui::Key::Enter => {
             let Some(text) = state.take_input() else {
                 return false;
             };
+            state.sync_slash_popup();
             submit_input(ctx, state, text).await;
             false
         }
@@ -94,6 +125,7 @@ pub async fn handle_key(
         key => {
             state.last_ctrl_c = None;
             state.editor_key(&key);
+            state.sync_slash_popup();
             false
         }
     }
@@ -141,6 +173,11 @@ fn handle_select_key(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, key
                             state.status = Status::Idle;
                         }
                     }
+                    SelectKind::Theme { names } => {
+                        if let Some(name) = names.get(index) {
+                            apply_theme(state, *name);
+                        }
+                    }
                 }
             }
             state.promote_next_select();
@@ -156,6 +193,7 @@ fn handle_select_key(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, key
                         let _ = responder.send(None);
                     }
                     SelectKind::Model { .. } | SelectKind::Thinking => {}
+                    SelectKind::Theme { .. } => {}
                 }
             }
             state.promote_next_select();
@@ -274,6 +312,18 @@ pub async fn execute_command(
             },
             None => open_model_selector(ctx, state),
         },
+        slash::SlashAction::Theme { arg } => match arg {
+            Some(name) => match name.parse::<rpi_tui::ThemeName>() {
+                Ok(theme_name) => apply_theme(state, theme_name),
+                Err(_) => {
+                    state.commit_ephemeral(view::error_line(
+                        &format!("未知主题: {name}(输入 /theme 查看主题列表)"),
+                        &state.theme,
+                    ));
+                }
+            },
+            None => open_theme_selector(state),
+        },
         slash::SlashAction::Thinking { arg } => match arg {
             Some(name) => match parse_thinking_input(&name) {
                 Some(level) => {
@@ -337,6 +387,38 @@ fn open_thinking_selector(state: &mut InteractiveState) {
         prompt: "选择 thinking 级别".into(),
         list,
         kind: SelectKind::Thinking,
+    });
+}
+
+/// 应用主题切换:更新状态并请求全文重绘(转录按新主题重新着色)。
+/// 只在会话内生效;持久化请写 settings.json 的 `theme` 字段。
+fn apply_theme(state: &mut InteractiveState, name: rpi_tui::ThemeName) {
+    state.theme = rpi_tui::Theme::from_theme_name(name);
+    state.theme_name = Some(name.slug().to_string());
+    state.needs_full_redraw = true;
+    state.commit_ephemeral(warning_line_theme(
+        &format!("theme → {}", name.display_name()),
+        &state.theme,
+    ));
+}
+
+fn open_theme_selector(state: &mut InteractiveState) {
+    let names: Vec<rpi_tui::ThemeName> = rpi_tui::ThemeName::all().to_vec();
+    let mut list = SelectList::new(
+        names
+            .iter()
+            .map(|name| name.display_name().to_string())
+            .collect(),
+    );
+    if let Some(current) = &state.theme_name {
+        if let Some(index) = names.iter().position(|name| name.slug() == current) {
+            list.selected = index;
+        }
+    }
+    state.select = Some(SelectRequest {
+        prompt: "选择主题".into(),
+        list,
+        kind: SelectKind::Theme { names },
     });
 }
 

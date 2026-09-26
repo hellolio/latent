@@ -11,7 +11,7 @@ use super::state::{InteractiveState, ToolStatus, TranscriptItem};
 pub fn replay_history(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
     let messages = ctx.session.agent().messages();
     for message in &messages {
-        state.commit_many(replay_message(message));
+        state.commit_many(replay_message(message, &state.theme));
     }
     if let Some(tokens) = messages.iter().rev().find_map(|message| {
         message
@@ -39,7 +39,7 @@ pub fn replay_history(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
 }
 
 /// 单条历史消息 → 转录条目(与实时渲染同一模型)。
-fn replay_message(message: &AgentMessage) -> Vec<TranscriptItem> {
+fn replay_message(message: &AgentMessage, theme: &rpi_tui::Theme) -> Vec<TranscriptItem> {
     match message {
         AgentMessage::System { .. } => vec![TranscriptItem::Blank],
         AgentMessage::User { content, .. } => {
@@ -89,12 +89,15 @@ fn replay_message(message: &AgentMessage) -> Vec<TranscriptItem> {
                         .error_message
                         .as_deref()
                         .unwrap_or("Unknown error"),
+                    theme,
                 ))),
-                StopReason::Aborted => {
-                    items.push(TranscriptItem::Line(error_line_msg("Operation aborted")))
-                }
+                StopReason::Aborted => items.push(TranscriptItem::Line(error_line_msg(
+                    "Operation aborted",
+                    theme,
+                ))),
                 StopReason::Length => items.push(TranscriptItem::Line(error_line_msg(
                     "Response was truncated before completion.",
+                    theme,
                 ))),
                 _ => {}
             }
@@ -124,23 +127,23 @@ fn replay_message(message: &AgentMessage) -> Vec<TranscriptItem> {
         AgentMessage::CompactionSummary { summary, .. } => vec![TranscriptItem::Line(
             ratatui::text::Line::from(ratatui::text::Span::styled(
                 format!("── 压缩摘要: {}", first_line(summary)),
-                ratatui::style::Style::new().fg(ratatui::style::Color::DarkGray),
+                ratatui::style::Style::new().fg(theme.dim),
             )),
         )],
         AgentMessage::BranchSummary { summary, .. } => vec![TranscriptItem::Line(
             ratatui::text::Line::from(ratatui::text::Span::styled(
                 format!("── 分支摘要: {}", first_line(summary)),
-                ratatui::style::Style::new().fg(ratatui::style::Color::DarkGray),
+                ratatui::style::Style::new().fg(theme.dim),
             )),
         )],
         AgentMessage::Custom(_) => vec![TranscriptItem::Blank],
     }
 }
 
-fn error_line_msg(text: &str) -> ratatui::text::Line<'static> {
+fn error_line_msg(text: &str, theme: &rpi_tui::Theme) -> ratatui::text::Line<'static> {
     ratatui::text::Line::from(ratatui::text::Span::styled(
         format!("Error: {text}"),
-        ratatui::style::Style::new().fg(ratatui::style::Color::Red),
+        ratatui::style::Style::new().fg(theme.error),
     ))
 }
 

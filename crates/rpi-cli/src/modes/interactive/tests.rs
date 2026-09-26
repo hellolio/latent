@@ -10,7 +10,6 @@ use rpi_core::AgentSessionEvent;
 use rpi_tui::text::line_text;
 use rpi_tui::Key;
 
-use crate::assembly;
 use crate::modes::slash;
 
 use super::events::UiEvent;
@@ -857,6 +856,110 @@ async fn viewport_shrinks_preview_under_budget() {
         .collect::<Vec<_>>()
         .join("\n");
     // 预算 8 行:预览收缩后 帧高 ≤ 8
-    let frame = super::view::viewport(&state, None, 2, 1);
+    let frame = super::view::viewport(&state, None, 2, 1, 8);
     assert!(frame.height <= 9, "帧高应受预算约束: {}", frame.height);
+}
+
+// ---- 斜杠补全弹窗(Codex 交互) ----
+
+/// 弹窗状态机测试的共享前奏:内存会话 + 已输入 `/m` 的状态。
+async fn popup_state_with_input(input: &str) -> (crate::assembly::BuiltSession, InteractiveState) {
+    let built = built_memory_session().await;
+    let mut state = test_state();
+    for c in input.chars() {
+        handle_key(&ctx_of(&built, &rpi_core::create_model_resolver()), &mut state, Key::Char(c)).await;
+    }
+    (built, state)
+}
+
+#[tokio::test]
+async fn typing_slash_opens_filtered_popup() {
+    let (_built, state) = popup_state_with_input("/m").await;
+    assert!(state.slash_popup.visible(), "输入 /m 应弹出补全");
+    // 前缀(/model)优先,模糊子序列(compact/theme 含 m)次之
+    assert_eq!(state.slash_popup.match_count(), 3);
+    assert_eq!(
+        state.slash_popup.selected_entry().map(|e| e.name.as_str()),
+        Some("model"),
+        "前缀匹配应排首位"
+    );
+
+    // 继续输入到无匹配:弹窗退场
+    let (built, mut state) = popup_state_with_input("/m").await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    for c in "zz".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    assert!(!state.slash_popup.visible());
+}
+
+#[tokio::test]
+async fn enter_completes_partial_slash_then_second_enter_executes() {
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    let mut state = test_state();
+    for c in "/mod".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    // Enter(非完全匹配):补全,不提交
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    assert_eq!(state.editor.text(), "/model ", "Enter 应补全为 /model 加尾随空格");
+    assert!(!state.slash_popup.visible(), "补全后弹窗退场");
+    // 再次 Enter:执行命令(打开模型选择器)
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    assert!(state.select.is_some(), "应打开模型选择器");
+}
+
+#[tokio::test]
+async fn exact_slash_input_executes_directly_on_enter() {
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    let mut state = test_state();
+    for c in "/model".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    assert!(state.slash_popup.is_exact_match());
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    assert!(state.select.is_some(), "完全匹配时 Enter 直接执行");
+}
+
+#[tokio::test]
+async fn tab_completes_and_esc_dismisses_popup() {
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    let mut state = test_state();
+    for c in "/h".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    handle_key(&ctx, &mut state, Key::Tab).await;
+    assert_eq!(state.editor.text(), "/help ", "Tab 应补全");
+
+    // Esc 关闭弹窗;查询继续变化时重新打开
+    let mut state = test_state();
+    for c in "/h".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    handle_key(&ctx, &mut state, Key::Esc).await;
+    assert!(!state.slash_popup.visible());
+    handle_key(&ctx, &mut state, Key::Char('e')).await;
+    assert!(state.slash_popup.visible(), "查询变化后重新打开");
+}
+
+#[tokio::test]
+async fn arrows_navigate_popup_while_visible() {
+    let (_built, mut state) = popup_state_with_input("/").await;
+    assert!(state.slash_popup.visible(), "裸 / 应列出全部命令");
+    let first = state.slash_popup.selected_entry().map(|e| e.name.clone());
+    state.slash_popup.move_down();
+    let second = state.slash_popup.selected_entry().map(|e| e.name.clone());
+    assert_ne!(first, second);
+    state.slash_popup.move_up();
+    assert_eq!(
+        state.slash_popup.selected_entry().map(|e| e.name.clone()),
+        first
+    );
 }

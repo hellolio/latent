@@ -118,10 +118,10 @@ pub fn user_block(content: &str, theme: &Theme, width: usize) -> Vec<UiLine> {
     out
 }
 
-/// assistant 正文:Markdown(syntect 代码高亮)。
+/// assistant 正文:Markdown(syntect 代码高亮,主题跟随明暗)。
 pub fn assistant_markdown(source: &str, theme: &Theme, width: usize) -> Vec<UiLine> {
     markdown::Markdown::new(theme)
-        .with_highlight(rpi_tui::Highlighter::shared())
+        .with_highlight(rpi_tui::Highlighter::shared(theme.is_dark))
         .render(source, width)
 }
 
@@ -154,7 +154,8 @@ pub fn welcome_lines(version: &str, expanded: bool, theme: &Theme, width: usize)
     out
 }
 
-/// 底部视口帧:预览区(选择列表/流式尾部/thinking 尾部)+ 编辑器框 + footer。
+/// 底部视口帧:预览区(流式尾部/thinking 尾部)+ 状态行 + 补全弹窗 +
+/// 编辑器框 + footer(Codex CLI 布局)。
 pub struct ViewportFrame {
     pub lines: Vec<UiLine>,
     /// 光标相对视口左上角的 (列, 行);None = 隐藏
@@ -162,13 +163,14 @@ pub struct ViewportFrame {
     pub height: u16,
 }
 
-/// 组装视口帧。`preview_cap`/`editor_cap` 限制预览区与编辑器行数
-/// (终端过矮时由调用方收缩重算)。
+/// 组装视口帧。`preview_cap`/`editor_cap`/`popup_cap` 限制预览区、编辑器与
+/// 补全弹窗行数(终端过矮时由调用方收缩重算)。
 pub fn viewport(
     state: &InteractiveState,
     partial: Option<&rpi_ai::AssistantMessage>,
     preview_cap: usize,
     editor_cap: usize,
+    popup_cap: usize,
 ) -> ViewportFrame {
     let theme = &state.theme;
     let width = state.width.max(1);
@@ -218,49 +220,50 @@ pub fn viewport(
         }
     }
 
-    // 2. 编辑器框:顶边框嵌状态(spinner + 状态文本,颜色随状态)
+    // 2. 状态行(Codex 风格,busy 时一行;idle 不占行):
+    //    `↻ Working (3s · esc to interrupt)` / `⏺ bash` / `aborted`
+    let status = status_line(state);
+    lines.extend(status);
+
+    // 3. 补全弹窗:紧贴编辑器框上方(Codex 布局)
+    if state.select.is_none() && state.slash_popup.visible() {
+        lines.extend(state.slash_popup.render(width, theme, popup_cap));
+    }
+
+    // 4. 编辑器框:无边框标题圆角框;状态语义只体现在边框颜色上
     let border_style = border_style(state);
-    let title = border_title(state);
     let inner_width = width.saturating_sub(2).max(1);
     let view = state
         .editor
         .view(inner_width.saturating_sub(2), editor_cap.max(1));
-    let mut top = vec![
-        Span::styled("┌─ ", border_style),
-        Span::styled(
-            title.0,
-            Style::new().fg(title.1).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ", border_style),
-    ];
-    let used: usize = top
-        .iter()
-        .map(|s| rpi_tui::display_width(s.content.as_ref()))
-        .sum();
-    if used + 1 < width {
-        top.push(Span::styled("─".repeat(width - used - 1), border_style));
-    }
-    lines.push(Line::from(top));
+    lines.push(Line::from(Span::styled(
+        format!("╭{}", "─".repeat(width.saturating_sub(2))),
+        border_style,
+    )));
 
-    // 3. 编辑器内容行(首行 ❯ 前缀;光标按显示宽定位)
+    // 5. 编辑器内容行(首行 ❯ 前缀;光标按显示宽定位;空输入显示占位文本)
     let editor_first_row = lines.len();
-    for (i, row) in view.rows.iter().enumerate() {
-        let prefix = if i == 0 { "❯ " } else { "  " };
-        let mut spans = vec![Span::styled(
-            prefix.to_string(),
-            Style::new().fg(theme.accent),
-        )];
-        spans.push(Span::styled(
-            row.clone(),
-            Style::new().fg(theme.assistant_text),
-        ));
-        lines.push(Line::from(spans));
-    }
-    if view.rows.is_empty() {
+    if state.editor.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("❯ ".to_string(), Style::new().fg(theme.accent)),
-            Span::raw(""),
+            Span::styled(
+                "Ask rpi to do anything".to_string(),
+                Style::new().fg(theme.dim),
+            ),
         ]));
+    } else {
+        for (i, row) in view.rows.iter().enumerate() {
+            let prefix = if i == 0 { "❯ " } else { "  " };
+            let mut spans = vec![Span::styled(
+                prefix.to_string(),
+                Style::new().fg(theme.accent),
+            )];
+            spans.push(Span::styled(
+                row.clone(),
+                Style::new().fg(theme.assistant_text),
+            ));
+            lines.push(Line::from(spans));
+        }
     }
     if let Some((row, col)) = view.cursor {
         cursor = Some((
@@ -269,13 +272,13 @@ pub fn viewport(
         ));
     }
 
-    // 4. 底边框
+    // 6. 底边框
     lines.push(Line::from(Span::styled(
-        format!("└{}", "─".repeat(width.saturating_sub(2))),
+        format!("╰{}", "─".repeat(width.saturating_sub(2))),
         border_style,
     )));
 
-    // 5. footer 两行
+    // 7. footer 两行
     let footer = FooterData {
         cwd: state.cwd_display.clone(),
         git_branch: state.git_branch.clone(),
@@ -299,23 +302,35 @@ pub fn viewport(
     }
 }
 
-/// 边框标题与颜色(状态语义;busy 时嵌 spinner 帧)。
-fn border_title(state: &InteractiveState) -> (String, ratatui::style::Color) {
+/// 状态行(Codex 风格:busy 时一行带 spinner 与 `esc to interrupt` 提示;
+/// idle 时不占行)。
+fn status_line(state: &InteractiveState) -> Vec<UiLine> {
     let theme = &state.theme;
-    match &state.status {
-        Status::Idle => (String::new(), theme.border_idle),
+    let secs = state.spin * super::SPINNER_INTERVAL.as_millis() as usize / 1000;
+    let (color, text) = match &state.status {
+        Status::Idle => return Vec::new(),
         Status::Thinking => (
-            format!("{} thinking", loader::frame(state.spin)),
             theme.spinner,
+            format!(
+                "{} Working ({secs}s · esc to interrupt)",
+                loader::frame(state.spin)
+            ),
         ),
-        Status::Tool(name) => (format!("⏺ {name}"), theme.tool_pending),
-        Status::Aborted => ("aborted".into(), theme.error),
+        Status::Tool(name) => (
+            theme.tool_pending,
+            format!(
+                "{} Running {name} ({secs}s · esc to interrupt)",
+                loader::frame(state.spin)
+            ),
+        ),
         Status::Compacting => (
-            format!("{} compacting", loader::frame(state.spin)),
             theme.spinner,
+            format!("{} Compacting history", loader::frame(state.spin)),
         ),
-        Status::Bash(command) => (format!("! {command}"), theme.border_bash),
-    }
+        Status::Bash(command) => (theme.border_bash, format!("! {command}")),
+        Status::Aborted => (theme.error, "aborted".to_string()),
+    };
+    vec![Line::from(Span::styled(text, Style::new().fg(color)))]
 }
 
 fn border_style(state: &InteractiveState) -> Style {
@@ -401,7 +416,7 @@ mod tests {
     fn viewport_layout_shape() {
         let mut state = state();
         state.editor.set_text("hi");
-        let frame = viewport(&state, None, 8, 6);
+        let frame = viewport(&state, None, 8, 6, 8);
         // 空预览 + 顶边框 + 1 编辑行 + 底边框 + footer 2 行 = 5
         assert_eq!(
             frame.lines.len(),
@@ -413,16 +428,16 @@ mod tests {
         // 光标在编辑器行(行 1),列 = 前缀 2 + "hi" 2 = 4
         assert_eq!(frame.cursor, Some((4, 1)));
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert!(texts[0].starts_with("┌"), "{texts:?}");
+        assert!(texts[0].starts_with("╭"), "{texts:?}");
         assert!(texts[1].starts_with("❯ hi"));
-        assert!(texts[2].starts_with("└"), "{texts:?}");
+        assert!(texts[2].starts_with("╰"), "{texts:?}");
     }
 
     #[test]
     fn viewport_shows_stream_tail() {
         let mut state = state();
         state.stream_text = "line1\nline2\nline3".into();
-        let frame = viewport(&state, None, 2, 6);
+        let frame = viewport(&state, None, 2, 6, 8);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
         // 预览只显示尾部 2 行
         assert!(texts.iter().any(|t| t.contains("line2")));
@@ -431,25 +446,53 @@ mod tests {
     }
 
     #[test]
-    fn viewport_border_title_reflects_status_and_spinner() {
+    fn viewport_status_line_reflects_busy_state() {
         let mut state = state();
+        // idle:状态行不占位
+        assert_eq!(viewport(&state, None, 0, 6, 8).lines.len(), 5);
         state.status = Status::Thinking;
-        state.spin = 2;
-        let frame = viewport(&state, None, 0, 6);
-        let top = line_text(&frame.lines[0]);
-        assert!(top.contains(loader::frame(2)), "{top}");
-        assert!(top.contains("thinking"));
+        state.spin = 25; // 25 * 120ms = 3s
+        let frame = viewport(&state, None, 0, 6, 8);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        assert!(texts[0].contains(loader::frame(25)), "{texts:?}");
+        assert!(texts[0].contains("Working (3s"), "{texts:?}");
+        assert!(texts[0].contains("esc to interrupt"), "{texts:?}");
         state.status = Status::Bash("ls".into());
-        let frame = viewport(&state, None, 0, 6);
+        let frame = viewport(&state, None, 0, 6, 8);
         assert!(line_text(&frame.lines[0]).contains("! ls"));
+    }
+
+    #[test]
+    fn viewport_empty_editor_shows_placeholder() {
+        let state = state();
+        let frame = viewport(&state, None, 0, 6, 8);
+        let text = line_text(&frame.lines[1]);
+        assert!(text.starts_with("❯ "), "{text}");
+        assert!(text.contains("Ask rpi to do anything"), "{text}");
+    }
+
+    #[test]
+    fn viewport_shows_slash_popup_above_composer() {
+        let mut state = state();
+        state.editor.set_text("/mod");
+        state.sync_slash_popup();
+        assert!(state.slash_popup.visible());
+        let frame = viewport(&state, None, 0, 6, 8);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        // 弹窗(边框 + 1 个 /model 匹配行)紧贴编辑器框上方
+        let popup_top = texts.iter().position(|t| t.starts_with('╭')).unwrap();
+        assert!(texts[popup_top + 1].contains("/model"), "{texts:?}");
+        assert!(texts[popup_top + 2].starts_with('╰'), "{texts:?}");
+        assert!(texts[popup_top + 3].starts_with('╭'), "弹窗下方是编辑器框: {texts:?}");
+        assert!(texts[popup_top + 4].starts_with("❯ /mod"), "{texts:?}");
     }
 
     #[test]
     fn viewport_height_grows_with_multiline_editor() {
         let mut state = state();
         state.editor.set_text("a\nb\nc\nd");
-        let single = viewport(&state_with_one(&state.theme), None, 0, 6);
-        let multi = viewport(&state, None, 0, 6);
+        let single = viewport(&state_with_one(&state.theme), None, 0, 6, 8);
+        let multi = viewport(&state, None, 0, 6, 8);
         assert_eq!(multi.height, single.height + 3);
     }
 

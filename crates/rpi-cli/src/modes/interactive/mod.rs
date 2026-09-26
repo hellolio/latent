@@ -28,6 +28,33 @@ pub use events::{create_tui_ui, TuiUi, UiEvent};
 use handlers::InteractiveCtx;
 use state::InteractiveState;
 
+/// 主题解析(三层优先级):`--theme` / `/theme` 传入值 → settings.json 的
+/// `theme` 字段 → 终端能力自动探测(默认 ratatui-themes Tokyo Night,
+/// 仅 16 色终端降级 ANSI 兜底)。未知的显式名字告警后继续走默认链路。
+/// 返回 (主题, 主题 slug;ANSI 兜底/自动探测时 None)。
+fn resolve_theme(explicit: Option<&str>) -> (Theme, Option<String>) {
+    let named = |name: &str, source: &str| match name.trim().parse::<rpi_tui::ThemeName>() {
+        Ok(parsed) => Some((Theme::from_theme_name(parsed), Some(parsed.slug().to_string()))),
+        Err(_) => {
+            eprintln!("[rpi] {source} 的主题 `{name}` 无法识别,已回退默认主题");
+            None
+        }
+    };
+    if let Some(name) = explicit.map(str::trim).filter(|n| !n.is_empty()) {
+        if let Some(resolved) = named(name, "参数") {
+            return resolved;
+        }
+    }
+    let cwd = std::env::current_dir().ok();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    if let Some(name) = rpi_core::load_theme_setting(cwd.as_deref(), home.as_deref()) {
+        if let Some(resolved) = named(&name, "settings.json") {
+            return resolved;
+        }
+    }
+    (Theme::detect(), None)
+}
+
 /// busy 时的 spinner 帧间隔。
 const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
 
@@ -35,12 +62,13 @@ pub async fn run_interactive_mode(
     built: BuiltSession,
     ui: TuiUi,
     mut ui_rx: mpsc::UnboundedReceiver<UiEvent>,
+    theme_override: Option<String>,
 ) -> Result<(), String> {
     let BuiltSession {
         session,
         session_manager,
     } = built;
-    let theme = Theme::detect();
+    let (theme, theme_name) = resolve_theme(theme_override.as_deref());
 
     let mut app = TuiApp::open(6).map_err(|e| e.to_string())?;
 
@@ -87,6 +115,7 @@ pub async fn run_interactive_mode(
     };
 
     let mut state = InteractiveState::new(theme, app.width());
+    state.theme_name = theme_name;
     state.cwd_display = rpi_tui::footer::abbreviate_home(
         &cwd.display().to_string(),
         home.as_deref().and_then(|p| p.to_str()),
@@ -133,6 +162,7 @@ async fn event_loop(
                 partial.as_ref(),
                 view::MAX_PREVIEW_ROWS,
                 view::MAX_EDITOR_ROWS,
+                default_popup_cap(app.viewport_height_cap()),
             );
             app.redraw_full(&transcript, &frame.lines, frame.cursor)
                 .map_err(|e| e.to_string())?;
@@ -173,7 +203,7 @@ async fn event_loop(
     Ok(())
 }
 
-/// 组装视口帧并绘制(终端过矮时收缩预览区/编辑器行数)。
+/// 组装视口帧并绘制(终端过矮时收缩预览区/补全弹窗/编辑器行数)。
 fn draw(
     state: &mut InteractiveState,
     app: &mut TuiApp,
@@ -182,17 +212,27 @@ fn draw(
     let budget = app.viewport_height_cap();
     let mut preview_cap = view::MAX_PREVIEW_ROWS;
     let mut editor_cap = view::MAX_EDITOR_ROWS;
-    let mut frame = view::viewport(state, partial, preview_cap, editor_cap);
+    let mut popup_cap = default_popup_cap(budget);
+    let mut frame = view::viewport(state, partial, preview_cap, editor_cap, popup_cap);
     while frame.height > budget && preview_cap > 0 {
         preview_cap = preview_cap.saturating_sub(2);
-        frame = view::viewport(state, partial, preview_cap, editor_cap);
+        frame = view::viewport(state, partial, preview_cap, editor_cap, popup_cap);
     }
     if frame.height > budget {
+        popup_cap = 1;
         editor_cap = 1;
-        frame = view::viewport(state, partial, 0, editor_cap);
+        frame = view::viewport(state, partial, 0, editor_cap, popup_cap);
     }
     app.set_viewport_height(frame.height)?;
     app.draw_viewport(&frame.lines, frame.cursor)
+}
+
+/// 补全弹窗的默认行数上限:不超过 8 行,且保证 composer(3 行)+ footer
+/// (2 行)在预算内完整可见。
+fn default_popup_cap(budget: u16) -> usize {
+    budget
+        .saturating_sub(5)
+        .min(rpi_tui::command_popup::MAX_VISIBLE_ROWS as u16) as usize
 }
 
 /// 启动区:横幅 + 分隔线 + 已加载资源分节([Extensions] 等,ctrl+o 展开)。

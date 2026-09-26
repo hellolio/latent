@@ -23,7 +23,7 @@ impl<'a> Markdown<'a> {
         }
     }
 
-    /// 启用代码块语法高亮(传入 `Highlighter::shared()`)。
+    /// 启用代码块语法高亮(传入 `Highlighter::shared(theme.is_dark)`)。
     pub fn with_highlight(mut self, highlighter: &'static Highlighter) -> Self {
         self.highlighter = Some(highlighter);
         self
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn code_block_with_language_and_border() {
         let t = theme();
-        let md = Markdown::new(&t).with_highlight(Highlighter::shared());
+        let md = Markdown::new(&t).with_highlight(Highlighter::shared(true));
         let out: Vec<String> = md
             .render("```rust\nlet a = 1;\nlet b = 2;\n```", 40)
             .iter()
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn code_block_wraps_long_lines() {
         let t = theme();
-        let md = Markdown::new(&t).with_highlight(Highlighter::shared());
+        let md = Markdown::new(&t).with_highlight(Highlighter::shared(true));
         let out = md.render(&format!("```text\n{}\n```", "x".repeat(60)), 20);
         // 顶 + 至少 3 行折行 + 底
         assert!(out.len() >= 5, "{out:?}");
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn unclosed_fence_renders_rest_as_code() {
         let t = theme();
-        let md = Markdown::new(&t).with_highlight(Highlighter::shared());
+        let md = Markdown::new(&t).with_highlight(Highlighter::shared(true));
         let out = md.render("```rust\nlet x = 1;", 40);
         assert!(out.len() >= 3);
     }

@@ -312,6 +312,10 @@ struct SettingsDefaults {
     default_provider: Option<String>,
     #[serde(default, alias = "default_model")]
     default_model: Option<String>,
+    /// TUI 主题名(ratatui-themes kebab-case,如 `tokyo-night`);仅供
+    /// interactive 模式读取,这里只存字符串、不解析
+    #[serde(default)]
+    theme: Option<String>,
 }
 
 /// 默认模型选择:项目 `.rpi/settings.json` 优先于全局,首个非空 defaultProvider
@@ -345,6 +349,30 @@ pub fn load_default_model_selection(
         }
     }
     (default_provider, default_model)
+}
+
+/// TUI 主题名:项目 `.rpi/settings.json` 优先于全局,首个非空 `theme` 生效。
+/// 只返回原始字符串;解析/降级由 rpi-tui 的 `Theme::resolve` 负责。
+pub fn load_theme_setting(project_dir: Option<&Path>, home: Option<&Path>) -> Option<String> {
+    let mut paths = Vec::new();
+    if let Some(project) = project_dir {
+        paths.push(project.join(".rpi/settings.json"));
+    }
+    if let Some(home) = home {
+        paths.push(home.join(".rpi/settings.json"));
+    }
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(settings) = serde_json::from_str::<SettingsDefaults>(&text) else {
+            continue;
+        };
+        if let Some(theme) = settings.theme.filter(|v| !v.trim().is_empty()) {
+            return Some(theme);
+        }
+    }
+    None
 }
 
 // 引用 model.rs 的工厂(避免循环 use):见文件底 re-export
@@ -504,5 +532,32 @@ mod tests {
         let (provider, model) = load_default_model_selection(Some(&project.0), Some(&global.0));
         assert_eq!(provider.as_deref(), Some("local"));
         assert_eq!(model.as_deref(), Some("my-model"));
+    }
+
+    #[test]
+    fn theme_setting_project_overrides_global() {
+        let global = TempDir::new("tg");
+        let project = TempDir::new("tp");
+        // 无配置 → None
+        assert_eq!(load_theme_setting(Some(&project.0), Some(&global.0)), None);
+        global.write(".rpi/settings.json", r#"{ "theme": "nord" }"#);
+        assert_eq!(
+            load_theme_setting(Some(&project.0), Some(&global.0)).as_deref(),
+            Some("nord")
+        );
+        // 项目覆盖全局;空字符串视为未配置
+        project.write(
+            ".rpi/settings.json",
+            r#"{ "theme": "tokyo-night", "defaultModel": "m" }"#,
+        );
+        assert_eq!(
+            load_theme_setting(Some(&project.0), Some(&global.0)).as_deref(),
+            Some("tokyo-night")
+        );
+        project.write(".rpi/settings.json", r#"{ "theme": "  " }"#);
+        assert_eq!(
+            load_theme_setting(Some(&project.0), Some(&global.0)).as_deref(),
+            Some("nord")
+        );
     }
 }

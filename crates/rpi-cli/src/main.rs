@@ -41,6 +41,7 @@ enum Args {
         mode: Mode,
         provider: Option<String>,
         model: Option<String>,
+        theme: Option<String>,
         cont: bool,
         prompt: Option<String>,
     },
@@ -54,6 +55,7 @@ fn parse_args(args: &[String]) -> Args {
     let mut mode: Option<Mode> = None;
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
+    let mut theme: Option<String> = None;
     let mut mock = false;
     let mut cont = false;
     let mut prompt_parts: Vec<String> = Vec::new();
@@ -76,6 +78,10 @@ fn parse_args(args: &[String]) -> Args {
             }
             "--model" if i + 1 < args.len() => {
                 model = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--theme" if i + 1 < args.len() => {
+                theme = Some(args[i + 1].clone());
                 i += 2;
             }
             "--mock" => {
@@ -109,6 +115,7 @@ fn parse_args(args: &[String]) -> Args {
         mode,
         provider,
         model,
+        theme,
         cont,
         prompt,
     }
@@ -126,6 +133,7 @@ async fn run(args: &[String]) -> Result<(), String> {
             mode,
             provider,
             model,
+            theme,
             cont,
             prompt,
         } => {
@@ -187,7 +195,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                         session_store,
                     )
                     .await?;
-                    modes::interactive::run_interactive_mode(built, ui, ui_rx).await
+                    modes::interactive::run_interactive_mode(built, ui, ui_rx, theme).await
                 }
             }
         }

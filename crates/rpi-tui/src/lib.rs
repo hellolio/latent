@@ -19,6 +19,7 @@
 //! 集中在 `app.rs`,用 TestBackend 验证结构性不变量。
 
 pub mod app;
+pub mod command_popup;
 pub mod editor;
 pub mod footer;
 pub mod header;
@@ -33,6 +34,7 @@ pub mod tool_card;
 pub mod width;
 
 pub use app::{reader_checkpoint, TuiApp};
+pub use command_popup::{CommandEntry, CommandPopup};
 pub use editor::{Editor, EditorView};
 pub use footer::{ctx_segment, FooterData};
 pub use header as header_view;
@@ -41,7 +43,7 @@ pub use key::{from_event, Key};
 pub use loader as loader_view;
 pub use markdown::Markdown;
 pub use select_list::SelectList;
-pub use theme::Theme;
+pub use theme::{Theme, ThemeName};
 pub use width::{char_width, display_width, truncate_to_width, wrap_to_width};
 
 /// UI 行类型(静态生命周期,组件纯函数的输出)。

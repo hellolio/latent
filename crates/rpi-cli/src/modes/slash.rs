@@ -27,6 +27,11 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "查看/设置 thinking 级别(off|minimal|low|medium|high|xhigh|max)",
     },
     SlashCommand {
+        name: "theme",
+        args: "[name]",
+        description: "查看/切换主题(ratatui-themes,如 tokyo-night/nord)",
+    },
+    SlashCommand {
         name: "compact",
         args: "",
         description: "压缩上下文(摘要替换历史)",
@@ -49,6 +54,7 @@ pub enum SlashAction {
     Help,
     Model { arg: Option<String> },
     Thinking { arg: Option<String> },
+    Theme { arg: Option<String> },
     Compact { arg: Option<String> },
     Session,
     Quit,
@@ -88,6 +94,9 @@ pub fn parse(input: &str) -> SlashInput {
         "thinking" => SlashInput::Command(SlashAction::Thinking {
             arg: arg.map(str::to_string),
         }),
+        "theme" => SlashInput::Command(SlashAction::Theme {
+            arg: arg.map(str::to_string),
+        }),
         "compact" => SlashInput::Command(SlashAction::Compact {
             arg: arg.map(str::to_string),
         }),
@@ -107,6 +116,9 @@ pub fn help_lines() -> Vec<String> {
     }
     lines.push(String::new());
     lines.push("快捷键:".to_string());
+    lines.push(
+        "  输入 / 弹出命令补全(↑/↓ 选择 · Tab/Enter 补全 · Esc 关闭)".to_string(),
+    );
     lines.push("  Enter 发送 · Esc 中止当前 run · Ctrl+C 中断/双击退出 · Ctrl+D 退出".to_string());
     lines
 }
@@ -144,6 +156,16 @@ mod tests {
             SlashInput::Command(SlashAction::Thinking {
                 arg: Some("high".into())
             })
+        );
+        assert_eq!(
+            parse("/theme nord"),
+            SlashInput::Command(SlashAction::Theme {
+                arg: Some("nord".into())
+            })
+        );
+        assert_eq!(
+            parse("/theme"),
+            SlashInput::Command(SlashAction::Theme { arg: None })
         );
     }
 

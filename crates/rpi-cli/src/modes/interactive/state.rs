@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use rpi_tui::{Editor, Key, SelectList, Theme, UiLine};
+use rpi_tui::{CommandEntry, CommandPopup, Editor, Key, SelectList, Theme, UiLine};
 
 use super::usage::UsageTracker;
 
@@ -94,13 +94,20 @@ pub enum SelectKind {
     },
     /// 内部选择器(/thinking)
     Thinking,
+    /// 内部选择器(/theme):携带候选主题枚举
+    Theme { names: Vec<rpi_tui::ThemeName> },
 }
 
 pub struct InteractiveState {
     pub theme: Theme,
+    /// 当前主题名(kebab-case;ANSI 兜底时为 None,`/theme` 列表定位用)
+    pub theme_name: Option<String>,
     /// 终端显示宽度(Resize 时刷新;渲染/折行的唯一宽度来源)
     pub width: usize,
     pub editor: Editor,
+    /// 斜杠命令补全弹窗(Codex 风格):输入 `/xxx` 时跟随编辑器内容过滤,
+    /// 可见性与选中态由 `sync_slash_popup` 从编辑器文本推导。
+    pub slash_popup: CommandPopup,
     pub status: Status,
     /// spinner 拍数(busy 时每 120ms 自增)
     pub spin: usize,
@@ -147,8 +154,15 @@ impl InteractiveState {
     pub fn new(theme: Theme, width: usize) -> Self {
         InteractiveState {
             theme,
+            theme_name: None,
             width,
             editor: Editor::new(),
+            slash_popup: CommandPopup::new(
+                crate::modes::slash::COMMANDS
+                    .iter()
+                    .map(|command| CommandEntry::new(command.name, command.description))
+                    .collect(),
+            ),
             status: Status::Idle,
             spin: 0,
             stream_text: String::new(),
@@ -226,5 +240,11 @@ impl InteractiveState {
     /// 未消费按键交给编辑器(便于测试复用)。
     pub fn editor_key(&mut self, key: &Key) {
         self.editor.handle_key(key);
+    }
+
+    /// 编辑器内容变化后同步补全弹窗(过滤、可见性、选中复位)。
+    pub fn sync_slash_popup(&mut self) {
+        let text = self.editor.text();
+        self.slash_popup.sync(&text);
     }
 }
