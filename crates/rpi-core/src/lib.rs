@@ -5,12 +5,14 @@
 //! `create_retrying_provider`/`create_session_retry_hooks`)、trait(`ExtensionUi`
 //! /`ExtensionActions`/`Extension`/`SessionSink`/`SessionSubscriber`)、纯类型。
 
+pub mod config;
 pub mod extensions;
 pub mod model;
 pub mod retry;
 pub mod session;
 pub mod system_prompt;
 
+pub use config::{create_model_resolver_from_config, load_default_model_selection};
 pub use extensions::{
     bridge_elicitation, connect_stdio, create_diagnostics_sink, create_extension_event_bus,
     spawn_diagnostics_printer,
@@ -22,8 +24,8 @@ pub use model::{create_model_resolver, default_model_for, ModelResolver};
 pub use retry::{create_retrying_provider, RetryHooks};
 pub use session::{
     create_agent_session, create_session_retry_hooks, AgentSession, AgentSessionConfig,
-    AgentSessionEvent, CoreError, PromptOutcome, SessionSharedSubscriber, SessionSink,
-    SessionSubscriber,
+    AgentSessionEvent, ContextCompactor, CoreError, PromptOutcome, SessionSharedSubscriber,
+    SessionSink, SessionSubscriber,
 };
 pub use system_prompt::{
     build_system_prompt_sections, build_system_prompt_state, diff_system_prompt_sections,

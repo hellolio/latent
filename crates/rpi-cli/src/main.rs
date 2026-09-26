@@ -11,8 +11,7 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use rpi_ai::default_provider_endpoint;
-use rpi_cli::assembly::{load_mcp_server_specs};
+use rpi_cli::assembly::load_mcp_server_specs;
 use rpi_cli::modes;
 
 #[tokio::main]
@@ -38,7 +37,7 @@ enum Mode {
 
 enum Args {
     MockExtensionServer,
-    Run { mode: Mode, provider: Option<String>, model: Option<String>, prompt: Option<String> },
+    Run { mode: Mode, provider: Option<String>, model: Option<String>, cont: bool, prompt: Option<String> },
     Invalid(String),
 }
 
@@ -50,6 +49,7 @@ fn parse_args(args: &[String]) -> Args {
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
     let mut mock = false;
+    let mut cont = false;
     let mut prompt_parts: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -76,6 +76,10 @@ fn parse_args(args: &[String]) -> Args {
                 mock = true;
                 i += 1;
             }
+            "--continue" | "-c" => {
+                cont = true;
+                i += 1;
+            }
             arg if arg.starts_with("--") => return Args::Invalid(format!("未知参数: {arg}")),
             arg => {
                 prompt_parts.push(arg.to_string());
@@ -95,7 +99,7 @@ fn parse_args(args: &[String]) -> Args {
         }
     });
     let prompt = (!prompt_parts.is_empty()).then(|| prompt_parts.join(" "));
-    Args::Run { mode, provider, model, prompt }
+    Args::Run { mode, provider, model, cont, prompt }
 }
 
 async fn run(args: &[String]) -> Result<(), String> {
@@ -106,15 +110,21 @@ async fn run(args: &[String]) -> Result<(), String> {
             print_help();
             std::process::exit(2);
         }
-        Args::Run { mode, provider, model, prompt } => {
+        Args::Run { mode, provider, model, cont, prompt } => {
             let (provider, model) = resolve_provider_and_model(provider, model)?;
             let extension_specs = load_mcp_server_specs();
+            let session_store = resolve_session_store(cont)?;
             match mode {
                 Mode::Print => {
                     let prompt = require_prompt(prompt).await?;
-                    let stop =
-                        modes::print_mode::run_print_mode(provider, model, prompt, extension_specs)
-                            .await?;
+                    let stop = modes::print_mode::run_print_mode(
+                        provider,
+                        model,
+                        prompt,
+                        extension_specs,
+                        session_store,
+                    )
+                    .await?;
                     println!("== 完成(stop: {stop:?})==");
                     Ok(())
                 }
@@ -126,6 +136,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                         model,
                         Arc::new(modes::json::JsonUi { out: out.clone() }),
                         extension_specs,
+                        session_store,
                     )
                     .await?;
                     modes::json::run_json_mode(built, prompt, out).await?;
@@ -141,6 +152,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                         model,
                         ui,
                         extension_specs,
+                        session_store,
                     )
                     .await?;
                     modes::rpc::run_rpc_mode(built, tokio::io::stdin(), writer).await
@@ -153,12 +165,36 @@ async fn run(args: &[String]) -> Result<(), String> {
                         model,
                         Arc::new(ui.clone()),
                         extension_specs,
+                        session_store,
                     )
                     .await?;
                     modes::interactive::run_interactive_mode(built, ui, ui_rx).await
                 }
             }
         }
+    }
+}
+
+/// 会话存储:默认在 `~/.rpi/sessions/` 新建 `<session-id>.jsonl`;
+/// `--continue` 续聊当前项目最近的会话文件。HOME 缺失时降级为内存会话。
+fn resolve_session_store(cont: bool) -> Result<rpi_cli::assembly::SessionStore, String> {
+    use rpi_cli::assembly::SessionStore;
+    let Some(home) = dirs_home() else {
+        if cont {
+            return Err("--continue 需要 HOME 目录".into());
+        }
+        eprintln!("[rpi] 无法定位 HOME,本次会话仅保存在内存");
+        return Ok(SessionStore::Memory);
+    };
+    let sessions_dir = home.join(".rpi/sessions");
+    if cont {
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let file = rpi_session::find_latest_session_file(&sessions_dir, Some(cwd.to_string_lossy().as_ref()))
+            .ok_or_else(|| format!("没有可续聊的会话({} 下没有当前项目的会话文件)", sessions_dir.display()))?;
+        println!("续聊会话:{}", file.display());
+        Ok(SessionStore::Resume { file })
+    } else {
+        Ok(SessionStore::New { dir: sessions_dir })
     }
 }
 
@@ -181,34 +217,54 @@ async fn require_prompt(prompt: Option<String>) -> Result<String, String> {
     Err("该模式需要 prompt(位置参数,或经管道从 stdin 读入)".into())
 }
 
-/// provider/model 解析:mock 或真实 provider(env key 校验 + ModelResolver)。
+/// provider/model 解析:mock 或真实 provider(models.json 配置体系 +
+/// ModelResolver;凭据由 Model/适配器按配置与 env 解析,不再前置拦截)。
 fn resolve_provider_and_model(
     provider: Option<String>,
     model: Option<String>,
 ) -> Result<(Arc<dyn rpi_ai::Provider>, rpi_ai::Model), String> {
-    match provider.as_deref() {
-        Some("mock") => {
-            let model = rpi_ai::Model::minimal("mock-1", "mock", "mock");
-            Ok((rpi_ai::create_mock_provider("你好!来自 rpi 的 MockProvider。"), model))
-        }
-        Some(provider_id) => {
-            if rpi_ai::env_keys::get_env_api_key(provider_id).is_none() {
-                return Err(format!(
-                    "未配置 API key:请设置 {provider_id} 对应的环境变量(如 ANTHROPIC_API_KEY)"
-                ));
-            }
-            let spec = match &model {
-                Some(model) => format!("{provider_id}/{model}"),
-                None => provider_id.to_string(),
-            };
-            let model = rpi_core::create_model_resolver().resolve(&spec)?;
-            let (api, _) = default_provider_endpoint(provider_id)
-                .ok_or_else(|| format!("未知 provider: {provider_id}"))?;
-            let provider = rpi_ai::create_provider(api).ok_or_else(|| format!("无适配器: {api}"))?;
-            Ok((provider, model))
-        }
-        None => Err("缺少 --provider(或 --mock)".into()),
+    if provider.as_deref() == Some("mock") {
+        let model = rpi_ai::Model::minimal("mock-1", "mock", "mock");
+        return Ok((rpi_ai::create_mock_provider("你好!来自 rpi 的 MockProvider。"), model));
     }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let home = dirs_home();
+    let resolver = rpi_core::create_model_resolver_from_config(Some(&cwd), home.as_deref());
+    // 未指定 provider/model 时回退 settings.json 的 defaultProvider/defaultModel
+    let (provider, model) = match (&provider, &model) {
+        (Some(_), _) | (_, Some(_)) => (provider, model),
+        (None, None) => {
+            let (default_provider, default_model) =
+                rpi_core::load_default_model_selection(Some(&cwd), home.as_deref());
+            if default_provider.is_none() && default_model.is_none() {
+                return Err(
+                    "缺少 --provider(或 --mock);也可在 .rpi/settings.json 配置 defaultProvider/defaultModel"
+                        .into(),
+                );
+            }
+            (default_provider, default_model)
+        }
+    };
+    // spec 组装:--provider p --model m → p/m;--model provider/model → 原样
+    let spec = match (&provider, &model) {
+        (Some(p), Some(m)) => {
+            if m.contains('/') {
+                return Err(format!("--model `{m}` 已含 provider 前缀,不要再传 --provider"));
+            }
+            format!("{p}/{m}")
+        }
+        (Some(p), None) => p.clone(),
+        (None, Some(m)) => m.clone(),
+        (None, None) => unreachable!("上方已保证 provider/model 至少一个存在"),
+    };
+    let model = resolver.resolve(&spec)?;
+    let adapter =
+        rpi_ai::create_provider(&model.api).ok_or_else(|| format!("无适配器: {}", model.api))?;
+    Ok((adapter, model))
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
 fn print_help() {
@@ -221,10 +277,14 @@ fn print_help() {
          \x20 rpi --mode json \"prompt\"                               AgentSession 事件 JSONL 上线\n\
          \x20 rpi --mode rpc                                         stdio JSONL RPC(编辑器集成)\n\
          \x20 rpi --provider <id> [--model <id>] \"prompt\"            指定真实 provider\n\
+         \x20 rpi --model <provider>/<id> \"prompt\"                    provider/model 形式\n\
+         \x20 rpi --continue [\"prompt\"]                               续聊当前项目最近的会话\n\
          \x20 rpi --mcp-mock-server                                   MCP 扩展自检服务端\n\
          \n\
          provider 示例:anthropic / openai / deepseek / openrouter / groq …\n\
-         API key 从环境变量读取(如 ANTHROPIC_API_KEY / OPENAI_API_KEY)。\n\
+         API key 从环境变量读取(如 ANTHROPIC_API_KEY / OPENAI_API_KEY);\n\
+         自定义 provider/model/URL 在 .rpi/models.json 或 ~/.rpi/models.json 声明,\n\
+         默认 provider/model 在 .rpi/settings.json 的 defaultProvider/defaultModel 配置。\n\
          MCP 扩展在 .rpi/settings.json 或 ~/.rpi/settings.json 的 mcpServers 中声明。"
     );
 }

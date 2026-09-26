@@ -89,6 +89,62 @@ fn new_session_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// 工厂:在目录下创建 `<session-id>.jsonl` 会话文件(目录不存在则创建),
+/// 文件名即 session id(pi 风格的 sessions 目录布局)。
+pub fn create_session_in_dir(
+    dir: impl AsRef<Path>,
+    cwd: &str,
+    parent_session: Option<&str>,
+) -> Result<Box<SessionManager>, SessionError> {
+    let dir = dir.as_ref();
+    std::fs::create_dir_all(dir)?;
+    let id = new_session_id();
+    let path = dir.join(format!("{id}.jsonl"));
+    // 先落首行 header(保证文件名与 session id 一致),再按既有文件打开
+    let header = SessionHeader::new(id, cwd.to_string(), parent_session.map(str::to_string));
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        writeln!(file, "{}", serde_json::to_string(&header)?)?;
+    }
+    create_session_with(Some(path), cwd, parent_session)
+}
+
+/// 找最近一次活动的会话文件(pi `--continue` 语义):按文件修改时间取最新;
+/// 传 cwd 时只考虑 header.cwd 匹配的会话(当前项目的会话)。
+/// 非法/损坏文件跳过;目录不存在或无匹配返回 None。
+pub fn find_latest_session_file(dir: impl AsRef<Path>, cwd: Option<&str>) -> Option<PathBuf> {
+    let dir = dir.as_ref();
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        if let Some(cwd) = cwd {
+            match read_session_header(&path) {
+                Ok(header) if header.kind == "session" && header.cwd == cwd => {}
+                _ => continue,
+            }
+        }
+        if best.as_ref().is_none_or(|(latest, _)| modified > *latest) {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+fn read_session_header(path: &Path) -> Result<SessionHeader, SessionError> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)?;
+    let mut line = String::new();
+    std::io::BufReader::new(file).read_line(&mut line)?;
+    Ok(serde_json::from_str(line.trim())?)
+}
+
 /// 加载既有 JSONL:首行 header,其后每行一个 entry;损坏行跳过并计数。
 fn load_file(path: &Path) -> Result<(SessionHeader, Vec<Entry>, usize), SessionError> {
     use std::io::BufRead;

@@ -59,6 +59,8 @@ pub enum AgentError {
     NothingToContinue,
     #[error("run panicked")]
     Panicked,
+    #[error("{0}")]
+    Other(String),
 }
 
 /// 用户 hooks 的透传绑定(pi 的 createLoopConfig;steering/follow-up 走
@@ -221,6 +223,19 @@ impl Agent {
         self.state.lock().unwrap().messages.clone()
     }
 
+    /// 整体替换转录(session 恢复 / compaction 投影回填;run 期间报错)。
+    /// 不产生事件:回填内容已存在于 Session,重放会造成重复持久化。
+    pub fn set_messages(&self, messages: Vec<AgentMessage>) -> Result<(), AgentError> {
+        if self.is_streaming() {
+            return Err(AgentError::AlreadyRunning);
+        }
+        let mut state = self.state.lock().unwrap();
+        state.streaming_message = None;
+        state.pending_tool_calls.clear();
+        state.messages = messages;
+        Ok(())
+    }
+
     /// 丢弃转录最后一条消息(overflow 恢复:移除被中断 turn 的错误 assistant 消息,
     /// 使 continue 的"最后一条为 user/toolResult"前置条件成立)。
     pub fn drop_last_message(&self) -> Option<AgentMessage> {
@@ -321,8 +336,7 @@ impl Agent {
     }
 
     /// reset(03 §8.1):保留重放后的首条 system 消息作 baseline;run 存在时报错。
-    pub fn reset(&self) -> Result<(), AgentError> {
-        if self.is_streaming() {
+    pub fn reset(&self) -> Result<(), AgentError> {        if self.is_streaming() {
             return Err(AgentError::AlreadyRunning);
         }
         let mut state = self.state.lock().unwrap();

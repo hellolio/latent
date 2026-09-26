@@ -238,11 +238,12 @@ async fn anthropic_http_error_is_classified_retryable() {
 }
 
 #[tokio::test]
-async fn anthropic_requires_api_key() {
+async fn anthropic_builtin_provider_missing_env_key_is_setup_error() {
     let (base, server) = spawn_sse_server(200, vec![String::new()], None).await;
-    // provider 名不命中任何 env 映射,保证测试不依赖宿主环境变量
+    // 白名单内 provider 缺 env key:请求前 setup error(不发起连接)。
+    // 选 xiaomi 是因为它基本不会出现在宿主环境里
     let mut model = anthropic_model(&base);
-    model.provider = "provider-without-env".into();
+    model.provider = "xiaomi".into();
     let events = collect(
         create_anthropic_adapter()
             .stream(&model, TranscriptContext { messages: vec![] }, StreamOptions::default())
@@ -256,6 +257,27 @@ async fn anthropic_requires_api_key() {
         }
         other => panic!("expected error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn anthropic_keyless_custom_provider_proceeds_without_auth() {
+    let (base, server) = spawn_sse_server(200, vec![String::new()], None).await;
+    // 白名单外自定义 provider 无 key(models.json 体系):请求照发(不带
+    // x-api-key),不再前置报 "No API key";空响应流产生的是流错误
+    let mut model = anthropic_model(&base);
+    model.provider = "provider-without-env".into();
+    let events = collect(
+        create_anthropic_adapter()
+            .stream(&model, TranscriptContext { messages: vec![] }, StreamOptions::default())
+            .await,
+    )
+    .await;
+    server.await.unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(e, AssistantMessageEvent::Error(m)
+            if m.error_message.as_deref().unwrap_or_default().contains("No API key"))),
+        "自定义 provider 不应因缺 key 被前置拦截,got {events:?}"
+    );
 }
 
 #[tokio::test]

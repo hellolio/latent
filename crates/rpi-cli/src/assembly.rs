@@ -97,6 +97,15 @@ pub struct BuiltSession {
     pub session_manager: Option<Arc<rpi_session::SessionManager>>,
 }
 
+/// 会话存储策略:`Memory` 纯内存(测试);`New` 在目录下新建
+/// `<session-id>.jsonl`;`Resume` 打开既有 JSONL 续聊(`--continue`)。
+#[derive(Debug, Clone)]
+pub enum SessionStore {
+    Memory,
+    New { dir: std::path::PathBuf },
+    Resume { file: std::path::PathBuf },
+}
+
 pub struct BuildOptions {
     pub provider: Arc<dyn rpi_ai::Provider>,
     pub model: rpi_ai::Model,
@@ -107,6 +116,8 @@ pub struct BuildOptions {
     /// T10:spawn 前命令改写钩子(可接扩展管线;缺省 None = 不改写)。
     /// commandPrefix 来自 settings(`load_shell_command_prefix`),不经本字段。
     pub spawn_hook: Option<Arc<dyn rpi_tools::ShellSpawnHook>>,
+    /// 会话存储策略(CLI 默认文件持久化,`--continue` 续聊)
+    pub session_store: SessionStore,
 }
 
 /// T9:PI_* 会话环境快照闭包。装配期建共享 cell(`Weak<AgentSession>`),
@@ -148,10 +159,23 @@ fn thinking_level_name(level: rpi_ai::ThinkingLevel) -> &'static str {
     }
 }
 
+/// session 投影设置态 → ThinkingLevel("off" = None)。
+fn parse_thinking_level(name: &str) -> Option<rpi_ai::ThinkingLevel> {
+    match name {
+        "minimal" => Some(rpi_ai::ThinkingLevel::Minimal),
+        "low" => Some(rpi_ai::ThinkingLevel::Low),
+        "medium" => Some(rpi_ai::ThinkingLevel::Medium),
+        "high" => Some(rpi_ai::ThinkingLevel::High),
+        "xhigh" => Some(rpi_ai::ThinkingLevel::Xhigh),
+        "max" => Some(rpi_ai::ThinkingLevel::Max),
+        _ => None,
+    }
+}
+
 /// 共享装配:扩展连接失败不阻断(诊断打 stderr,07 §8.5)。
 pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let BuildOptions { provider, model, ui, extension_specs, spawn_hook } = options;
+    let BuildOptions { provider, model, ui, extension_specs, spawn_hook, session_store } = options;
 
     // 扩展:settings → spawn → 总线;连接失败 = 诊断 + 跳过(绝不击穿宿主)
     let diagnostics = rpi_core::create_diagnostics_sink();
@@ -171,9 +195,32 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         Arc::new(ExtensionHooks::new(Arc::new(rpi_agent::PassthroughHooks), bus.clone()))
     };
 
-    // 会话树管理器先于工具装配创建:T9 的 PI_* 环境闭包需要读 session id/file
-    let session_manager: Arc<rpi_session::SessionManager> =
-        rpi_session::create_session(None::<String>).map_err(|e| e.to_string())?.into();
+    // 会话树管理器先于工具装配创建:T9 的 PI_* 环境闭包需要读 session id/file。
+    // 默认文件持久化(`~/.rpi/sessions/<session-id>.jsonl`),Memory 仅测试用
+    let session_manager: Arc<rpi_session::SessionManager> = match &session_store {
+        SessionStore::Memory => rpi_session::create_session(None::<String>)
+            .map_err(|e| e.to_string())?
+            .into(),
+        SessionStore::New { dir } => rpi_session::create_session_in_dir(dir, &cwd.display().to_string(), None)
+            .map_err(|e| e.to_string())?
+            .into(),
+        SessionStore::Resume { file } => rpi_session::create_session(Some(file))
+            .map_err(|e| e.to_string())?
+            .into(),
+    };
+
+    // transcript 统一:resume 时从 Session projection 回填初始转录(source of
+    // truth → context);设置态(thinking level)一并恢复
+    let (seed_messages, seed_thinking_level) = match &session_store {
+        SessionStore::Resume { .. } => {
+            let context = rpi_session::build_session_context(
+                &session_manager.branch_entries(),
+                session_manager.get_leaf_id().as_deref(),
+            );
+            (context.messages, context.thinking_level)
+        }
+        _ => (Vec::new(), "off".to_string()),
+    };
 
     // T9/T10:shell 工具装配选项 —— PI_* 会话环境 + settings 命令前缀 + spawn 钩子
     let session_cell: Arc<Mutex<Weak<AgentSession>>> = Arc::new(Mutex::new(Weak::new()));
@@ -192,6 +239,11 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     let retry_hooks = rpi_core::create_session_retry_hooks(subscribers.clone());
     let provider = rpi_core::create_retrying_provider(provider, rpi_ai::RetryPolicy::default(), Some(retry_hooks));
 
+    let compactor: Arc<dyn rpi_core::ContextCompactor> = Arc::new(SessionCompactor {
+        manager: session_manager.clone(),
+        provider: provider.clone(),
+        settings: rpi_session::CompactionSettings::default(),
+    });
     let session = Arc::new(
         create_agent_session(AgentSessionConfig {
             provider,
@@ -208,11 +260,18 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             limits: rpi_agent::TurnLimits::default(),
             stream_options: Default::default(),
             session_sink: Some(Arc::new(SessionManagerSink(session_manager.clone()))),
+            seed_messages,
+            compactor: Some(compactor),
             subscribers: Some(subscribers.clone()),
         })
         .await
         .map_err(|e| e.to_string())?,
     );
+
+    // resume 设置态恢复:直接回填 Agent 状态(不再落 thinking_level_change entry)
+    if let Some(level) = parse_thinking_level(&seed_thinking_level) {
+        session.agent().set_thinking_level(Some(level));
+    }
 
     // T9:session 建好后回填共享 cell,PI_* 环境闭包此后可按需快照
     *session_cell.lock().unwrap() = Arc::downgrade(&session);
@@ -239,6 +298,7 @@ pub struct SessionRequest {
     pub prompt: String,
     pub extension_specs: Vec<McpServerSpec>,
     pub extra_subscriber: Option<SessionSharedSubscriber>,
+    pub session_store: SessionStore,
 }
 
 pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
@@ -248,6 +308,7 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         ui: Arc::new(NoopUi),
         extension_specs: request.extension_specs,
         spawn_hook: None,
+        session_store: request.session_store,
     })
     .await?;
 
@@ -263,6 +324,7 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
 
 /// rpi-core 的 `SessionSink` 适配器:把可选组件 rpi-session 注入业务核。
 /// 拆卸 rpi-session 时删除本结构体即可,core 与其余 crate 不受影响。
+/// transcript 统一:消息 / usage / 模型与思考级别变更全部落盘。
 struct SessionManagerSink(Arc<rpi_session::SessionManager>);
 
 #[async_trait]
@@ -272,6 +334,131 @@ impl SessionSink for SessionManagerSink {
             .append_message(message.clone())
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    async fn append_model_change(&self, provider: &str, model_id: &str) -> Result<(), String> {
+        self.0
+            .append_model_change(provider, model_id)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn append_thinking_level_change(&self, level: &str) -> Result<(), String> {
+        self.0
+            .append_thinking_level_change(level)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn append_usage(
+        &self,
+        kind: &str,
+        provider: &str,
+        model: &str,
+        usage: rpi_ai::Usage,
+    ) -> Result<(), String> {
+        self.0
+            .append_usage(kind, provider, model, usage, None)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 统一 compaction(06 文档):provider 支撑的 Summarizer + SessionCompactor
+// ---------------------------------------------------------------------------
+
+/// 用当前会话的 provider/model 发摘要请求(SUMMARIZATION_PROMPT 管线)。
+struct ProviderSummarizer {
+    provider: Arc<dyn rpi_ai::Provider>,
+    model: rpi_ai::Model,
+}
+
+#[async_trait]
+impl rpi_session::Summarizer for ProviderSummarizer {
+    async fn summarize(
+        &self,
+        request: &rpi_session::SummarizationRequest,
+    ) -> Result<rpi_session::SummarizationResponse, String> {
+        // 占位 user 承载序列化对话,摘要指令拼接其后
+        let mut messages = request.messages.clone();
+        match messages.last_mut() {
+            Some(rpi_agent::AgentMessage::User { content, .. }) => {
+                content.push_str("\n\n");
+                content.push_str(&request.instruction);
+            }
+            _ => messages.push(rpi_agent::AgentMessage::user(&request.instruction)),
+        }
+        use rpi_agent::LoopHooks as _;
+        let llm_messages = rpi_agent::PassthroughHooks.convert_to_llm(&messages);
+        let mut stream = self
+            .provider
+            .stream(&self.model, rpi_ai::TranscriptContext { messages: llm_messages }, Default::default())
+            .await;
+        use futures::StreamExt;
+        let mut result: Option<rpi_session::SummarizationResponse> = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                rpi_ai::AssistantMessageEvent::Done(assistant) => {
+                    result = Some(rpi_session::SummarizationResponse {
+                        summary: assistant.text_content(),
+                        stop_reason: assistant.stop_reason,
+                        error_message: assistant.error_message.clone(),
+                        usage: Some(assistant.usage),
+                    });
+                }
+                rpi_ai::AssistantMessageEvent::Error(error) => {
+                    return Err(error.error_message.unwrap_or_else(|| "summarizer error".into()));
+                }
+                _ => {}
+            }
+        }
+        result.ok_or_else(|| "summarizer stream ended without a message".to_string())
+    }
+}
+
+/// overflow 恢复与 manual /compact 共用的压缩实现:
+/// 移除触发溢出的错误 assistant(ContextEdit)→ run_compaction →
+/// Compaction entry 落盘(原始历史保留)→ Session projection 回填上下文。
+struct SessionCompactor {
+    manager: Arc<rpi_session::SessionManager>,
+    provider: Arc<dyn rpi_ai::Provider>,
+    settings: rpi_session::CompactionSettings,
+}
+
+#[async_trait]
+impl rpi_core::ContextCompactor for SessionCompactor {
+    async fn compact(&self, model: &rpi_ai::Model) -> Result<Vec<rpi_agent::AgentMessage>, String> {
+        // 末尾是 overflow 错误 assistant 时剔除出上下文(append-only ContextEdit;
+        // 同时满足 continue_run"最后一条非 assistant"的前置条件)
+        let entries = self.manager.branch_entries();
+        if let Some(rpi_session::Entry::Message { id, message: rpi_agent::AgentMessage::Assistant(assistant), .. }) = entries.last() {
+            if matches!(assistant.stop_reason, rpi_ai::StopReason::Error) {
+                self.manager
+                    .append_context_edit(id, None)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        let entries = self.manager.branch_entries();
+        let summarizer = ProviderSummarizer { provider: self.provider.clone(), model: model.clone() };
+        if let Some(outcome) =
+            rpi_session::run_compaction(&entries, &self.settings, &summarizer).await?
+        {
+            self.manager
+                .append_compaction(
+                    outcome.summary,
+                    outcome.first_kept_entry_id,
+                    outcome.tokens_before,
+                    Some(outcome.details),
+                    outcome.usage,
+                    false,
+                    outcome.system_message,
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        // 压缩后上下文一律从 Session projection 重建(source of truth)
+        Ok(self.manager.projection().messages)
     }
 }
 
@@ -377,5 +564,95 @@ mod tests {
     fn missing_settings_yields_none() {
         let project = TempDir::new("none");
         assert_eq!(shell_command_prefix_from(Some(&project.0), None), None);
+    }
+
+    // ---- transcript 统一:sink 扩展 entry + 统一 compaction ----
+
+    #[tokio::test]
+    async fn sink_persists_model_thinking_usage_entries() {
+        let manager: Arc<rpi_session::SessionManager> =
+            rpi_session::create_session(None::<String>).unwrap().into();
+        let sink = SessionManagerSink(manager.clone());
+        sink.append(&rpi_agent::AgentMessage::user("hi")).await.unwrap();
+        sink.append_model_change("openai", "gpt-5").await.unwrap();
+        sink.append_thinking_level_change("high").await.unwrap();
+        sink.append_usage("message", "openai", "gpt-5", rpi_ai::Usage::default())
+            .await
+            .unwrap();
+        let kinds: Vec<String> = manager
+            .entries()
+            .iter()
+            .map(|entry| match entry {
+                rpi_session::Entry::Message { .. } => "message".into(),
+                rpi_session::Entry::ModelChange { .. } => "model_change".into(),
+                rpi_session::Entry::ThinkingLevelChange { .. } => "thinking_level".into(),
+                rpi_session::Entry::Usage { .. } => "usage".into(),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(kinds, vec!["message", "model_change", "thinking_level", "usage"]);
+    }
+
+    #[tokio::test]
+    async fn session_compactor_appends_compaction_and_rebuilds_projection() {
+        use rpi_agent::AgentMessage;
+
+        let manager: Arc<rpi_session::SessionManager> =
+            rpi_session::create_session(None::<String>).unwrap().into();
+        // transcript:System 声明 → user → assistant(正常)→ assistant(overflow 错误)
+        manager
+            .append_message(AgentMessage::System {
+                content: String::new(),
+                sections: Default::default(),
+                tools_added: Vec::new(),
+                tools_removed: Vec::new(),
+                timestamp: 0,
+            })
+            .unwrap();
+        manager.append_message(AgentMessage::user("第一轮问题")).unwrap();
+        let m = rpi_ai::Model::minimal("m", "mock", "mock");
+        let mut ok = rpi_ai::AssistantMessage::pending(&m);
+        ok.content = vec![rpi_ai::ContentBlock::text("回答")];
+        ok.stop_reason = rpi_ai::StopReason::Stop;
+        ok.usage.total_tokens = 100;
+        manager.append_message(AgentMessage::Assistant(Box::new(ok))).unwrap();
+        let mut error = rpi_ai::AssistantMessage::pending(&m);
+        error.stop_reason = rpi_ai::StopReason::Error;
+        error.error_message = Some("prompt is too long: 2000 tokens > 100 maximum".into());
+        manager.append_message(AgentMessage::Assistant(Box::new(error))).unwrap();
+
+        let compactor = SessionCompactor {
+            manager: manager.clone(),
+            provider: rpi_ai::create_mock_provider("## Goal\n摘要内容"),
+            settings: rpi_session::CompactionSettings {
+                enabled: true,
+                reserve_tokens: 0,
+                keep_recent_tokens: 0,
+            },
+        };
+        use rpi_core::ContextCompactor as _;
+        let messages = compactor.compact(&m).await.unwrap();
+
+        // 原始历史保留(append-only):4 条消息 entry 都在
+        let entries = manager.entries();
+        assert_eq!(
+            entries.iter().filter(|e| matches!(e, rpi_session::Entry::Message { .. })).count(),
+            4,
+            "原始消息不删除"
+        );
+        // Compaction + ContextEdit(剔除错误 assistant)entry 已落盘
+        assert!(entries.iter().any(|e| matches!(e, rpi_session::Entry::Compaction { .. })));
+        assert!(entries.iter().any(|e| matches!(e, rpi_session::Entry::ContextEdit { .. })));
+        // 压缩后上下文来自 projection:system 快照 + 摘要,被摘要消息不再出现
+        // 压缩后上下文:system 快照 + 摘要 + 保留的近期回复;
+        // 错误 assistant(ContextEdit 剔除)与被摘要的 user 不再出现
+        assert!(matches!(messages.first(), Some(AgentMessage::System { .. })));
+        assert!(messages.iter().any(|m| matches!(m, AgentMessage::CompactionSummary { .. })));
+        assert!(!messages.iter().any(|m| matches!(m, AgentMessage::User { .. })));
+        assert!(
+            !messages.iter().any(|m| matches!(m,
+                AgentMessage::Assistant(a) if matches!(a.stop_reason, rpi_ai::StopReason::Error))),
+            "触发溢出的错误 assistant 应被 ContextEdit 剔除"
+        );
     }
 }

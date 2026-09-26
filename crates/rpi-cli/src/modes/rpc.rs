@@ -302,7 +302,7 @@ async fn dispatch(
             )
             .await;
         }
-        RpcCommand::SetModel { model } => match rpi_core::create_model_resolver().resolve(&model) {
+        RpcCommand::SetModel { model } => match config_model_resolver().resolve(&model) {
             Ok(resolved) => {
                 session.set_model(resolved.clone());
                 write_response(writer, RpcResponse::ok(id, json!({ "model": resolved.id }))).await;
@@ -379,6 +379,13 @@ fn stop_reason(stop: &RunStop) -> &'static str {
         RunStop::Error(_) => "error",
         RunStop::BudgetExhausted(_) => "budget_exhausted",
     }
+}
+
+/// SetModel 用带 models.json 配置的 resolver(与启动路径一致)。
+fn config_model_resolver() -> rpi_core::ModelResolver {
+    let cwd = std::env::current_dir().ok();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    rpi_core::create_model_resolver_from_config(cwd.as_deref(), home.as_deref())
 }
 
 fn level_name(level: rpi_ai::ThinkingLevel) -> &'static str {

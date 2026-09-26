@@ -656,24 +656,32 @@ async fn stream_impl(
         // 请求体观察/替换(T3;panic 吞掉)
         observe_payload(&opts.on_payload, &mut body);
 
-        let Some(api_key) = crate::env_keys::resolve_api_key(&model.provider, opts.api_key.as_deref()) else {
-            yield setup_error(&model, format!("No API key for provider: {}", model.provider));
-            return;
+        // 凭据:显式配置(model.apiKey/opts)优先;白名单 provider 缺 env 报错;
+        // 自定义 provider 允许无 key(models.json 体系)
+        let api_key = match crate::env_keys::resolve_request_credential(
+            &model.provider,
+            opts.api_key.as_deref().or(model.api_key.as_deref()),
+        ) {
+            Ok(api_key) => api_key,
+            Err(message) => {
+                yield setup_error(&model, message);
+                return;
+            }
         };
 
         let base = if model.base_url.is_empty() { DEFAULT_BASE_URL } else { trim_base_url(&model.base_url) };
         let url = format!("{base}/v1/messages");
 
-        let headers = crate::adapters::build_header_map(
-            &[
-                ("x-api-key", api_key.clone()),
-                ("anthropic-version", ANTHROPIC_VERSION.to_string()),
-                ("content-type", "application/json".into()),
-                ("accept", "text/event-stream".into()),
-                ("user-agent", "rpi/0.1".into()),
-            ],
-            &opts.headers,
-        );
+        let mut defaults = vec![
+            ("anthropic-version", ANTHROPIC_VERSION.to_string()),
+            ("content-type", "application/json".into()),
+            ("accept", "text/event-stream".into()),
+            ("user-agent", "rpi/0.1".into()),
+        ];
+        if let Some(api_key) = &api_key {
+            defaults.insert(0, ("x-api-key", api_key.clone()));
+        }
+        let headers = crate::adapters::build_header_map(&defaults, &opts.headers);
         let response = client
             .post(&url)
             .headers(headers)

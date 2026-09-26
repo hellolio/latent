@@ -376,6 +376,10 @@ pub struct Model {
     pub provider: String,
     #[serde(default)]
     pub base_url: String,
+    /// 已解析的请求凭据(models.json 的 apiKey 经 env 名优先解析后的结果;
+    /// None = 无配置凭据,请求侧回退 env 白名单,白名单外 provider 允许无 key)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     #[serde(default)]
     pub input: Vec<String>,
     #[serde(default)]
@@ -405,6 +409,7 @@ impl Model {
             api: api.into(),
             provider: provider.into(),
             base_url: String::new(),
+            api_key: None,
             input: vec!["text".into()],
             cost: ModelCost::default(),
             headers: None,

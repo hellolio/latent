@@ -22,7 +22,10 @@ pub use compaction::{
 pub use entry::{
     ContextReplacement, Entry, SessionHeader, SessionTreeNode, CURRENT_SESSION_VERSION,
 };
-pub use manager::{create_session, create_session_with, SessionError, SessionManager};
+pub use manager::{
+    create_session, create_session_in_dir, create_session_with, find_latest_session_file,
+    SessionError, SessionManager,
+};
 pub use projection::{
     build_context_entries, build_session_context, build_session_path, build_session_projection,
     session_entry_to_context_messages, ModelRef, ProjectedEntry, SessionContext, SessionProjection,

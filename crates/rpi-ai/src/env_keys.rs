@@ -69,6 +69,28 @@ pub fn resolve_api_key(provider: &str, explicit: Option<&str>) -> Option<String>
     get_env_api_key(provider)
 }
 
+/// 请求侧统一凭据解析(models.json 体系的关键点:自定义 provider 不被
+/// env 白名单提前拦截):
+/// 1. 显式凭据(models.json apiKey 解析结果 / opts.api_key)非空 → 直接使用;
+/// 2. 内置 provider(env 白名单内)→ 读对应环境变量,缺失报错;
+/// 3. 自定义 provider(白名单外)→ 允许无凭据(请求不带 Authorization)。
+pub fn resolve_request_credential(provider: &str, explicit: Option<&str>) -> Result<Option<String>, String> {
+    if let Some(key) = explicit {
+        if !key.trim().is_empty() {
+            return Ok(Some(key.to_string()));
+        }
+    }
+    if let Some(key) = get_env_api_key(provider) {
+        return Ok(Some(key));
+    }
+    if env_api_key_vars(provider).is_some() {
+        return Err(format!(
+            "No API key for provider: {provider}(请在环境变量或 models.json 的 apiKey 中配置)"
+        ));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +108,20 @@ mod tests {
         assert_eq!(resolve_api_key("openai", Some("sk-explicit")), Some("sk-explicit".into()));
         assert_eq!(resolve_api_key("unknown-provider", Some("x")), Some("x".into()));
         assert_eq!(resolve_api_key("unknown-provider", None), None);
+    }
+
+    #[test]
+    fn request_credential_explicit_beats_env_and_allows_keyless_custom() {
+        // 显式凭据(含字面值)优先
+        assert_eq!(
+            resolve_request_credential("openai", Some("sk-from-config")).unwrap(),
+            Some("sk-from-config".into())
+        );
+        // 白名单 provider 缺 env → 报错(不静默发无 key 请求)
+        assert!(resolve_request_credential("openai", None).is_err());
+        // 白名单外自定义 provider → 允许无凭据
+        assert_eq!(resolve_request_credential("my-proxy", None).unwrap(), None);
+        // 空白显式值视为未提供
+        assert_eq!(resolve_request_credential("my-proxy", Some("  ")).unwrap(), None);
     }
 }

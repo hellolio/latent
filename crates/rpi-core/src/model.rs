@@ -1,11 +1,23 @@
 //! 模型解析(04 文档 §5 model-resolver 的 M4 子集):`provider/model` 字符串
 //! → Model;未知 provider 报错;可注册自定义模型(scoped models 的轻量版)。
 
+use std::collections::{BTreeMap, HashMap};
+
 use rpi_ai::{default_provider_endpoint, Model};
+
+#[derive(Clone, Debug)]
+struct ProviderOverride {
+    /// None = 保留内置端点 URL(仅覆盖 apiKey/headers 的场景)
+    base_url: Option<String>,
+    api: String,
+    api_key: Option<String>,
+    headers: Option<HashMap<String, String>>,
+}
 
 #[derive(Default)]
 pub struct ModelResolver {
     extra_models: Vec<Model>,
+    provider_overrides: BTreeMap<String, ProviderOverride>,
 }
 
 /// 工厂:空 resolver(内置 provider 端点表始终可用)。
@@ -36,6 +48,22 @@ impl ModelResolver {
         self.extra_models.push(model);
     }
 
+    /// 记录 provider 级 override(models.json):覆盖内置端点 URL / 为自定义
+    /// provider 提供 api+baseUrl / 为该 provider 的所有模型携带凭据与 headers。
+    pub fn set_provider_override(
+        &mut self,
+        provider_id: &str,
+        base_url: Option<String>,
+        api: &str,
+        api_key: Option<String>,
+        headers: Option<HashMap<String, String>>,
+    ) {
+        self.provider_overrides.insert(
+            provider_id.to_string(),
+            ProviderOverride { base_url, api: api.to_string(), api_key, headers },
+        );
+    }
+
     /// 解析 `provider/model`、`provider`(取默认模型)或已注册的自定义模型 id。
     pub fn resolve(&self, spec: &str) -> Result<Model, String> {
         let spec = spec.trim();
@@ -47,16 +75,39 @@ impl ModelResolver {
             Some((provider, model)) => (provider, Some(model)),
             None => (spec, None),
         };
+        // provider 级 override(models.json)优先于内置端点表
+        let (api, base_url) = match self.provider_overrides.get(provider_id) {
+            Some(over) => {
+                let base_url = match &over.base_url {
+                    Some(url) => url.clone(),
+                    None => default_provider_endpoint(provider_id)
+                        .map(|(_, url)| url.to_string())
+                        .unwrap_or_default(),
+                };
+                (over.api.clone(), base_url)
+            }
+            None => default_provider_endpoint(provider_id)
+                .map(|(api, url)| (api.to_string(), url.to_string()))
+                .ok_or_else(|| format!("unknown provider: {provider_id}"))?,
+        };
         let model_id = match model_id {
             Some(model) => model.to_string(),
             None => default_model_for(provider_id)
-                .ok_or_else(|| format!("unknown provider `{provider_id}`: no default model"))?
-                .to_string(),
+                .map(|model| model.to_string())
+                .or_else(|| {
+                    // 自定义 provider(models.json models 列表):首个模型为默认
+                    self.extra_models.iter().find(|m| m.provider == provider_id).map(|m| m.id.clone())
+                })
+                .ok_or_else(|| format!("unknown provider `{provider_id}`: no default model"))?,
         };
-        let (api, base_url) = default_provider_endpoint(provider_id)
-            .ok_or_else(|| format!("unknown provider: {provider_id}"))?;
         let mut model = Model::minimal(model_id, api, provider_id);
-        model.base_url = base_url.to_string();
+        model.base_url = base_url;
+        // override 携带的凭据/headers 应用到内置默认模型(如仅覆盖 openai 的
+        // 代理 URL 时,apiKey/headers 仍生效)
+        if let Some(over) = self.provider_overrides.get(provider_id) {
+            model.api_key.clone_from(&over.api_key);
+            model.headers.clone_from(&over.headers);
+        }
         Ok(model)
     }
 }
@@ -93,5 +144,30 @@ mod tests {
         assert_eq!(model.base_url, "http://localhost:8080/v1");
         let model = resolver.resolve("my-model").unwrap();
         assert_eq!(model.base_url, "http://localhost:8080/v1");
+    }
+
+    #[test]
+    fn provider_override_applies_to_builtin_default_models() {
+        let mut resolver = create_model_resolver();
+        resolver.set_provider_override(
+            "openai",
+            Some("https://my-proxy.example.com/v1".into()),
+            "openai-completions",
+            Some("sk-override".into()),
+            None,
+        );
+        // 不重定义 openai 模型,默认模型仍可解析,URL/凭据来自 override
+        let model = resolver.resolve("openai").unwrap();
+        assert_eq!(model.id, "gpt-4.1-mini");
+        assert_eq!(model.base_url, "https://my-proxy.example.com/v1");
+        assert_eq!(model.api_key.as_deref(), Some("sk-override"));
+    }
+
+    #[test]
+    fn override_without_url_keeps_builtin_endpoint() {
+        let mut resolver = create_model_resolver();
+        resolver.set_provider_override("anthropic", None, "anthropic-messages", None, None);
+        let model = resolver.resolve("anthropic/claude-sonnet-4-5").unwrap();
+        assert_eq!(model.base_url, "https://api.anthropic.com");
     }
 }

@@ -22,6 +22,7 @@ async fn build_with(provider: Arc<ScriptedProvider>) -> rpi_cli::assembly::Built
         ui: Arc::new(rpi_core::NoopUi),
         extension_specs: Vec::new(),
         spawn_hook: None,
+        session_store: rpi_cli::assembly::SessionStore::Memory,
     })
     .await
     .expect("build_session")
@@ -350,7 +351,7 @@ async fn rpc_extension_ui_backchannel_roundtrip() {
 #[tokio::test]
 async fn print_mode_runs_one_prompt_to_completion() {
     let provider = scripted_provider(vec![ScriptedTurn::text(&test_model(), "printed reply")]);
-    let stop = modes::print_mode::run_print_mode(provider, test_model(), "hello".into(), Vec::new())
+    let stop = modes::print_mode::run_print_mode(provider, test_model(), "hello".into(), Vec::new(), rpi_cli::assembly::SessionStore::Memory)
         .await
         .expect("print run");
     assert!(matches!(stop, rpi_agent::RunStop::EndTurn));
@@ -403,4 +404,158 @@ async fn bash_tool_receives_pi_session_env_via_build_session() {
     let echoed = &tool_results[0];
     assert!(echoed.contains("test-model"), "PI_MODEL 应被注入: {echoed}");
     assert!(!echoed.contains("$"), "变量应已展开: {echoed}");
+}
+
+// ---- Session 文件持久化:CLI 装配走 file-backed session,重启可续聊 ----
+
+async fn build_with_store(
+    provider: Arc<ScriptedProvider>,
+    store: rpi_cli::assembly::SessionStore,
+) -> rpi_cli::assembly::BuiltSession {
+    build_session(BuildOptions {
+        provider,
+        model: test_model(),
+        ui: Arc::new(rpi_core::NoopUi),
+        extension_specs: Vec::new(),
+        spawn_hook: None,
+        session_store: store,
+    })
+    .await
+    .expect("build_session")
+}
+
+fn session_messages(entries: &[rpi_session::Entry]) -> Vec<rpi_agent::AgentMessage> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            rpi_session::Entry::Message { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn file_backed_session_persists_jsonl_and_resumes() {
+    let dir = std::env::temp_dir().join(format!("rpi_sessions_it_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let session_id = {
+        let provider = scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]);
+        let built = build_with_store(
+            provider,
+            rpi_cli::assembly::SessionStore::New { dir: dir.clone() },
+        )
+        .await;
+        let manager = built.session_manager.clone().expect("file-backed manager");
+        let session_id = manager.session_id().to_string();
+        built.session.prompt("你好").await.expect("prompt");
+        built.session.wait_idle().await;
+        // 文件名即 session id,header + user/assistant 已落盘
+        let file = dir.join(format!("{session_id}.jsonl"));
+        assert!(file.exists(), "session 文件应落盘: {}", file.display());
+        let content = std::fs::read_to_string(&file).unwrap();
+        let header: rpi_session::SessionHeader =
+            serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        assert_eq!(header.kind, "session");
+        assert_eq!(header.id, session_id);
+        session_id
+    };
+
+    // 重启:从 JSONL 恢复(entries 与运行时一致),续聊接在同一树上
+    {
+        let file = dir.join(format!("{session_id}.jsonl"));
+        let resumed = rpi_session::create_session(Some(&file)).unwrap();
+        let messages = session_messages(&resumed.entries());
+        assert!(matches!(&messages[0], rpi_agent::AgentMessage::System { .. }), "首条 system baseline");
+        let turns: Vec<_> = messages
+            .iter()
+            .filter(|m| matches!(m, rpi_agent::AgentMessage::User { .. } | rpi_agent::AgentMessage::Assistant(_)))
+            .collect();
+        assert_eq!(turns.len(), 2, "user + assistant");
+        assert!(matches!(turns[0], rpi_agent::AgentMessage::User { .. }));
+        assert!(matches!(turns[1], rpi_agent::AgentMessage::Assistant(_)));
+
+        let leaf_before = resumed.get_leaf_id().unwrap();
+        drop(resumed);
+        let provider = scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-2")]);
+        let built = build_with_store(
+            provider,
+            rpi_cli::assembly::SessionStore::Resume { file },
+        )
+        .await;
+        built.session.prompt("再来一条").await.expect("prompt");
+        built.session.wait_idle().await;
+        let manager = built.session_manager.clone().unwrap();
+        assert_eq!(manager.session_id(), session_id, "resume 不换 session id");
+        let messages = session_messages(&manager.entries());
+        // resume 会追加新的 system baseline(append-only:重建系统提示词也是 entry)
+        assert_eq!(messages.len(), 6, "两段 system baseline + 两轮对话");
+        assert!(matches!(&messages[3], rpi_agent::AgentMessage::System { .. }));
+        assert!(matches!(&messages[4], rpi_agent::AgentMessage::User { .. }));
+        assert!(matches!(&messages[5], rpi_agent::AgentMessage::Assistant(_)));
+        let _ = leaf_before;
+    }
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// transcript 统一(文档验收 Test 1–3):完整 run(user → assistant(tool call)
+/// → tool result → assistant)结束后,仅从 JSONL 重建的 context 必须与 Agent
+/// 内存 context 一致,且 usage entry 已落盘。
+#[tokio::test]
+async fn jsonl_rebuild_matches_agent_context_after_tool_run() {
+    let dir = std::env::temp_dir().join(format!("rpi_transcript_it_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let m = test_model();
+    let first = rpi_ai::assistant_message(
+        &m,
+        vec![ContentBlock::ToolCall {
+            id: "call-t1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "echo transcript-check" }),
+        }],
+        rpi_ai::StopReason::ToolUse,
+    );
+    let provider = scripted_provider(vec![ScriptedTurn::new(first), ScriptedTurn::text(&m, "done")]);
+    let built = build_with_store(
+        provider,
+        rpi_cli::assembly::SessionStore::New { dir: dir.clone() },
+    )
+    .await;
+    built.session.prompt("跑一下命令").await.expect("prompt");
+    built.session.wait_idle().await;
+
+    let agent_context = built.session.agent().messages();
+    let file = dir.join(format!(
+        "{}.jsonl",
+        built.session_manager.as_ref().unwrap().session_id()
+    ));
+    drop(built);
+
+    // Test 2:只从 session 文件恢复(不依赖 Agent 内存 Vec)
+    let manager = rpi_session::create_session(Some(&file)).unwrap();
+    let context = rpi_session::build_session_context(
+        &manager.branch_entries(),
+        manager.get_leaf_id().as_deref(),
+    );
+    assert_eq!(
+        context.messages, agent_context,
+        "session projection 必须与运行结束时的 Agent context 一致"
+    );
+
+    // Test 3:tool interaction 保留完整
+    assert!(
+        agent_context
+            .iter()
+            .any(|msg| matches!(msg, rpi_agent::AgentMessage::ToolResult { .. })),
+        "tool result 应在恢复后的 context 中"
+    );
+    // usage entry 已随 assistant 定稿落盘
+    assert!(
+        manager.entries().iter().any(|e| matches!(e, rpi_session::Entry::Usage { .. })),
+        "usage entry 应落盘"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }

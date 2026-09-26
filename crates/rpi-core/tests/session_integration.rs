@@ -120,6 +120,8 @@ async fn build_session(
         stream_options: Default::default(),
             subscribers: None,
         session_sink: Some(sink.clone()),
+        seed_messages: Vec::new(),
+        compactor: None,
     })
     .await
     .unwrap();
@@ -254,6 +256,8 @@ async fn overflow_recovery_trims_and_retries() {
         stream_options: Default::default(),
             subscribers: None,
         session_sink: Some(sink.clone()),
+        seed_messages: Vec::new(),
+        compactor: None,
     })
     .await
     .unwrap();
@@ -323,6 +327,8 @@ async fn extension_registered_tool_joins_session() {
         stream_options: Default::default(),
             subscribers: None,
         session_sink: None,
+        seed_messages: Vec::new(),
+        compactor: None,
     })
     .await
     .unwrap();
@@ -363,4 +369,59 @@ async fn prompt_returns_enqueued_while_streaming_and_started_when_idle() {
     let first = first.await.unwrap().unwrap();
     assert!(matches!(first, rpi_core::PromptOutcome::Started(_)));
     session.wait_idle().await;
+}
+
+/// overflow 恢复走统一 compaction(06 文档):装配了 compactor 时不再内存砍半,
+/// compactor 被调用一次 → 返回压缩后上下文 → set_messages → continue 重放。
+#[tokio::test]
+async fn overflow_recovery_uses_unified_compactor() {
+    struct MockCompactor(AtomicU32);
+    #[async_trait]
+    impl rpi_core::ContextCompactor for MockCompactor {
+        async fn compact(&self, _model: &Model) -> Result<Vec<AgentMessage>, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![AgentMessage::user("精简后的上下文")])
+        }
+    }
+
+    let m = model();
+    let mut m2 = model();
+    m2.context_window = 100;
+    let read = Arc::new(TestTool { name: "read".into(), calls: AtomicU32::new(0) });
+    let provider = Arc::new(ScriptedProvider::new(
+        &m2,
+        vec![
+            ScriptedTurn::tool_calls(&m, vec![tool_call("t1", "read")]),
+            ScriptedTurn::error(&m, "prompt is too long: 2000 tokens > 100 maximum"),
+            ScriptedTurn::text(&m, "恢复成功"),
+        ],
+    ));
+    let compactor = Arc::new(MockCompactor(AtomicU32::new(0)));
+    let session = create_agent_session(AgentSessionConfig {
+        provider,
+        model: m2.clone(),
+        hooks: Arc::new(PassthroughHooks),
+        ui: Arc::new(NoopUi),
+        extensions: rpi_core::ExtensionRegistry::default(),
+        tools: vec![read],
+        active_tool_names: None,
+        system_prompt: SystemPromptOptions::default(),
+        limits: rpi_agent::TurnLimits::default(),
+        stream_options: Default::default(),
+        session_sink: None,
+        seed_messages: Vec::new(),
+        compactor: Some(compactor.clone()),
+        subscribers: None,
+    })
+    .await
+    .unwrap();
+
+    let stop = session.prompt("开始").await.unwrap().stop();
+    assert_eq!(stop, rpi_agent::RunStop::EndTurn, "统一 compaction 恢复后应正常结束");
+    assert_eq!(compactor.0.load(std::sync::atomic::Ordering::SeqCst), 1, "compactor 恰好调用一次");
+
+    // 压缩后上下文回填成功:恢复轮回复进了转录
+    let messages = session.agent().messages();
+    let last = messages.last().unwrap().as_assistant().unwrap();
+    assert_eq!(last.text_content(), "恢复成功");
 }

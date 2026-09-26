@@ -87,6 +87,7 @@ async fn e2e_mock_extension_registers_tool_blocks_bash_and_confirms_via_elicitat
         prompt: "go".into(),
         extension_specs: vec![mock_spec()],
         extra_subscriber: Some(subscriber),
+        session_store: rpi_cli::assembly::SessionStore::Memory,
     })
     .await
     .expect("E2E session 应成功");

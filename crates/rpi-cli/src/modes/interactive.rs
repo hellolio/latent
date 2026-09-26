@@ -366,6 +366,15 @@ async fn handle_key(
             }
             state.editor.commit_history();
             state.editor.clear();
+            // manual compact:与 overflow 恢复共用同一 compaction 实现(06 文档)
+            if text.trim() == "/compact" {
+                state.status = "compacting …".into();
+                match session.compact().await {
+                    Ok(count) => state.status = format!("compacted → {count} context messages"),
+                    Err(error) => state.status = format!("compact failed: {error}"),
+                }
+                return false;
+            }
             state.status = "thinking …".into();
             let session = session.clone();
             // prompt 任务在后台跑;事件经订阅者回流上屏,stdin 保持可响应

@@ -1,10 +1,12 @@
 //! print 模式(08 文档 §1):跑一个 prompt,流式输出最终回复到 stdout;
 //! 非 TTY 自动进入(main 侧判定)。
 
+use std::sync::Arc;
+
 use rpi_agent::RunStop;
 use rpi_core::McpServerSpec;
 
-use crate::assembly::{build_session, BuildOptions, SessionRequest, run_session};
+use crate::assembly::{build_session, BuildOptions, SessionRequest, SessionStore, run_session};
 
 /// print 模式入口:装配(NoopUi,headless 无交互)→ prompt → 流式打印。
 pub async fn run_print_mode(
@@ -12,6 +14,7 @@ pub async fn run_print_mode(
     model: rpi_ai::Model,
     prompt: String,
     extension_specs: Vec<McpServerSpec>,
+    session_store: SessionStore,
 ) -> Result<RunStop, String> {
     run_session(SessionRequest {
         provider,
@@ -19,11 +22,10 @@ pub async fn run_print_mode(
         prompt,
         extension_specs,
         extra_subscriber: None,
+        session_store,
     })
     .await
 }
-
-use std::sync::Arc;
 
 /// 供其他模式复用的装配(不跑 prompt)。
 pub async fn build_bare_session(
@@ -31,6 +33,15 @@ pub async fn build_bare_session(
     model: rpi_ai::Model,
     ui: Arc<dyn rpi_core::ExtensionUi>,
     extension_specs: Vec<McpServerSpec>,
+    session_store: SessionStore,
 ) -> Result<crate::assembly::BuiltSession, String> {
-    build_session(BuildOptions { provider, model, ui, extension_specs, spawn_hook: None }).await
+    build_session(BuildOptions {
+        provider,
+        model,
+        ui,
+        extension_specs,
+        spawn_hook: None,
+        session_store,
+    })
+    .await
 }

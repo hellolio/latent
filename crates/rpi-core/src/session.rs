@@ -33,9 +33,39 @@ pub enum CoreError {
 
 /// 会话持久化接缝:core 只见 trait,具体实现(如 rpi-session 的 JSONL 树)
 /// 由装配方注入(09 A4:持久会话由 SessionManager 权威所有)。
+///
+/// 除 `append` 外的方法都有默认空实现:装配方可按需支持对应 entry 类型
+/// (transcript 统一:消息/usage/模型与思考级别变更都进 Session)。
 #[async_trait]
 pub trait SessionSink: Send + Sync {
     async fn append(&self, message: &AgentMessage) -> Result<(), String>;
+
+    async fn append_model_change(&self, _provider: &str, _model_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn append_thinking_level_change(&self, _level: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn append_usage(
+        &self,
+        _kind: &str,
+        _provider: &str,
+        _model: &str,
+        _usage: rpi_ai::Usage,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// 上下文压缩统一入口(overflow 恢复与 manual /compact 共用;06 文档):
+/// 实现方负责 run compaction → Session.append(Compaction)(原始历史保留)
+/// → 返回压缩后的上下文消息(Session projection 结果)。传入当前模型供
+/// 摘要 LLM 调用使用。
+#[async_trait]
+pub trait ContextCompactor: Send + Sync {
+    async fn compact(&self, model: &Model) -> Result<Vec<AgentMessage>, String>;
 }
 
 /// mode 侧事件(04 文档 §2.3 AgentSessionEvent 的 M4 子集):10 种 agent 事件
@@ -78,6 +108,10 @@ pub struct AgentSessionConfig {
     pub limits: TurnLimits,
     pub stream_options: StreamOptions,
     pub session_sink: Option<Arc<dyn SessionSink>>,
+    /// 恢复/压缩接缝:从 Session 投影回填的初始转录(--continue 语义)
+    pub seed_messages: Vec<AgentMessage>,
+    /// 统一 compaction(overflow 恢复与 manual /compact 共用;装配方提供)
+    pub compactor: Option<Arc<dyn ContextCompactor>>,
     /// 外部预建的订阅者列表(可选):装配方需要把同一列表交给多个事件源
     /// (如 SessionBridge 与 retry hooks)时传入;缺省内部新建。
     pub subscribers: Option<Arc<Mutex<Vec<SessionSharedSubscriber>>>>,
@@ -123,6 +157,9 @@ pub struct AgentSession {
     ui: Arc<dyn ExtensionUi>,
     tools_all: Vec<Arc<dyn Tool>>,
     subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>>,
+    /// transcript 统一:模型/思考级别/usage 变更经同一 sink 落盘
+    session_sink: Option<Arc<dyn SessionSink>>,
+    compactor: Option<Arc<dyn ContextCompactor>>,
     runtime: Mutex<SessionRuntime>,
     /// 装配期收集的扩展诊断(init 失败跳过等,07 §8.5),面向 mode 可见。
     extension_diagnostics: Vec<ExtensionDiagnostic>,
@@ -170,16 +207,22 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
     };
 
     let agent = rpi_agent::create_agent(config.provider, config.hooks);
-    agent.set_model(config.model);
+    agent.set_model(config.model.clone());
     agent.set_system_prompt(Some(state.to_text()));
     agent.install_tools(active_tools);
     agent.set_limits(config.limits);
     agent.set_stream_options(config.stream_options);
+    // transcript 统一:--continue 场景从 Session projection 回填初始转录
+    if !config.seed_messages.is_empty() {
+        agent
+            .set_messages(config.seed_messages)
+            .map_err(CoreError::Agent)?;
+    }
 
     let subscribers = config.subscribers.clone().unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
     agent.subscribe(Arc::new(SessionBridge {
         subscribers: subscribers.clone(),
-        sink: config.session_sink,
+        sink: config.session_sink.clone(),
     }));
 
     Ok(AgentSession {
@@ -187,6 +230,8 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
         ui: config.ui,
         tools_all: tools,
         subscribers,
+        session_sink: config.session_sink,
+        compactor: config.compactor,
         extension_diagnostics,
         runtime: Mutex::new(SessionRuntime {
             system_prompt: state,
@@ -222,6 +267,15 @@ impl Subscriber for SessionBridge {
         if let (AgentEvent::MessageEnd { message }, Some(sink)) = (event, &self.sink) {
             if let Err(error) = sink.append(message).await {
                 eprintln!("[rpi] session sink append failed: {error}");
+            }
+            // usage 一致:assistant 定稿即记录 usage entry(不进模型上下文)
+            if let AgentMessage::Assistant(assistant) = message.as_ref() {
+                if let Err(error) = sink
+                    .append_usage("message", &assistant.provider, &assistant.model, assistant.usage)
+                    .await
+                {
+                    eprintln!("[rpi] session sink usage append failed: {error}");
+                }
             }
         }
         self.broadcast(&AgentSessionEvent::Agent(event.clone())).await;
@@ -394,9 +448,48 @@ impl AgentSession {
         Ok(())
     }
 
-    /// 切模型(pi setModel 的 M4 子集;model_change entry 随 M3 落地)。
+    /// 切模型(pi setModel):Agent 状态 + model_change entry 同步落盘。
     pub fn set_model(&self, model: Model) {
-        self.agent.set_model(model);
+        self.agent.set_model(model.clone());
+        if let Some(sink) = &self.session_sink {
+            let sink = sink.clone();
+            let provider = model.provider.clone();
+            let model_id = model.id.clone();
+            tokio::spawn(async move {
+                if let Err(error) = sink.append_model_change(&provider, &model_id).await {
+                    eprintln!("[rpi] session sink model change append failed: {error}");
+                }
+            });
+        }
+    }
+
+    /// 思考级别(pi setThinkingLevel):Agent 状态 + thinking_level_change entry。
+    pub fn set_thinking_level(&self, level: Option<rpi_ai::ThinkingLevel>) {
+        self.agent.set_thinking_level(level);
+        if let (Some(sink), Some(level)) = (&self.session_sink, level) {
+            let sink = sink.clone();
+            let name = level.as_str().to_string();
+            tokio::spawn(async move {
+                if let Err(error) = sink.append_thinking_level_change(&name).await {
+                    eprintln!("[rpi] session sink thinking level append failed: {error}");
+                }
+            });
+        }
+    }
+
+    /// manual compact:与 overflow 恢复共用同一 ContextCompactor(06 文档)。
+    /// 返回压缩后的上下文消息数。
+    pub async fn compact(&self) -> Result<usize, String> {
+        let compactor = self.compactor.as_ref().ok_or("compaction 未装配")?;
+        let model = self
+            .agent
+            .state_snapshot()
+            .model
+            .ok_or("compaction 需要 model")?;
+        let messages = compactor.compact(&model).await?;
+        let count = messages.len();
+        self.agent.set_messages(messages).map_err(|e| e.to_string())?;
+        Ok(count)
     }
 
     /// 更新系统提示词 options:diff 出 sections patch,prompt 时进转录。
@@ -428,8 +521,9 @@ impl AgentSession {
         }
     }
 
-    /// run + overflow 恢复(04 文档 §2.5):context overflow → 丢被中断 turn 的
-    /// 错误 assistant、裁最老上下文 → continue 重放;每次 run 只尝试一次。
+    /// run + overflow 恢复(04 文档 §2.5;06 文档统一 compaction):context
+    /// overflow → 统一 compaction(摘要 + Compaction entry 落盘)→ 投影回填
+    /// → continue 重放;每次 run 只尝试一次。
     async fn run_with_recovery<F>(&self, run: F) -> Result<RunStop, CoreError>
     where
         F: std::future::Future<Output = Result<RunStop, AgentError>>,
@@ -462,17 +556,32 @@ impl AgentSession {
             };
             if needs_recovery {
                 self.runtime.lock().unwrap().overflow_recovery_attempted = true;
-                let message_count = self.agent.messages().len();
                 self.broadcast(&AgentSessionEvent::AutoRetryStart {
                     attempt: 1,
                     delay_ms: 0,
-                    reason: "context overflow: trimming transcript and retrying".into(),
+                    reason: "context overflow: compacting transcript and retrying".into(),
                 })
                 .await;
-                // 丢被中断 turn 的错误 assistant;裁掉最老一半非系统上下文
-                self.agent.drop_last_message();
-                self.agent.trim_oldest_messages(message_count / 2 + 1);
-                let retry_stop = self.agent.continue_run().await;
+                // 统一入口:compaction(摘要 + Compaction entry)+ 投影回填;
+                // 未装配 compactor(纯内存测试)时退化为内存裁剪(无 session 可分裂)
+                let retry_stop = match &self.compactor {
+                    Some(compactor) => match self.agent.state_snapshot().model {
+                        Some(model) => match compactor.compact(&model).await {
+                            Ok(messages) => match self.agent.set_messages(messages) {
+                                Ok(()) => self.agent.continue_run().await,
+                                Err(error) => Err(error),
+                            },
+                            Err(error) => Err(AgentError::Other(error)),
+                        },
+                        None => Err(AgentError::NoModel),
+                    },
+                    None => {
+                        let message_count = self.agent.messages().len();
+                        self.agent.drop_last_message();
+                        self.agent.trim_oldest_messages(message_count / 2 + 1);
+                        self.agent.continue_run().await
+                    }
+                };
                 self.broadcast(&AgentSessionEvent::AutoRetryEnd {
                     success: matches!(retry_stop, Ok(RunStop::EndTurn)),
                     reason: "overflow recovery".into(),
