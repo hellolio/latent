@@ -12,9 +12,7 @@ pub mod loop_;
 pub mod message;
 pub mod tool;
 
-pub use agent::{
-    AgentError, AgentState, AgentStateSnapshot, QueueMode, create_agent, Agent,
-};
+pub use agent::{create_agent, Agent, AgentError, AgentState, AgentStateSnapshot, QueueMode};
 pub use declare::{declare_tool_changes, declared_tools};
 pub use event::{AgentEvent, MessageDeltaPayload, SharedPartial, SharedSubscriber, Subscriber};
 pub use hooks::{

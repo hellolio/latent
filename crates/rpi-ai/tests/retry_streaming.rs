@@ -66,7 +66,10 @@ impl RetryCallbacks for Hooks {
 async fn collect(stream: &mut rpi_ai::AssistantMessageEventStream) -> Vec<AssistantMessageEvent> {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
-        let terminal = matches!(event, AssistantMessageEvent::Done(_) | AssistantMessageEvent::Error(_));
+        let terminal = matches!(
+            event,
+            AssistantMessageEvent::Done(_) | AssistantMessageEvent::Error(_)
+        );
         events.push(event);
         if terminal {
             break;
@@ -80,13 +83,22 @@ async fn collect(stream: &mut rpi_ai::AssistantMessageEventStream) -> Vec<Assist
 async fn success_path_forwards_deltas_before_terminal() {
     let (tx, rx) = oneshot::channel();
     let provider = create_retrying_provider(
-        Arc::new(GateProvider { rx: std::sync::Mutex::new(Some(rx)) }),
-        RetryPolicy { base_delay_ms: 1, ..Default::default() },
+        Arc::new(GateProvider {
+            rx: std::sync::Mutex::new(Some(rx)),
+        }),
+        RetryPolicy {
+            base_delay_ms: 1,
+            ..Default::default()
+        },
         None,
     );
     let m = model();
     let mut stream = provider
-        .stream(&m, TranscriptContext { messages: vec![] }, StreamOptions::default())
+        .stream(
+            &m,
+            TranscriptContext { messages: vec![] },
+            StreamOptions::default(),
+        )
         .await;
 
     // 先收到 delta(收到即证明未缓冲到终态)
@@ -100,7 +112,10 @@ async fn success_path_forwards_deltas_before_terminal() {
     // 放行,流继续到终态
     tx.send(()).unwrap();
     let rest = collect(&mut stream).await;
-    assert!(matches!(rest.last(), Some(AssistantMessageEvent::Done(_))), "{rest:?}");
+    assert!(
+        matches!(rest.last(), Some(AssistantMessageEvent::Done(_))),
+        "{rest:?}"
+    );
 }
 
 /// 失败重试:提交点前的失败被静默截断,下游无重复 delta/Start。
@@ -122,20 +137,36 @@ async fn retryable_failure_before_first_delta_leaves_no_duplicate_frames() {
     let hooks = Arc::new(Hooks::default());
     let provider = create_retrying_provider(
         Arc::new(scripted),
-        RetryPolicy { base_delay_ms: 1, ..Default::default() },
+        RetryPolicy {
+            base_delay_ms: 1,
+            ..Default::default()
+        },
         Some(hooks.clone()),
     );
     let mut stream = provider
-        .stream(&m, TranscriptContext { messages: vec![] }, StreamOptions::default())
+        .stream(
+            &m,
+            TranscriptContext { messages: vec![] },
+            StreamOptions::default(),
+        )
         .await;
     let events = collect(&mut stream).await;
 
     // 无重复 Start;失败尝试的 Error 帧不泄漏;内容 delta 只有成功尝试的
-    let starts = events.iter().filter(|e| matches!(e, AssistantMessageEvent::Start)).count();
+    let starts = events
+        .iter()
+        .filter(|e| matches!(e, AssistantMessageEvent::Start))
+        .count();
     assert_eq!(starts, 1, "应只有成功尝试的 Start: {events:?}");
-    let errors = events.iter().filter(|e| matches!(e, AssistantMessageEvent::Error(_))).count();
+    let errors = events
+        .iter()
+        .filter(|e| matches!(e, AssistantMessageEvent::Error(_)))
+        .count();
     assert_eq!(errors, 0, "重试成功的路径不应有 Error 终态: {events:?}");
-    assert!(matches!(events.last(), Some(AssistantMessageEvent::Done(_))));
+    assert!(matches!(
+        events.last(),
+        Some(AssistantMessageEvent::Done(_))
+    ));
     assert_eq!(hooks.scheduled.load(Ordering::SeqCst), 1);
     assert_eq!(*hooks.finished.lock().unwrap(), vec![(true, 1)]);
 }
@@ -167,20 +198,37 @@ async fn failure_after_content_committed_is_not_retried() {
     let hooks = Arc::new(Hooks::default());
     let provider = create_retrying_provider(
         Arc::new(MidStreamError),
-        RetryPolicy { base_delay_ms: 1, ..Default::default() },
+        RetryPolicy {
+            base_delay_ms: 1,
+            ..Default::default()
+        },
         Some(hooks.clone()),
     );
     let m = model();
     let mut stream = provider
-        .stream(&m, TranscriptContext { messages: vec![] }, StreamOptions::default())
+        .stream(
+            &m,
+            TranscriptContext { messages: vec![] },
+            StreamOptions::default(),
+        )
         .await;
     let events = collect(&mut stream).await;
 
-    let deltas = events.iter().filter(|e| matches!(e, AssistantMessageEvent::TextDelta { .. })).count();
+    let deltas = events
+        .iter()
+        .filter(|e| matches!(e, AssistantMessageEvent::TextDelta { .. }))
+        .count();
     assert_eq!(deltas, 1, "内容 delta 已流出");
-    assert!(matches!(events.last(), Some(AssistantMessageEvent::Error(_))), "失败编码进流: {events:?}");
+    assert!(
+        matches!(events.last(), Some(AssistantMessageEvent::Error(_))),
+        "失败编码进流: {events:?}"
+    );
     assert_eq!(hooks.scheduled.load(Ordering::SeqCst), 0, "提交点后不重试");
-    assert_eq!(*hooks.finished.lock().unwrap(), vec![], "未发生重试则无 finished 上报");
+    assert_eq!(
+        *hooks.finished.lock().unwrap(),
+        vec![],
+        "未发生重试则无 finished 上报"
+    );
 }
 
 /// P0 回归:空回复(无任何内容 delta 的 Done)经重试装饰仍以 Done 终态收尾,
@@ -190,11 +238,18 @@ async fn empty_reply_through_retrying_provider_still_ends_done() {
     let m = model();
     let provider = create_retrying_provider(
         Arc::new(rpi_ai::MockProvider::new("")),
-        RetryPolicy { base_delay_ms: 1, ..Default::default() },
+        RetryPolicy {
+            base_delay_ms: 1,
+            ..Default::default()
+        },
         None,
     );
     let mut stream = provider
-        .stream(&m, TranscriptContext { messages: vec![] }, StreamOptions::default())
+        .stream(
+            &m,
+            TranscriptContext { messages: vec![] },
+            StreamOptions::default(),
+        )
         .await;
     let events = collect(&mut stream).await;
     match events.last() {
@@ -221,14 +276,28 @@ async fn aborted_and_quota_terminate_without_retry() {
         let hooks = Arc::new(Hooks::default());
         let provider = create_retrying_provider(
             Arc::new(scripted),
-            RetryPolicy { base_delay_ms: 1, ..Default::default() },
+            RetryPolicy {
+                base_delay_ms: 1,
+                ..Default::default()
+            },
             Some(hooks.clone()),
         );
         let mut stream = provider
-            .stream(&m, TranscriptContext { messages: vec![] }, StreamOptions::default())
+            .stream(
+                &m,
+                TranscriptContext { messages: vec![] },
+                StreamOptions::default(),
+            )
             .await;
         let events = collect(&mut stream).await;
-        assert!(matches!(events.last(), Some(AssistantMessageEvent::Error(_))), "{message}: {events:?}");
-        assert_eq!(hooks.scheduled.load(Ordering::SeqCst), 0, "{message} 不应重试");
+        assert!(
+            matches!(events.last(), Some(AssistantMessageEvent::Error(_))),
+            "{message}: {events:?}"
+        );
+        assert_eq!(
+            hooks.scheduled.load(Ordering::SeqCst),
+            0,
+            "{message} 不应重试"
+        );
     }
 }

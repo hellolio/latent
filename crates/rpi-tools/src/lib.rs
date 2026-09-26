@@ -17,8 +17,14 @@ mod write;
 
 // T9/T10:shell 工具的会话环境/前缀/钩子工厂经 crate 根出厂(其余工具经
 // default_tools/all_tools 注册表工厂装配)
-pub use bash::{create_bash_tool_with_session_env, create_powershell_tool_with, SessionEnvFn, ShellSpawnHook, ShellSpawnOptions};
-pub use truncate::{truncate_head, truncate_line, truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, GREP_MAX_LINE_LENGTH};
+pub use bash::{
+    create_bash_tool_with_session_env, create_powershell_tool_with, SessionEnvFn, ShellSpawnHook,
+    ShellSpawnOptions,
+};
+pub use truncate::{
+    truncate_head, truncate_line, truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES,
+    GREP_MAX_LINE_LENGTH,
+};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -150,7 +156,16 @@ mod tests {
         for tool in all_tools(Path::new(".")) {
             registry.register(tool);
         }
-        for name in ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"] {
+        for name in [
+            "read",
+            "bash",
+            "powershell",
+            "edit",
+            "write",
+            "grep",
+            "find",
+            "ls",
+        ] {
             assert!(registry.get(name).is_some(), "missing tool: {name}");
         }
     }
@@ -191,12 +206,16 @@ mod shell_validation_tests {
     fn valid_arguments_pass_real_tool_schemas() {
         let registry = create_tools_at(Path::new("."));
         let bash = registry.get("bash").unwrap();
-        assert!(
-            rpi_agent::validate_arguments(&bash.schema(), &serde_json::json!({"command": "ls"})).is_ok()
-        );
+        assert!(rpi_agent::validate_arguments(
+            &bash.schema(),
+            &serde_json::json!({"command": "ls"})
+        )
+        .is_ok());
         let read = registry.get("read").unwrap();
-        assert!(
-            rpi_agent::validate_arguments(&read.schema(), &serde_json::json!({"path": "a.txt", "offset": 1})).is_ok()
-        );
+        assert!(rpi_agent::validate_arguments(
+            &read.schema(),
+            &serde_json::json!({"path": "a.txt", "offset": 1})
+        )
+        .is_ok());
     }
 }

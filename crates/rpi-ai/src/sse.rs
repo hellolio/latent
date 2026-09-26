@@ -46,7 +46,10 @@ impl SseDecoder {
         if self.event.is_none() && self.data.is_empty() {
             return None;
         }
-        let event = SseEvent { event: self.event.take(), data: self.data.join("\n") };
+        let event = SseEvent {
+            event: self.event.take(),
+            data: self.data.join("\n"),
+        };
         self.data.clear();
         Some(event)
     }

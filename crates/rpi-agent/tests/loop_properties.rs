@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use proptest::prelude::*;
 use rpi_agent::{
-    AgentEvent, AgentMessage, LoopConfig, PassthroughHooks, SharedSubscriber, Subscriber, Tool,
-    ToolCall, ToolError, ToolOutput, ToolUpdater, run_agent_loop,
+    run_agent_loop, AgentEvent, AgentMessage, LoopConfig, PassthroughHooks, SharedSubscriber,
+    Subscriber, Tool, ToolCall, ToolError, ToolOutput, ToolUpdater,
 };
 use rpi_ai::{ContentBlock, Model, ScriptedProvider, ScriptedTurn};
 use tokio_util::sync::CancellationToken;
@@ -92,7 +92,11 @@ impl Tool for ProbeTool {
 }
 
 fn tool_call(id: &str, name: &str) -> ContentBlock {
-    ContentBlock::ToolCall { id: id.into(), name: name.into(), arguments: serde_json::json!({}) }
+    ContentBlock::ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments: serde_json::json!({}),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +177,11 @@ fn turn_plan_strategy() -> impl Strategy<Value = TurnPlan> {
     prop_oneof![Just(TurnPlan::Text), (1usize..=3).prop_map(TurnPlan::Calls)]
 }
 
-fn build_script(m: &Model, plans: &[TurnPlan], missing_every: usize) -> (Vec<ScriptedTurn>, Vec<ContentBlock>) {
+fn build_script(
+    m: &Model,
+    plans: &[TurnPlan],
+    missing_every: usize,
+) -> (Vec<ScriptedTurn>, Vec<ContentBlock>) {
     let mut turns = Vec::new();
     let mut all_calls = Vec::new();
     for (turn_index, plan) in plans.iter().enumerate() {
@@ -183,11 +191,12 @@ fn build_script(m: &Model, plans: &[TurnPlan], missing_every: usize) -> (Vec<Scr
                 let mut calls = Vec::new();
                 for i in 0..*n {
                     // 每 missing_every 个调用里有一个指向不存在的工具(错误路径)
-                    let (id, name) = if missing_every > 0 && (all_calls.len() + i) % missing_every == 0 {
-                        (format!("c{}-{}", turn_index, i), "missing".to_string())
-                    } else {
-                        (format!("c{}-{}", turn_index, i), format!("tool{}", i % 3))
-                    };
+                    let (id, name) =
+                        if missing_every > 0 && (all_calls.len() + i) % missing_every == 0 {
+                            (format!("c{}-{}", turn_index, i), "missing".to_string())
+                        } else {
+                            (format!("c{}-{}", turn_index, i), format!("tool{}", i % 3))
+                        };
                     calls.push(tool_call(&id, &name));
                 }
                 all_calls.extend(calls.clone());

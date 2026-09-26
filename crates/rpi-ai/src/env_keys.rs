@@ -74,7 +74,10 @@ pub fn resolve_api_key(provider: &str, explicit: Option<&str>) -> Option<String>
 /// 1. 显式凭据(models.json apiKey 解析结果 / opts.api_key)非空 → 直接使用;
 /// 2. 内置 provider(env 白名单内)→ 读对应环境变量,缺失报错;
 /// 3. 自定义 provider(白名单外)→ 允许无凭据(请求不带 Authorization)。
-pub fn resolve_request_credential(provider: &str, explicit: Option<&str>) -> Result<Option<String>, String> {
+pub fn resolve_request_credential(
+    provider: &str,
+    explicit: Option<&str>,
+) -> Result<Option<String>, String> {
     if let Some(key) = explicit {
         if !key.trim().is_empty() {
             return Ok(Some(key.to_string()));
@@ -105,8 +108,14 @@ mod tests {
 
     #[test]
     fn explicit_key_wins_over_env() {
-        assert_eq!(resolve_api_key("openai", Some("sk-explicit")), Some("sk-explicit".into()));
-        assert_eq!(resolve_api_key("unknown-provider", Some("x")), Some("x".into()));
+        assert_eq!(
+            resolve_api_key("openai", Some("sk-explicit")),
+            Some("sk-explicit".into())
+        );
+        assert_eq!(
+            resolve_api_key("unknown-provider", Some("x")),
+            Some("x".into())
+        );
         assert_eq!(resolve_api_key("unknown-provider", None), None);
     }
 
@@ -122,6 +131,9 @@ mod tests {
         // 白名单外自定义 provider → 允许无凭据
         assert_eq!(resolve_request_credential("my-proxy", None).unwrap(), None);
         // 空白显式值视为未提供
-        assert_eq!(resolve_request_credential("my-proxy", Some("  ")).unwrap(), None);
+        assert_eq!(
+            resolve_request_credential("my-proxy", Some("  ")).unwrap(),
+            None
+        );
     }
 }

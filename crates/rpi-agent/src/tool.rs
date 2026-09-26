@@ -29,7 +29,11 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     pub fn text(output: impl Into<String>) -> Self {
-        ToolOutput { output: output.into(), details: serde_json::Value::Null, terminate: false }
+        ToolOutput {
+            output: output.into(),
+            details: serde_json::Value::Null,
+            terminate: false,
+        }
     }
 }
 

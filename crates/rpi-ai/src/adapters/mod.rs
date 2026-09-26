@@ -17,10 +17,14 @@ pub(crate) enum ReadOutcome {
     Transport(String),
 }
 
-pub(crate) type ByteStream = std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
+pub(crate) type ByteStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
 
 /// 读一个上游字节块;cancel 取消时返回 Aborted(流随后以 aborted 终态收尾)。
-pub(crate) async fn read_chunk(stream: &mut ByteStream, cancel: Option<&CancellationToken>) -> ReadOutcome {
+pub(crate) async fn read_chunk(
+    stream: &mut ByteStream,
+    cancel: Option<&CancellationToken>,
+) -> ReadOutcome {
     let next = async { stream.next().await };
     let item = match cancel {
         None => next.await,
@@ -39,7 +43,10 @@ pub(crate) async fn read_chunk(stream: &mut ByteStream, cancel: Option<&Cancella
 /// 解析缓存保持期:显式优先,其次 PI_CACHE_RETENTION=long,默认 short(pi 语义)。
 pub(crate) fn resolve_cache_retention(explicit: Option<CacheRetention>) -> CacheRetention {
     explicit.unwrap_or_else(|| {
-        if std::env::var("PI_CACHE_RETENTION").map(|v| v == "long").unwrap_or(false) {
+        if std::env::var("PI_CACHE_RETENTION")
+            .map(|v| v == "long")
+            .unwrap_or(false)
+        {
             CacheRetention::Long
         } else {
             CacheRetention::Short
@@ -69,9 +76,12 @@ pub(crate) fn setup_error(model: &Model, message: String) -> AssistantMessageEve
 
 /// 取消后的终态 aborted 消息。
 pub(crate) fn aborted_error(model: &Model) -> AssistantMessageEvent {
-    AssistantMessageEvent::Error(Box::new(AssistantMessage::error(model, "Request was aborted", true)))
+    AssistantMessageEvent::Error(Box::new(AssistantMessage::error(
+        model,
+        "Request was aborted",
+        true,
+    )))
 }
-
 
 /// 请求头装配:适配器默认头先入表,用户请求头同名覆盖(pi 语义;
 /// reqwest 的 header() 是追加语义,直接链式会出现重复头)。
@@ -134,8 +144,7 @@ pub(crate) fn observe_response(
                 })
                 .collect(),
         };
-        let _ =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&observation)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(&observation)));
     }
 }
 

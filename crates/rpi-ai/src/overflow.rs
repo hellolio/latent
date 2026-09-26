@@ -67,12 +67,16 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
     // Case 1: 错误文案模式(先排除限流等非溢出错误)
     if message.stop_reason == StopReason::Error {
         if let Some(error_message) = &message.error_message {
-            let is_non_overflow = NON_OVERFLOW_PATTERNS.iter().any(|p| p.is_match(error_message));
+            let is_non_overflow = NON_OVERFLOW_PATTERNS
+                .iter()
+                .any(|p| p.is_match(error_message));
             if !is_non_overflow {
                 if OVERFLOW_PATTERNS.iter().any(|p| p.is_match(error_message)) {
                     return true;
                 }
-                if message.provider == "cerebras" && CEREBRAS_BODYLESS_OVERFLOW.is_match(error_message) {
+                if message.provider == "cerebras"
+                    && CEREBRAS_BODYLESS_OVERFLOW.is_match(error_message)
+                {
                     return true;
                 }
             }
@@ -128,43 +132,109 @@ mod tests {
 
     #[test]
     fn detects_provider_error_text() {
-        assert!(is_context_overflow(&error_msg("anthropic", "prompt is too long: 213462 tokens > 200000 maximum"), None));
-        assert!(is_context_overflow(&error_msg("openai", "Your input exceeds the context window of this model"), None));
-        assert!(is_context_overflow(&error_msg("groq", "Please reduce the length of the messages or completion"), None));
-        assert!(is_context_overflow(&error_msg("zai", "{\"code\":\"1261\",\"message\":\"Prompt too long\"}"), None));
-        assert!(is_context_overflow(&error_msg("cerebras", "400 (no body)"), None));
+        assert!(is_context_overflow(
+            &error_msg(
+                "anthropic",
+                "prompt is too long: 213462 tokens > 200000 maximum"
+            ),
+            None
+        ));
+        assert!(is_context_overflow(
+            &error_msg(
+                "openai",
+                "Your input exceeds the context window of this model"
+            ),
+            None
+        ));
+        assert!(is_context_overflow(
+            &error_msg(
+                "groq",
+                "Please reduce the length of the messages or completion"
+            ),
+            None
+        ));
+        assert!(is_context_overflow(
+            &error_msg("zai", "{\"code\":\"1261\",\"message\":\"Prompt too long\"}"),
+            None
+        ));
+        assert!(is_context_overflow(
+            &error_msg("cerebras", "400 (no body)"),
+            None
+        ));
     }
 
     #[test]
     fn excludes_throttling_and_unrelated_errors() {
         // 命中 "too many tokens" 但被 ThrottlingException 前缀排除
         assert!(!is_context_overflow(
-            &error_msg("bedrock", "Throttling error: Too many tokens, please wait before trying again."),
+            &error_msg(
+                "bedrock",
+                "Throttling error: Too many tokens, please wait before trying again."
+            ),
             None
         ));
-        assert!(!is_context_overflow(&error_msg("openai", "something else went wrong"), None));
+        assert!(!is_context_overflow(
+            &error_msg("openai", "something else went wrong"),
+            None
+        ));
     }
 
     #[test]
     fn detects_silent_and_length_overflows() {
-        let usage = Usage { input: 130_000, cache_read: 0, ..Default::default() };
-        assert!(is_context_overflow(&message_with(StopReason::Stop, usage), Some(128_000)));
+        let usage = Usage {
+            input: 130_000,
+            cache_read: 0,
+            ..Default::default()
+        };
+        assert!(is_context_overflow(
+            &message_with(StopReason::Stop, usage),
+            Some(128_000)
+        ));
         // 窗口内不算溢出
-        let small = Usage { input: 100, ..Default::default() };
-        assert!(!is_context_overflow(&message_with(StopReason::Stop, small), Some(128_000)));
+        let small = Usage {
+            input: 100,
+            ..Default::default()
+        };
+        assert!(!is_context_overflow(
+            &message_with(StopReason::Stop, small),
+            Some(128_000)
+        ));
         // length + 0 输出 + 输入填满窗口(≥99%)
-        let full = Usage { input: 127_500, output: 0, ..Default::default() };
-        assert!(is_context_overflow(&message_with(StopReason::Length, full), Some(128_000)));
+        let full = Usage {
+            input: 127_500,
+            output: 0,
+            ..Default::default()
+        };
+        assert!(is_context_overflow(
+            &message_with(StopReason::Length, full),
+            Some(128_000)
+        ));
         // 有输出则不判溢出
-        let with_output = Usage { input: 127_500, output: 10, ..Default::default() };
-        assert!(!is_context_overflow(&message_with(StopReason::Length, with_output), Some(128_000)));
+        let with_output = Usage {
+            input: 127_500,
+            output: 10,
+            ..Default::default()
+        };
+        assert!(!is_context_overflow(
+            &message_with(StopReason::Length, with_output),
+            Some(128_000)
+        ));
         // 未传窗口时不做静默检测
-        assert!(!is_context_overflow(&message_with(StopReason::Stop, usage), None));
+        assert!(!is_context_overflow(
+            &message_with(StopReason::Stop, usage),
+            None
+        ));
     }
 
     #[test]
     fn recoverable_length_requires_output_below_limit() {
-        let mut m = message_with(StopReason::Length, Usage { output: 100, ..Default::default() });
+        let mut m = message_with(
+            StopReason::Length,
+            Usage {
+                output: 100,
+                ..Default::default()
+            },
+        );
         assert!(is_recoverable_length(&m, 4096));
         assert!(!is_recoverable_length(&m, 0));
         m.usage.output = 4096;

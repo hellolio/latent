@@ -37,7 +37,13 @@ enum Mode {
 
 enum Args {
     MockExtensionServer,
-    Run { mode: Mode, provider: Option<String>, model: Option<String>, cont: bool, prompt: Option<String> },
+    Run {
+        mode: Mode,
+        provider: Option<String>,
+        model: Option<String>,
+        cont: bool,
+        prompt: Option<String>,
+    },
     Invalid(String),
 }
 
@@ -99,7 +105,13 @@ fn parse_args(args: &[String]) -> Args {
         }
     });
     let prompt = (!prompt_parts.is_empty()).then(|| prompt_parts.join(" "));
-    Args::Run { mode, provider, model, cont, prompt }
+    Args::Run {
+        mode,
+        provider,
+        model,
+        cont,
+        prompt,
+    }
 }
 
 async fn run(args: &[String]) -> Result<(), String> {
@@ -110,7 +122,13 @@ async fn run(args: &[String]) -> Result<(), String> {
             print_help();
             std::process::exit(2);
         }
-        Args::Run { mode, provider, model, cont, prompt } => {
+        Args::Run {
+            mode,
+            provider,
+            model,
+            cont,
+            prompt,
+        } => {
             let (provider, model) = resolve_provider_and_model(provider, model)?;
             let extension_specs = load_mcp_server_specs();
             let session_store = resolve_session_store(cont)?;
@@ -130,7 +148,8 @@ async fn run(args: &[String]) -> Result<(), String> {
                 }
                 Mode::Json => {
                     let prompt = require_prompt(prompt).await?;
-                    let out: modes::json::SharedWriter = Arc::new(std::sync::Mutex::new(std::io::stdout()));
+                    let out: modes::json::SharedWriter =
+                        Arc::new(std::sync::Mutex::new(std::io::stdout()));
                     let built = modes::print_mode::build_bare_session(
                         provider,
                         model,
@@ -189,8 +208,16 @@ fn resolve_session_store(cont: bool) -> Result<rpi_cli::assembly::SessionStore, 
     let sessions_dir = home.join(".rpi/sessions");
     if cont {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-        let file = rpi_session::find_latest_session_file(&sessions_dir, Some(cwd.to_string_lossy().as_ref()))
-            .ok_or_else(|| format!("没有可续聊的会话({} 下没有当前项目的会话文件)", sessions_dir.display()))?;
+        let file = rpi_session::find_latest_session_file(
+            &sessions_dir,
+            Some(cwd.to_string_lossy().as_ref()),
+        )
+        .ok_or_else(|| {
+            format!(
+                "没有可续聊的会话({} 下没有当前项目的会话文件)",
+                sessions_dir.display()
+            )
+        })?;
         println!("续聊会话:{}", file.display());
         Ok(SessionStore::Resume { file })
     } else {
@@ -225,7 +252,10 @@ fn resolve_provider_and_model(
 ) -> Result<(Arc<dyn rpi_ai::Provider>, rpi_ai::Model), String> {
     if provider.as_deref() == Some("mock") {
         let model = rpi_ai::Model::minimal("mock-1", "mock", "mock");
-        return Ok((rpi_ai::create_mock_provider("你好!来自 rpi 的 MockProvider。"), model));
+        return Ok((
+            rpi_ai::create_mock_provider("你好!来自 rpi 的 MockProvider。"),
+            model,
+        ));
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = dirs_home();
@@ -249,7 +279,9 @@ fn resolve_provider_and_model(
     let spec = match (&provider, &model) {
         (Some(p), Some(m)) => {
             if m.contains('/') {
-                return Err(format!("--model `{m}` 已含 provider 前缀,不要再传 --provider"));
+                return Err(format!(
+                    "--model `{m}` 已含 provider 前缀,不要再传 --provider"
+                ));
             }
             format!("{p}/{m}")
         }

@@ -102,11 +102,17 @@ impl LoopHooks for AgentHookAdapter {
         self.inner.finish_turn(ctx).await
     }
 
-    async fn before_tool_call(&self, ctx: crate::hooks::ToolCallCtx) -> Option<crate::hooks::ToolBlock> {
+    async fn before_tool_call(
+        &self,
+        ctx: crate::hooks::ToolCallCtx,
+    ) -> Option<crate::hooks::ToolBlock> {
         self.inner.before_tool_call(ctx).await
     }
 
-    async fn after_tool_call(&self, ctx: crate::hooks::ToolResultCtx) -> Option<crate::hooks::ToolPatch> {
+    async fn after_tool_call(
+        &self,
+        ctx: crate::hooks::ToolResultCtx,
+    ) -> Option<crate::hooks::ToolPatch> {
         self.inner.after_tool_call(ctx).await
     }
 
@@ -148,7 +154,9 @@ impl Agent {
     fn new(provider: Arc<dyn Provider>, hooks: Arc<dyn LoopHooks>, self_weak: Weak<Agent>) -> Self {
         let (sender, receiver) = create_injection_endpoints();
         let depth = sender.depth();
-        let adapter = Arc::new(AgentHookAdapter { inner: hooks.clone() });
+        let adapter = Arc::new(AgentHookAdapter {
+            inner: hooks.clone(),
+        });
         let (streaming, streaming_rx) = watch::channel(false);
         Self {
             state: Mutex::new(AgentState::default()),
@@ -310,7 +318,10 @@ impl Agent {
     }
 
     /// string | AgentMessage[] 双形态入口(pi 的 prompt input)。
-    pub async fn prompt_messages(&self, messages: Vec<AgentMessage>) -> Result<RunStop, AgentError> {
+    pub async fn prompt_messages(
+        &self,
+        messages: Vec<AgentMessage>,
+    ) -> Result<RunStop, AgentError> {
         if messages.is_empty() {
             return Err(AgentError::NothingToContinue);
         }
@@ -336,7 +347,8 @@ impl Agent {
     }
 
     /// reset(03 §8.1):保留重放后的首条 system 消息作 baseline;run 存在时报错。
-    pub fn reset(&self) -> Result<(), AgentError> {        if self.is_streaming() {
+    pub fn reset(&self) -> Result<(), AgentError> {
+        if self.is_streaming() {
             return Err(AgentError::AlreadyRunning);
         }
         let mut state = self.state.lock().unwrap();
@@ -403,8 +415,18 @@ impl Agent {
             .expect("injection receiver available outside run");
 
         // pi 的 createContextSnapshot:拿快照进、发事件出,无可变全局(09 A4)
-        let context = AgentContext { system, messages: transcript, tools };
-        let config = LoopConfig { model, thinking, limits, stream_options, steering_mode };
+        let context = AgentContext {
+            system,
+            messages: transcript,
+            tools,
+        };
+        let config = LoopConfig {
+            model,
+            thinking,
+            limits,
+            stream_options,
+            steering_mode,
+        };
         let sink: Arc<dyn Subscriber> = match self.self_weak.upgrade() {
             Some(this) => this,
             None => {
@@ -429,8 +451,10 @@ impl Agent {
                 // 异常终止路径:已取出未消费的注入消息放回通道(不静默丢失;
                 // 计数仍算在这些消息上,故用 requeue_* 不增计数)
                 let sender = self.sender.lock().unwrap();
-                let (requeued_steering, requeued_follow_up) =
-                    (output.requeued_steering.clone(), output.requeued_follow_up.clone());
+                let (requeued_steering, requeued_follow_up) = (
+                    output.requeued_steering.clone(),
+                    output.requeued_follow_up.clone(),
+                );
                 for message in requeued_steering {
                     sender.requeue_steering(message);
                 }
@@ -485,10 +509,20 @@ impl Agent {
         self.state.lock().unwrap().error_message = Some(message.to_string());
         let assistant = rpi_ai::AssistantMessage::error(&model, message, false);
         let entry = AgentMessage::Assistant(Box::new(assistant.clone()));
-        let start = AgentEvent::MessageStart { message: Box::new(entry.clone()), partial: None };
-        let end = AgentEvent::MessageEnd { message: Box::new(entry.clone()) };
-        let turn_end = AgentEvent::TurnEnd { message: Box::new(assistant), tool_results: Vec::new() };
-        let agent_end = AgentEvent::AgentEnd { messages: vec![entry] };
+        let start = AgentEvent::MessageStart {
+            message: Box::new(entry.clone()),
+            partial: None,
+        };
+        let end = AgentEvent::MessageEnd {
+            message: Box::new(entry.clone()),
+        };
+        let turn_end = AgentEvent::TurnEnd {
+            message: Box::new(assistant),
+            tool_results: Vec::new(),
+        };
+        let agent_end = AgentEvent::AgentEnd {
+            messages: vec![entry],
+        };
         self.on_event(&start).await;
         self.on_event(&end).await;
         self.on_event(&turn_end).await;

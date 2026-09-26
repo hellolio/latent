@@ -22,7 +22,8 @@ use crate::types::{
 };
 
 fn build_pattern(patterns: &[&str]) -> Regex {
-    Regex::new(&format!("(?i)(?:{})", patterns.join("|"))).expect("static retry pattern must compile")
+    Regex::new(&format!("(?i)(?:{})", patterns.join("|")))
+        .expect("static retry pattern must compile")
 }
 
 /// 订阅/配额/账单类错误:不可重试(retry.ts NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN)。
@@ -101,15 +102,26 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        RetryPolicy { enabled: true, max_retries: 3, base_delay_ms: 1000, max_agent_delay_ms: None }
+        RetryPolicy {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 1000,
+            max_agent_delay_ms: None,
+        }
     }
 }
 
 pub const DEFAULT_MAX_AGENT_RETRY_DELAY_MS: u64 = 60_000;
 
 pub fn retry_delay_ms(policy: &RetryPolicy, attempt: u32) -> u64 {
-    let delay = policy.base_delay_ms.saturating_mul(1u64 << attempt.saturating_sub(1).min(63));
-    delay.min(policy.max_agent_delay_ms.unwrap_or(DEFAULT_MAX_AGENT_RETRY_DELAY_MS))
+    let delay = policy
+        .base_delay_ms
+        .saturating_mul(1u64 << attempt.saturating_sub(1).min(63));
+    delay.min(
+        policy
+            .max_agent_delay_ms
+            .unwrap_or(DEFAULT_MAX_AGENT_RETRY_DELAY_MS),
+    )
 }
 
 /// 失败的 assistant 消息是否像瞬时 provider/传输错误。
@@ -118,7 +130,9 @@ pub fn is_retryable_assistant_error(message: &AssistantMessage) -> bool {
     if message.stop_reason != StopReason::Error {
         return false;
     }
-    let Some(error_message) = &message.error_message else { return false };
+    let Some(error_message) = &message.error_message else {
+        return false;
+    };
     if NON_RETRYABLE_PROVIDER_LIMIT_ERROR.is_match(error_message) {
         return false;
     }
@@ -128,7 +142,14 @@ pub fn is_retryable_assistant_error(message: &AssistantMessage) -> bool {
 /// 重试回调(全部可选)。
 pub trait RetryCallbacks: Send + Sync {
     /// 每次重试的退避睡眠前(1-indexed attempt)。
-    fn on_retry_scheduled(&self, _attempt: u32, _max_attempts: u32, _delay_ms: u64, _error_message: &str) {}
+    fn on_retry_scheduled(
+        &self,
+        _attempt: u32,
+        _max_attempts: u32,
+        _delay_ms: u64,
+        _error_message: &str,
+    ) {
+    }
     /// 退避睡眠后、重试调用开始前。
     fn on_retry_attempt_start(&self) {}
     /// 循环结束时恰好一次(success 表示后续调用正常完成)。
@@ -170,7 +191,10 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = AssistantMessage>,
 {
-    let max_attempts = policy.filter(|p| p.enabled).map(|p| p.max_retries).unwrap_or(0);
+    let max_attempts = policy
+        .filter(|p| p.enabled)
+        .map(|p| p.max_retries)
+        .unwrap_or(0);
     let mut attempt: u32 = 0;
     let mut last_retry: Option<(u32, String)> = None;
 
@@ -179,26 +203,35 @@ where
 
         if response.stop_reason == StopReason::Aborted {
             if let Some((attempt, _)) = last_retry {
-                if let Some(cb) = callbacks { cb.on_retry_finished(false, attempt, None) }
+                if let Some(cb) = callbacks {
+                    cb.on_retry_finished(false, attempt, None)
+                }
             }
             return response;
         }
         if response.stop_reason != StopReason::Error {
             if let Some((attempt, _)) = last_retry {
-                if let Some(cb) = callbacks { cb.on_retry_finished(true, attempt, None) }
+                if let Some(cb) = callbacks {
+                    cb.on_retry_finished(true, attempt, None)
+                }
             }
             return response;
         }
         if attempt >= max_attempts || !is_retryable_assistant_error(&response) {
             if let Some((attempt, _)) = last_retry {
                 let error = response.error_message.clone();
-                if let Some(cb) = callbacks { cb.on_retry_finished(false, attempt, error.as_deref()) }
+                if let Some(cb) = callbacks {
+                    cb.on_retry_finished(false, attempt, error.as_deref())
+                }
             }
             return response;
         }
 
         attempt += 1;
-        let error_message = response.error_message.clone().unwrap_or_else(|| "Unknown error".into());
+        let error_message = response
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "Unknown error".into());
         let delay_ms = policy.map(|p| retry_delay_ms(p, attempt)).unwrap_or(0);
         if let Some(cb) = callbacks {
             cb.on_retry_scheduled(attempt, max_attempts, delay_ms, &error_message);
@@ -207,7 +240,9 @@ where
 
         if !sleep_with_cancel(delay_ms, cancel).await {
             let (attempt, error) = last_retry.expect("last_retry set above");
-            if let Some(cb) = callbacks { cb.on_retry_finished(false, attempt, Some(error.as_str())) }
+            if let Some(cb) = callbacks {
+                cb.on_retry_finished(false, attempt, Some(error.as_str()))
+            }
             let mut aborted = response.clone();
             aborted.stop_reason = StopReason::Aborted;
             aborted.error_message = None; // pi 剥离 errorMessage,避免污染 aborted 语义
@@ -229,7 +264,11 @@ pub fn create_retrying_provider(
     policy: RetryPolicy,
     callbacks: Option<Arc<dyn RetryCallbacks>>,
 ) -> Arc<dyn Provider> {
-    Arc::new(RetryingProvider { inner, policy, callbacks })
+    Arc::new(RetryingProvider {
+        inner,
+        policy,
+        callbacks,
+    })
 }
 
 /// 流式重试装饰器:提交点(首个内容 delta)之前的帧先缓冲,可重试失败在
@@ -422,7 +461,9 @@ fn report_finished(
 }
 
 fn clone_context(ctx: &TranscriptContext) -> TranscriptContext {
-    TranscriptContext { messages: ctx.messages.clone() }
+    TranscriptContext {
+        messages: ctx.messages.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -437,21 +478,39 @@ mod tests {
 
     #[test]
     fn delay_grows_exponentially_and_is_capped() {
-        let policy = RetryPolicy { base_delay_ms: 1000, max_agent_delay_ms: None, ..Default::default() };
+        let policy = RetryPolicy {
+            base_delay_ms: 1000,
+            max_agent_delay_ms: None,
+            ..Default::default()
+        };
         assert_eq!(retry_delay_ms(&policy, 1), 1000);
         assert_eq!(retry_delay_ms(&policy, 2), 2000);
         assert_eq!(retry_delay_ms(&policy, 3), 4000);
-        let capped = RetryPolicy { base_delay_ms: 30_000, max_agent_delay_ms: Some(60_000), ..Default::default() };
+        let capped = RetryPolicy {
+            base_delay_ms: 30_000,
+            max_agent_delay_ms: Some(60_000),
+            ..Default::default()
+        };
         assert_eq!(retry_delay_ms(&capped, 5), 60_000);
     }
 
     #[test]
     fn classification_matches_transient_but_not_quota() {
-        assert!(is_retryable_assistant_error(&error_message("HTTP 429 Too Many Requests")));
-        assert!(is_retryable_assistant_error(&error_message("Connection refused")));
-        assert!(is_retryable_assistant_error(&error_message("Anthropic stream ended before message_stop")));
-        assert!(!is_retryable_assistant_error(&error_message("insufficient_quota: billing cycle exhausted")));
-        assert!(!is_retryable_assistant_error(&error_message("totally novel failure mode")));
+        assert!(is_retryable_assistant_error(&error_message(
+            "HTTP 429 Too Many Requests"
+        )));
+        assert!(is_retryable_assistant_error(&error_message(
+            "Connection refused"
+        )));
+        assert!(is_retryable_assistant_error(&error_message(
+            "Anthropic stream ended before message_stop"
+        )));
+        assert!(!is_retryable_assistant_error(&error_message(
+            "insufficient_quota: billing cycle exhausted"
+        )));
+        assert!(!is_retryable_assistant_error(&error_message(
+            "totally novel failure mode"
+        )));
         // 非 error 终态不重试
         let ok = AssistantMessage::pending(&Model::minimal("m", "mock", "mock"));
         assert!(!is_retryable_assistant_error(&ok));
@@ -465,11 +524,15 @@ mod tests {
         }
         impl RetryCallbacks for Cb {
             fn on_retry_scheduled(&self, _a: u32, _m: u32, _d: u64, _e: &str) {
-                self.scheduled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.scheduled
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
         let model = Model::minimal("m", "mock", "mock");
-        let policy = RetryPolicy { base_delay_ms: 1, ..Default::default() };
+        let policy = RetryPolicy {
+            base_delay_ms: 1,
+            ..Default::default()
+        };
         let mut calls = 0;
         let cb = Cb::default();
         let result = retry_assistant_call(
@@ -499,7 +562,11 @@ mod tests {
     #[tokio::test]
     async fn abort_during_backoff_normalizes_to_aborted() {
         let model = Model::minimal("m", "mock", "mock");
-        let policy = RetryPolicy { base_delay_ms: 60_000, max_retries: 3, ..Default::default() };
+        let policy = RetryPolicy {
+            base_delay_ms: 60_000,
+            max_retries: 3,
+            ..Default::default()
+        };
         let cancel = CancellationToken::new();
         let producer_cancel = cancel.clone();
         let result = retry_assistant_call(
@@ -523,7 +590,11 @@ mod tests {
     #[tokio::test]
     async fn aborted_response_is_never_retried() {
         let model = Model::minimal("m", "mock", "mock");
-        let policy = RetryPolicy { base_delay_ms: 1, max_retries: 5, ..Default::default() };
+        let policy = RetryPolicy {
+            base_delay_ms: 1,
+            max_retries: 5,
+            ..Default::default()
+        };
         let mut calls = 0;
         let result = retry_assistant_call(
             || {

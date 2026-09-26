@@ -29,9 +29,7 @@ use rmcp::service::{RoleClient, RunningService, ServiceError, ServiceExt};
 use rmcp::{transport::IntoTransport, ClientHandler};
 use serde_json::{json, Value};
 
-use super::event_bus::{
-    record_diagnostic, DiagnosticsSink, ExtensionEvent, ExtensionRegistration,
-};
+use super::event_bus::{record_diagnostic, DiagnosticsSink, ExtensionEvent, ExtensionRegistration};
 use super::mcp_tool::{McpToolMeta, ProgressRoutes};
 use super::ExtensionUi;
 
@@ -81,8 +79,11 @@ pub async fn bridge_elicitation(
     ui: &dyn ExtensionUi,
     request: ElicitRequestParams,
 ) -> Result<ElicitResult, McpError> {
-    let ElicitRequestParams::FormElicitationParams { message, requested_schema, meta: _ } =
-        request
+    let ElicitRequestParams::FormElicitationParams {
+        message,
+        requested_schema,
+        meta: _,
+    } = request
     else {
         // URL elicitation 是浏览器外跳流程,headless 宿主不支持
         return Ok(ElicitResult::new(ElicitationAction::Decline));
@@ -140,7 +141,9 @@ impl ClientHandler for HostClientHandler {
     /// 声明 elicitation 能力:扩展才允许发起反向 UI 调用。
     fn get_info(&self) -> rmcp::model::ClientConfig {
         rmcp::model::ClientConfig::new(
-            rmcp::model::ClientCapabilities::builder().enable_elicitation().build(),
+            rmcp::model::ClientCapabilities::builder()
+                .enable_elicitation()
+                .build(),
             rmcp::model::Implementation::new("rpi", env!("CARGO_PKG_VERSION")),
         )
     }
@@ -287,7 +290,10 @@ impl McpConnection {
                 }
                 Err(error.to_string())
             }
-            Err(_) => Err(format!("event `{}` timed out after {timeout:?}", event.as_str())),
+            Err(_) => Err(format!(
+                "event `{}` timed out after {timeout:?}",
+                event.as_str()
+            )),
         }
     }
 
@@ -327,7 +333,8 @@ async fn connect_after_serve(
     let peer = service.peer().clone();
 
     // 能力注册:扩展在响应里声明订阅事件表(07 §8.3)
-    let request = ClientRequest::CustomRequest(CustomRequest::new(REGISTER_METHOD, Some(json!({}))));
+    let request =
+        ClientRequest::CustomRequest(CustomRequest::new(REGISTER_METHOD, Some(json!({}))));
     let response = tokio::time::timeout(REGISTER_TIMEOUT, peer.send_request(request))
         .await
         .map_err(|_| "extension registration timed out".to_string())?
@@ -399,7 +406,10 @@ where
 {
     // handler(收 progress 通知)与连接(发 tools/call)共享同一路由表
     let progress_routes: ProgressRoutes = Arc::new(Mutex::new(HashMap::new()));
-    let handler = HostClientHandler { ui, progress_routes: progress_routes.clone() };
+    let handler = HostClientHandler {
+        ui,
+        progress_routes: progress_routes.clone(),
+    };
     let service = handler
         .serve(transport)
         .await
@@ -415,9 +425,19 @@ pub(crate) fn tool_wire_name(extension: &str, tool: &str) -> String {
 fn sanitize_extension_name(name: &str) -> String {
     let sanitized: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if sanitized.is_empty() { "extension".into() } else { sanitized }
+    if sanitized.is_empty() {
+        "extension".into()
+    } else {
+        sanitized
+    }
 }
 
 fn basename(command: &str) -> String {
@@ -442,9 +462,11 @@ pub(crate) async fn cancel_remote_request(
     request_id: rmcp::model::RequestId,
     reason: &str,
 ) {
-    let notification =
-        ClientNotification::CancelledNotification(rmcp::model::CancelledNotification::new(
-            rmcp::model::CancelledNotificationParam::new(Some(request_id), Some(reason.to_string())),
-        ));
+    let notification = ClientNotification::CancelledNotification(
+        rmcp::model::CancelledNotification::new(rmcp::model::CancelledNotificationParam::new(
+            Some(request_id),
+            Some(reason.to_string()),
+        )),
+    );
     let _ = peer.send_notification(notification).await;
 }

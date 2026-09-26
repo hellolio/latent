@@ -69,7 +69,9 @@ pub fn create_anthropic_adapter() -> std::sync::Arc<dyn Provider> {
 
 impl AnthropicAdapter {
     pub(crate) fn new() -> Self {
-        AnthropicAdapter { client: reqwest::Client::new() }
+        AnthropicAdapter {
+            client: reqwest::Client::new(),
+        }
     }
 }
 
@@ -93,9 +95,17 @@ fn cache_control_value(retention: CacheRetention, supports_long: bool) -> Option
     }
 }
 
-fn tool_to_api_value(tool: &Tool, strict_tools: bool, cache_control: Option<&Value>, is_last: bool) -> Value {
+fn tool_to_api_value(
+    tool: &Tool,
+    strict_tools: bool,
+    cache_control: Option<&Value>,
+    is_last: bool,
+) -> Value {
     let schema = &tool.parameters;
-    let properties = schema.get("properties").cloned().unwrap_or_else(|| json!({}));
+    let properties = schema
+        .get("properties")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let required = schema.get("required").cloned().unwrap_or_else(|| json!([]));
     let mut value = json!({
         "name": tool.name,
@@ -107,8 +117,9 @@ fn tool_to_api_value(tool: &Tool, strict_tools: bool, cache_control: Option<&Val
         },
     });
     if strict_tools {
-        if let Some(crate::types::ConstrainedSamplingConfig::JsonSchema { strict: crate::types::StrictMode::Require }) =
-            tool.constrained_sampling
+        if let Some(crate::types::ConstrainedSamplingConfig::JsonSchema {
+            strict: crate::types::StrictMode::Require,
+        }) = tool.constrained_sampling
         {
             value["strict"] = json!(true);
         }
@@ -122,7 +133,9 @@ fn tool_to_api_value(tool: &Tool, strict_tools: bool, cache_control: Option<&Val
 }
 
 fn content_blocks_to_api(content: &[ContentBlock]) -> Value {
-    let has_images = content.iter().any(|b| matches!(b, ContentBlock::Image { .. }));
+    let has_images = content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }));
     if !has_images {
         let text: Vec<&str> = content.iter().filter_map(|b| b.as_text()).collect();
         return json!(text.join("\n"));
@@ -168,7 +181,9 @@ fn convert_messages(
             M::System { .. } => {
                 let text = render_system_message_update(msg);
                 if !text.is_empty() {
-                    pending_system.push(json!({"role": "system", "content": [{"type": "text", "text": text}]}));
+                    pending_system.push(
+                        json!({"role": "system", "content": [{"type": "text", "text": text}]}),
+                    );
                 }
                 index += 1;
             }
@@ -209,7 +224,11 @@ fn convert_messages(
                                 blocks.push(json!({"type": "text", "text": text}));
                             }
                         }
-                        ContentBlock::Thinking { thinking, thinking_signature, redacted } => {
+                        ContentBlock::Thinking {
+                            thinking,
+                            thinking_signature,
+                            redacted,
+                        } => {
                             if redacted == &Some(true) {
                                 // 密文 payload 原样回放
                                 blocks.push(json!({"type": "redacted_thinking", "data": thinking_signature.clone().unwrap_or_default()}));
@@ -230,7 +249,11 @@ fn convert_messages(
                                 blocks.push(json!({"type": "thinking", "thinking": thinking, "signature": signature}));
                             }
                         }
-                        ContentBlock::ToolCall { id, name, arguments } => {
+                        ContentBlock::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
                             blocks.push(json!({"type": "tool_use", "id": id, "name": name, "input": arguments}));
                         }
                         ContentBlock::Image { .. } => {}
@@ -245,7 +268,13 @@ fn convert_messages(
                 // 连续 toolResult 合并进一条 user 消息(z.ai Anthropic 端点需要)
                 let mut tool_results: Vec<Value> = Vec::new();
                 while index < messages.len() {
-                    if let M::ToolResult { tool_call_id, content, is_error, .. } = &messages[index] {
+                    if let M::ToolResult {
+                        tool_call_id,
+                        content,
+                        is_error,
+                        ..
+                    } = &messages[index]
+                    {
                         tool_results.push(json!({
                             "type": "tool_result",
                             "tool_use_id": tool_call_id,
@@ -272,7 +301,11 @@ fn convert_messages(
                     if let Some(last_block) = blocks.last_mut() {
                         last_block["cache_control"] = cc.clone();
                     }
-                } else if last["content"].as_str().map(|s| !s.is_empty()).unwrap_or(false) {
+                } else if last["content"]
+                    .as_str()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                {
                     let text = last["content"].as_str().unwrap_or_default().to_string();
                     last["content"] = json!([{"type": "text", "text": text, "cache_control": cc}]);
                 }
@@ -291,7 +324,11 @@ fn build_request_body(
 ) -> Value {
     let initial = get_initial_system_message(&context.messages);
     let system_text = initial.map(get_system_message_text).unwrap_or_default();
-    let conversation = if initial.is_some() { &context.messages[1..] } else { &context.messages[..] };
+    let conversation = if initial.is_some() {
+        &context.messages[1..]
+    } else {
+        &context.messages[..]
+    };
 
     let mut body = json!({
         "model": model.id,
@@ -320,7 +357,9 @@ fn build_request_body(
                 body["thinking"] = json!({"type": "adaptive"});
                 // AnthropicEffort 无 minimal:minimal/low→low,xhigh/max 无映射时→high(pi 语义)
                 let effort = match level {
-                    crate::types::ThinkingLevel::Minimal | crate::types::ThinkingLevel::Low => "low".to_string(),
+                    crate::types::ThinkingLevel::Minimal | crate::types::ThinkingLevel::Low => {
+                        "low".to_string()
+                    }
                     crate::types::ThinkingLevel::Medium => "medium".to_string(),
                     crate::types::ThinkingLevel::High => "high".to_string(),
                     crate::types::ThinkingLevel::Xhigh | crate::types::ThinkingLevel::Max => {
@@ -331,7 +370,10 @@ fn build_request_body(
             } else {
                 // 预算式思考(pi adjustMaxTokensForThinking):先给思考腾出 max_tokens 空间,
                 // 再保证回答至少留 1024 token,避免 budget >= max_tokens 的非法请求
-                let base = opts.max_tokens.map(|t| t as u64).unwrap_or(model.max_tokens as u64);
+                let base = opts
+                    .max_tokens
+                    .map(|t| t as u64)
+                    .unwrap_or(model.max_tokens as u64);
                 let budget_raw = match level {
                     crate::types::ThinkingLevel::Minimal => 1024u64,
                     crate::types::ThinkingLevel::Low => 2048,
@@ -349,7 +391,11 @@ fn build_request_body(
 
     let tools = get_current_tools(&context.messages);
     if !tools.is_empty() {
-        let tool_cc = if compat.supports_cache_control_on_tools { cache_control } else { None };
+        let tool_cc = if compat.supports_cache_control_on_tools {
+            cache_control
+        } else {
+            None
+        };
         let converted: Vec<Value> = tools
             .iter()
             .enumerate()
@@ -384,8 +430,14 @@ fn map_stop_reason(raw: &str, stop_details: Option<&Value>) -> (StopReason, Opti
             (StopReason::Error, Some(explanation))
         }
         "pause_turn" | "stop_sequence" => (StopReason::Stop, None),
-        "sensitive" => (StopReason::Error, Some("Provider stopped with: sensitive".into())),
-        other => (StopReason::Error, Some(format!("Unhandled stop reason: {other}"))),
+        "sensitive" => (
+            StopReason::Error,
+            Some("Provider stopped with: sensitive".into()),
+        ),
+        other => (
+            StopReason::Error,
+            Some(format!("Unhandled stop reason: {other}")),
+        ),
     }
 }
 
@@ -443,15 +495,22 @@ fn handle_sse_event(
         return Err(event.data.clone());
     }
     // pi 语义:SSE event 字段只用于识别 error;分发按 JSON 的 type 字段
-    let data: Value = parse_json_with_repair(&event.data)
-        .map_err(|e| format!("Could not parse Anthropic SSE event: {e}; data={}", event.data))?;
+    let data: Value = parse_json_with_repair(&event.data).map_err(|e| {
+        format!(
+            "Could not parse Anthropic SSE event: {e}; data={}",
+            event.data
+        )
+    })?;
     // 归一化前的原始 provider 事件观察(T3)
     observe_provider_event(raw_event_observer, &data);
     let name = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match name {
         "message_start" => {
             let message = &data["message"];
-            state.output.response_id = message.get("id").and_then(|v| v.as_str()).map(str::to_string);
+            state.output.response_id = message
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             if let Some(response_model) = message.get("model").and_then(|v| v.as_str()) {
                 if response_model != model.id {
                     state.output.response_model = Some(response_model.to_string());
@@ -463,21 +522,38 @@ fn handle_sse_event(
             }
         }
         "content_block_start" => {
-            let provider_index = data.get("index").and_then(|v| v.as_u64()).unwrap_or_default();
+            let provider_index = data
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
             let block = &data["content_block"];
             let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let content_index = state.output.content.len();
             match block_type {
                 "text" => {
-                    let text = block.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    state.output.content.push(ContentBlock::Text { text, text_signature: None });
+                    let text = block
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    state.output.content.push(ContentBlock::Text {
+                        text,
+                        text_signature: None,
+                    });
                     state.index_map.insert(provider_index, content_index);
                     events_out.push(AssistantMessageEvent::TextStart { content_index });
                 }
                 "thinking" => {
-                    let thinking = block.get("thinking").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let signature =
-                        block.get("signature").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let thinking = block
+                        .get("thinking")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let signature = block
+                        .get("signature")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     state.output.content.push(ContentBlock::Thinking {
                         thinking,
                         thinking_signature: Some(signature),
@@ -487,7 +563,11 @@ fn handle_sse_event(
                     events_out.push(AssistantMessageEvent::ThinkingStart { content_index });
                 }
                 "redacted_thinking" => {
-                    let payload = block.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let payload = block
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     state.output.content.push(ContentBlock::Thinking {
                         thinking: "[Reasoning redacted]".into(),
                         thinking_signature: Some(payload),
@@ -497,8 +577,16 @@ fn handle_sse_event(
                     events_out.push(AssistantMessageEvent::ThinkingStart { content_index });
                 }
                 "tool_use" => {
-                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     state.output.content.push(ContentBlock::ToolCall {
                         id,
                         name,
@@ -515,14 +603,19 @@ fn handle_sse_event(
             }
         }
         "content_block_delta" => {
-            let provider_index = data.get("index").and_then(|v| v.as_u64()).unwrap_or_default();
+            let provider_index = data
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
             let delta = &data["delta"];
             let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match delta_type {
                 "text_delta" => {
                     let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
                     if let Some(&i) = state.index_map.get(&provider_index) {
-                        if let Some(ContentBlock::Text { text: t, .. }) = state.output.content.get_mut(i) {
+                        if let Some(ContentBlock::Text { text: t, .. }) =
+                            state.output.content.get_mut(i)
+                        {
                             t.push_str(text);
                             events_out.push(AssistantMessageEvent::TextDelta {
                                 content_index: i,
@@ -534,7 +627,9 @@ fn handle_sse_event(
                 "thinking_delta" => {
                     let thinking = delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
                     if let Some(&i) = state.index_map.get(&provider_index) {
-                        if let Some(ContentBlock::Thinking { thinking: t, .. }) = state.output.content.get_mut(i) {
+                        if let Some(ContentBlock::Thinking { thinking: t, .. }) =
+                            state.output.content.get_mut(i)
+                        {
                             t.push_str(thinking);
                             events_out.push(AssistantMessageEvent::ThinkingDelta {
                                 content_index: i,
@@ -544,10 +639,14 @@ fn handle_sse_event(
                     }
                 }
                 "signature_delta" => {
-                    let signature = delta.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+                    let signature = delta
+                        .get("signature")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     if let Some(&i) = state.index_map.get(&provider_index) {
-                        if let Some(ContentBlock::Thinking { thinking_signature, .. }) =
-                            state.output.content.get_mut(i)
+                        if let Some(ContentBlock::Thinking {
+                            thinking_signature, ..
+                        }) = state.output.content.get_mut(i)
                         {
                             let sig = thinking_signature.get_or_insert_with(String::new);
                             sig.push_str(signature);
@@ -555,11 +654,16 @@ fn handle_sse_event(
                     }
                 }
                 "input_json_delta" => {
-                    let partial = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or("");
+                    let partial = delta
+                        .get("partial_json")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     if let Some(&i) = state.index_map.get(&provider_index) {
                         let json = state.partial_json.entry(i).or_default();
                         json.push_str(partial);
-                        if let Some(ContentBlock::ToolCall { arguments, .. }) = state.output.content.get_mut(i) {
+                        if let Some(ContentBlock::ToolCall { arguments, .. }) =
+                            state.output.content.get_mut(i)
+                        {
                             *arguments = parse_streaming_json(Some(json));
                         }
                         events_out.push(AssistantMessageEvent::ToolCallDelta {
@@ -572,14 +676,25 @@ fn handle_sse_event(
             }
         }
         "content_block_stop" => {
-            let provider_index = data.get("index").and_then(|v| v.as_u64()).unwrap_or_default();
-            let Some(&content_index) = state.index_map.get(&provider_index) else { return Ok(()) };
+            let provider_index = data
+                .get("index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default();
+            let Some(&content_index) = state.index_map.get(&provider_index) else {
+                return Ok(());
+            };
             match state.output.content.get(content_index).cloned() {
                 Some(ContentBlock::Text { text, .. }) => {
-                    events_out.push(AssistantMessageEvent::TextEnd { content_index, content: text });
+                    events_out.push(AssistantMessageEvent::TextEnd {
+                        content_index,
+                        content: text,
+                    });
                 }
                 Some(ContentBlock::Thinking { thinking, .. }) => {
-                    events_out.push(AssistantMessageEvent::ThinkingEnd { content_index, content: thinking });
+                    events_out.push(AssistantMessageEvent::ThinkingEnd {
+                        content_index,
+                        content: thinking,
+                    });
                 }
                 Some(block @ ContentBlock::ToolCall { .. }) => {
                     // 定稿:用修复解析得到权威 arguments
@@ -588,14 +703,20 @@ fn handle_sse_event(
                         .get(&content_index)
                         .map(|json| crate::json_parse::parse_streaming_json(Some(json)))
                         .unwrap_or_else(|| json!({}));
-                    if let Some(ContentBlock::ToolCall { arguments, .. }) = state.output.content.get_mut(content_index)
+                    if let Some(ContentBlock::ToolCall { arguments, .. }) =
+                        state.output.content.get_mut(content_index)
                     {
                         *arguments = final_args;
                     }
                     state.partial_json.remove(&content_index);
                     events_out.push(AssistantMessageEvent::ToolCallEnd {
                         content_index,
-                        tool_call: state.output.content.get(content_index).cloned().unwrap_or(block),
+                        tool_call: state
+                            .output
+                            .content
+                            .get(content_index)
+                            .cloned()
+                            .unwrap_or(block),
                     });
                 }
                 _ => {}
@@ -620,13 +741,24 @@ fn handle_sse_event(
                 };
                 set("input_tokens", &mut state.output.usage.input);
                 set("output_tokens", &mut state.output.usage.output);
-                set("cache_read_input_tokens", &mut state.output.usage.cache_read);
-                set("cache_creation_input_tokens", &mut state.output.usage.cache_write);
-                if let Some(v) = usage.pointer("/cache_creation/ephemeral_1h_input_tokens").and_then(|v| v.as_u64())
+                set(
+                    "cache_read_input_tokens",
+                    &mut state.output.usage.cache_read,
+                );
+                set(
+                    "cache_creation_input_tokens",
+                    &mut state.output.usage.cache_write,
+                );
+                if let Some(v) = usage
+                    .pointer("/cache_creation/ephemeral_1h_input_tokens")
+                    .and_then(|v| v.as_u64())
                 {
                     state.output.usage.cache_write_1h = Some(v);
                 }
-                if let Some(v) = usage.pointer("/output_tokens_details/thinking_tokens").and_then(|v| v.as_u64()) {
+                if let Some(v) = usage
+                    .pointer("/output_tokens_details/thinking_tokens")
+                    .and_then(|v| v.as_u64())
+                {
                     state.output.usage.reasoning = Some(v);
                 }
                 state.recompute_total();
@@ -797,7 +929,6 @@ async fn stream_impl(
     })
 }
 
-
 #[async_trait]
 impl Provider for AnthropicAdapter {
     async fn stream(
@@ -875,7 +1006,11 @@ mod tests {
         let compat = AnthropicCompat::resolve(&model);
         assert!(!compat.supports_mid_convo_system_messages);
         let ctx = TranscriptContext {
-            messages: vec![Message::system("base"), Message::user_text("q"), Message::system("mid")],
+            messages: vec![
+                Message::system("base"),
+                Message::user_text("q"),
+                Message::system("mid"),
+            ],
         };
         let normalized = resolve_transcript(ctx, compat.supports_mid_convo_system_messages);
         let collapsed = collapse_system_messages(normalized);

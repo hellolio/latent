@@ -124,7 +124,11 @@ pub trait LoopHooks: Send + Sync {
     }
 
     /// 每次请求前(含第一次)调用;可替换 model/thinkingLevel。
-    async fn prepare_request(&self, _model: &Model, _thinking: Option<ThinkingLevel>) -> Option<RequestUpdate> {
+    async fn prepare_request(
+        &self,
+        _model: &Model,
+        _thinking: Option<ThinkingLevel>,
+    ) -> Option<RequestUpdate> {
         None
     }
 
@@ -164,15 +168,19 @@ impl LoopHooks for PassthroughHooks {
         use rpi_ai::Message;
         msgs.iter()
             .filter_map(|msg| match msg {
-                AgentMessage::System { content, sections, tools_added, tools_removed, timestamp } => {
-                    Some(Message::System {
-                        content: content.clone(),
-                        sections: sections.clone(),
-                        tools_added: tools_added.clone(),
-                        tools_removed: tools_removed.clone(),
-                        timestamp: *timestamp,
-                    })
-                }
+                AgentMessage::System {
+                    content,
+                    sections,
+                    tools_added,
+                    tools_removed,
+                    timestamp,
+                } => Some(Message::System {
+                    content: content.clone(),
+                    sections: sections.clone(),
+                    tools_added: tools_added.clone(),
+                    tools_removed: tools_removed.clone(),
+                    timestamp: *timestamp,
+                }),
                 AgentMessage::User { content, timestamp } => Some(Message::User {
                     content: rpi_ai::UserContent::Text(content.clone()),
                     timestamp: *timestamp,
@@ -194,8 +202,15 @@ impl LoopHooks for PassthroughHooks {
                     is_error: *is_error,
                     timestamp: *timestamp,
                 }),
-                AgentMessage::BashExecution { command, output, exit_code, timestamp: _ } => {
-                    let exit = exit_code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+                AgentMessage::BashExecution {
+                    command,
+                    output,
+                    exit_code,
+                    timestamp: _,
+                } => {
+                    let exit = exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".into());
                     Some(Message::user_text(format!(
                         "<bash_execution command=\"{}\" exit_code=\"{}\">\n{}\n</bash_execution>",
                         command.replace('"', "&quot;"),
@@ -203,11 +218,17 @@ impl LoopHooks for PassthroughHooks {
                         output
                     )))
                 }
-                AgentMessage::BranchSummary { summary, timestamp: _ } => Some(Message::user_text(format!(
+                AgentMessage::BranchSummary {
+                    summary,
+                    timestamp: _,
+                } => Some(Message::user_text(format!(
                     "<branch_summary>\n{}\n</branch_summary>",
                     summary
                 ))),
-                AgentMessage::CompactionSummary { summary, timestamp: _ } => Some(Message::user_text(format!(
+                AgentMessage::CompactionSummary {
+                    summary,
+                    timestamp: _,
+                } => Some(Message::user_text(format!(
                     "<compaction_summary>\n{}\n</compaction_summary>",
                     summary
                 ))),

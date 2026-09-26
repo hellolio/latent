@@ -40,7 +40,11 @@ pub struct SessionContext {
 
 /// by_id 索引(Entry id → 序列位置)。
 pub(crate) fn build_entry_index(entries: &[Entry]) -> std::collections::HashMap<&str, usize> {
-    entries.iter().enumerate().map(|(i, entry)| (entry.id(), i)).collect()
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| (entry.id(), i))
+        .collect()
 }
 
 /// ① leaf→root 回溯(06 文档 buildSessionPath):leaf 缺省或未命中时取序列末尾
@@ -49,7 +53,10 @@ pub fn build_session_path<'a>(entries: &'a [Entry], leaf_id: Option<&str>) -> Ve
     let index = build_entry_index(entries);
     let mut current = match leaf_id {
         None => entries.last(),
-        Some(id) => index.get(id).map(|&i| &entries[i]).or_else(|| entries.last()),
+        Some(id) => index
+            .get(id)
+            .map(|&i| &entries[i])
+            .or_else(|| entries.last()),
     };
     let mut path: Vec<&Entry> = Vec::new();
     // parentId 成环时路径长度不可能超过 entry 总数,以此兜底防死循环
@@ -60,7 +67,9 @@ pub fn build_session_path<'a>(entries: &'a [Entry], leaf_id: Option<&str>) -> Ve
         }
         remaining -= 1;
         path.push(entry);
-        current = entry.parent_id().and_then(|pid| index.get(pid).map(|&i| &entries[i]));
+        current = entry
+            .parent_id()
+            .and_then(|pid| index.get(pid).map(|&i| &entries[i]));
     }
     path.reverse();
     path
@@ -71,23 +80,41 @@ pub fn build_session_path<'a>(entries: &'a [Entry], leaf_id: Option<&str>) -> Ve
 /// 前移到它之后;无 compaction 则原样路径。
 pub fn build_context_entries<'a>(entries: &'a [Entry], leaf_id: Option<&str>) -> Vec<&'a Entry> {
     let path = build_session_path(entries, leaf_id);
-    let Some(compaction) = path.iter().rev().find(|e| matches!(e, Entry::Compaction { .. })) else {
+    let Some(compaction) = path
+        .iter()
+        .rev()
+        .find(|e| matches!(e, Entry::Compaction { .. }))
+    else {
         return path;
     };
     let compaction_id = compaction.id().to_string();
     let first_kept_entry_id = match compaction {
-        Entry::Compaction { first_kept_entry_id, .. } => first_kept_entry_id.clone(),
+        Entry::Compaction {
+            first_kept_entry_id,
+            ..
+        } => first_kept_entry_id.clone(),
         _ => return path,
     };
 
-    let compaction_idx = path.iter().position(|e| e.id() == compaction_id).expect("compaction in path");
+    let compaction_idx = path
+        .iter()
+        .position(|e| e.id() == compaction_id)
+        .expect("compaction in path");
     let mut context_entries: Vec<&Entry> = vec![compaction];
     let mut found_first_kept = false;
     for entry in &path[..compaction_idx] {
         if entry.id() == first_kept_entry_id {
             found_first_kept = true;
         }
-        if found_first_kept && !matches!(entry, Entry::Message { message: AgentMessage::System { .. }, .. }) {
+        if found_first_kept
+            && !matches!(
+                entry,
+                Entry::Message {
+                    message: AgentMessage::System { .. },
+                    ..
+                }
+            )
+        {
             context_entries.push(entry);
         }
     }
@@ -101,12 +128,26 @@ fn get_session_context_settings(path: &[&Entry]) -> (String, Option<ModelRef>) {
     let mut model: Option<ModelRef> = None;
     for entry in path {
         match entry {
-            Entry::ThinkingLevelChange { thinking_level: level, .. } => thinking_level = level.clone(),
-            Entry::ModelChange { provider, model_id, .. } => {
-                model = Some(ModelRef { provider: provider.clone(), model_id: model_id.clone() })
+            Entry::ThinkingLevelChange {
+                thinking_level: level,
+                ..
+            } => thinking_level = level.clone(),
+            Entry::ModelChange {
+                provider, model_id, ..
+            } => {
+                model = Some(ModelRef {
+                    provider: provider.clone(),
+                    model_id: model_id.clone(),
+                })
             }
-            Entry::Message { message: AgentMessage::Assistant(assistant), .. } => {
-                model = Some(ModelRef { provider: assistant.provider.clone(), model_id: assistant.model.clone() })
+            Entry::Message {
+                message: AgentMessage::Assistant(assistant),
+                ..
+            } => {
+                model = Some(ModelRef {
+                    provider: assistant.provider.clone(),
+                    model_id: assistant.model.clone(),
+                })
             }
             _ => {}
         }
@@ -119,7 +160,14 @@ fn get_session_context_settings(path: &[&Entry]) -> (String, Option<ModelRef>) {
 pub fn session_entry_to_context_messages(entry: &Entry) -> Vec<AgentMessage> {
     match entry {
         Entry::Message { message, .. } => vec![message.clone()],
-        Entry::CustomMessage { custom_type, content, details, display, timestamp, .. } => {
+        Entry::CustomMessage {
+            custom_type,
+            content,
+            details,
+            display,
+            timestamp,
+            ..
+        } => {
             // pi 的 createCustomMessage:content/details/display 打包进 Custom
             vec![AgentMessage::Custom(rpi_agent::CustomMessage {
                 kind: custom_type.clone(),
@@ -131,13 +179,23 @@ pub fn session_entry_to_context_messages(entry: &Entry) -> Vec<AgentMessage> {
                 }),
             })]
         }
-        Entry::BranchSummary { summary, timestamp, .. } => {
+        Entry::BranchSummary {
+            summary, timestamp, ..
+        } => {
             if summary.is_empty() {
                 return Vec::new();
             }
-            vec![AgentMessage::BranchSummary { summary: summary.clone(), timestamp: *timestamp }]
+            vec![AgentMessage::BranchSummary {
+                summary: summary.clone(),
+                timestamp: *timestamp,
+            }]
         }
-        Entry::Compaction { summary, system_message, timestamp, .. } => {
+        Entry::Compaction {
+            summary,
+            system_message,
+            timestamp,
+            ..
+        } => {
             let mut messages = Vec::new();
             if let Some(system) = system_message {
                 messages.push(system.clone());
@@ -155,9 +213,14 @@ pub fn session_entry_to_context_messages(entry: &Entry) -> Vec<AgentMessage> {
 /// context_edit 投影(06 文档 projectContextEntry):`replacement` 是 edit entry
 /// 的替换值 —— None(null)剔除消息;Some 只替换 content(assistant/toolResult
 /// 的字符串内容包成 text 块)。仅在 target 上存在 edit entry 时调用。
-fn project_context_entry(entry: &Entry, replacement: Option<&ContextReplacement>) -> Vec<AgentMessage> {
+fn project_context_entry(
+    entry: &Entry,
+    replacement: Option<&ContextReplacement>,
+) -> Vec<AgentMessage> {
     let messages = session_entry_to_context_messages(entry);
-    let Some(replacement) = replacement else { return Vec::new() };
+    let Some(replacement) = replacement else {
+        return Vec::new();
+    };
     messages
         .into_iter()
         .map(|message| match message {
@@ -165,26 +228,36 @@ fn project_context_entry(entry: &Entry, replacement: Option<&ContextReplacement>
                 content: replacement.content.clone(),
                 timestamp,
             },
-            AgentMessage::Assistant(assistant) => AgentMessage::Assistant(Box::new(AssistantMessage {
-                content: vec![ContentBlock::text(replacement.content.clone())],
-                ..*assistant
-            })),
-            AgentMessage::ToolResult { tool_call_id, tool_name, usage, is_error, timestamp, .. } => {
-                AgentMessage::ToolResult {
-                    tool_call_id,
-                    tool_name,
+            AgentMessage::Assistant(assistant) => {
+                AgentMessage::Assistant(Box::new(AssistantMessage {
                     content: vec![ContentBlock::text(replacement.content.clone())],
-                    details: None,
-                    usage,
-                    is_error,
-                    timestamp,
-                }
+                    ..*assistant
+                }))
             }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                usage,
+                is_error,
+                timestamp,
+                ..
+            } => AgentMessage::ToolResult {
+                tool_call_id,
+                tool_name,
+                content: vec![ContentBlock::text(replacement.content.clone())],
+                details: None,
+                usage,
+                is_error,
+                timestamp,
+            },
             AgentMessage::Custom(custom) => AgentMessage::Custom(rpi_agent::CustomMessage {
                 data: {
                     let mut data = custom.data.clone();
                     if let Some(obj) = data.as_object_mut() {
-                        obj.insert("content".into(), serde_json::Value::String(replacement.content.clone()));
+                        obj.insert(
+                            "content".into(),
+                            serde_json::Value::String(replacement.content.clone()),
+                        );
                     }
                     data
                 },
@@ -205,7 +278,12 @@ pub fn build_session_projection(entries: &[Entry], leaf_id: Option<&str>) -> Ses
     // 路径上的 context_edit 按 targetId 建表;同一 target 后者覆盖(pi 语义)
     let mut edits: BTreeMap<&str, Option<&ContextReplacement>> = BTreeMap::new();
     for entry in &context_entries {
-        if let Entry::ContextEdit { target_id, replacement, .. } = entry {
+        if let Entry::ContextEdit {
+            target_id,
+            replacement,
+            ..
+        } = entry
+        {
             edits.insert(target_id.as_str(), replacement.as_ref());
         }
     }
@@ -225,11 +303,22 @@ pub fn build_session_projection(entries: &[Entry], leaf_id: Option<&str>) -> Ses
                     Some(replacement) => project_context_entry(source_entry, replacement),
                 }
             };
-            ProjectedEntry { source_entry: (*source_entry).clone(), messages }
+            ProjectedEntry {
+                source_entry: (*source_entry).clone(),
+                messages,
+            }
         })
         .collect();
-    let messages = projected.iter().flat_map(|entry| entry.messages.iter().cloned()).collect();
-    SessionProjection { entries: projected, messages, thinking_level, model }
+    let messages = projected
+        .iter()
+        .flat_map(|entry| entry.messages.iter().cloned())
+        .collect();
+    SessionProjection {
+        entries: projected,
+        messages,
+        thinking_level,
+        model,
+    }
 }
 
 /// ③ 终态上下文(06 文档 buildSessionContext)。

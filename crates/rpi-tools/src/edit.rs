@@ -16,7 +16,9 @@ pub struct EditTool {
 
 /// 工厂。
 pub fn create_edit_tool(cwd: &Path) -> Arc<dyn Tool> {
-    Arc::new(EditTool { cwd: cwd.to_path_buf() })
+    Arc::new(EditTool {
+        cwd: cwd.to_path_buf(),
+    })
 }
 
 struct Edit {
@@ -26,7 +28,9 @@ struct Edit {
 
 fn parse_edits(args: &serde_json::Value) -> Result<Vec<Edit>, String> {
     let obj = args.as_object().ok_or("arguments must be an object")?;
-    let edits_value = obj.get("edits").ok_or("missing required argument `edits`")?;
+    let edits_value = obj
+        .get("edits")
+        .ok_or("missing required argument `edits`")?;
     let list = edits_value.as_array().ok_or("`edits` must be an array")?;
     if list.is_empty() {
         return Err("`edits` must not be empty".into());
@@ -42,7 +46,10 @@ fn parse_edits(args: &serde_json::Value) -> Result<Vec<Edit>, String> {
             .get("newText")
             .and_then(|v| v.as_str())
             .ok_or("each edit requires string `newText`")?;
-        edits.push(Edit { old_text: old_text.to_string(), new_text: new_text.to_string() });
+        edits.push(Edit {
+            old_text: old_text.to_string(),
+            new_text: new_text.to_string(),
+        });
     }
     Ok(edits)
 }
@@ -184,20 +191,27 @@ impl Tool for EditTool {
         let path = obj
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or(ToolError::Failed { name: "edit".into(), message: "missing required argument `path`".into() })?
+            .ok_or(ToolError::Failed {
+                name: "edit".into(),
+                message: "missing required argument `path`".into(),
+            })?
             .to_string();
-        let edits = parse_edits(&call.args)
-            .map_err(|message| ToolError::Failed { name: "edit".into(), message })?;
+        let edits = parse_edits(&call.args).map_err(|message| ToolError::Failed {
+            name: "edit".into(),
+            message,
+        })?;
 
         let resolved = if Path::new(&path).is_absolute() {
             std::path::PathBuf::from(&path)
         } else {
             self.cwd.join(&path)
         };
-        let bytes = tokio::fs::read(&resolved).await.map_err(|e| ToolError::Failed {
-            name: "edit".into(),
-            message: format!("cannot read `{path}`: {e}"),
-        })?;
+        let bytes = tokio::fs::read(&resolved)
+            .await
+            .map_err(|e| ToolError::Failed {
+                name: "edit".into(),
+                message: format!("cannot read `{path}`: {e}"),
+            })?;
         let raw = String::from_utf8_lossy(&bytes).into_owned();
 
         // 剥 BOM + 归一到 LF,写回时恢复(05 文档)
@@ -221,10 +235,12 @@ impl Tool for EditTool {
         if bom {
             output_text.insert(0, '\u{feff}');
         }
-        tokio::fs::write(&resolved, output_text).await.map_err(|e| ToolError::Failed {
-            name: "edit".into(),
-            message: format!("cannot write `{path}`: {e}"),
-        })?;
+        tokio::fs::write(&resolved, output_text)
+            .await
+            .map_err(|e| ToolError::Failed {
+                name: "edit".into(),
+                message: format!("cannot write `{path}`: {e}"),
+            })?;
 
         let changed: Vec<serde_json::Value> = edits
             .iter()
@@ -244,7 +260,6 @@ impl Tool for EditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     struct Noop;
     #[async_trait]
@@ -253,7 +268,16 @@ mod tests {
     }
 
     async fn exec(tool: &EditTool, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
-        tool.execute(ToolCall { id: "t".into(), name: "edit".into(), args }, CancellationToken::new(), &Noop).await
+        tool.execute(
+            ToolCall {
+                id: "t".into(),
+                name: "edit".into(),
+                args,
+            },
+            CancellationToken::new(),
+            &Noop,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -261,7 +285,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rpi-edit-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let path = dir.join("code.txt");
-        tokio::fs::write(&path, "alpha beta\r\nsecond line\r\nalpha gamma\r\n").await.unwrap();
+        tokio::fs::write(&path, "alpha beta\r\nsecond line\r\nalpha gamma\r\n")
+            .await
+            .unwrap();
 
         let tool = EditTool { cwd: dir.clone() };
         let output = exec(
@@ -290,7 +316,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rpi-edit-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let path = dir.join("dup.txt");
-        tokio::fs::write(&path, "same same different").await.unwrap();
+        tokio::fs::write(&path, "same same different")
+            .await
+            .unwrap();
         let tool = EditTool { cwd: dir.clone() };
 
         let err = exec(

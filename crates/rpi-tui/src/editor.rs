@@ -1,23 +1,24 @@
-//! 行编辑器(08 文档 `components/editor.ts` 的 Rust 对应物)。
+//! 多行编辑器(pi Editor 的 Rust 对应物)。
 //!
-//! 核心能力对齐 pi Editor:undo 栈、kill-ring、词导航、输入历史。缓冲区
-//! 用 `Vec<char>` 避免多字节字符的字节索引问题。所有操作经由 `handle_key`,
-//! 未消费的按键返回 false 交给上层(如历史/提交判断)。
+//! 能力:多行缓冲(Shift+Enter/Ctrl+J 换行、粘贴保留换行)、undo 栈、
+//! kill-ring、词导航、输入历史(单行状态时 ↑/↓)。缓冲区按行存 `Vec<char>`
+//! 避免多字节字符的字节索引问题。所有操作经由 `handle_key`,Enter 不在
+//! 编辑器内消费(提交语义由上层决定)。
 
-use crate::keys::Key;
+use crate::key::Key;
+use crate::width::{display_width, wrap_to_width};
 
 const MAX_UNDO: usize = 100;
 const MAX_KILL_RING: usize = 10;
 
-/// 单行编辑器状态。
+/// 多行编辑器状态。
 #[derive(Default)]
 pub struct Editor {
-    buffer: Vec<char>,
-    /// 光标位置(字符下标,0..=buffer.len())
-    cursor: usize,
+    lines: Vec<Vec<char>>,
+    /// (行下标, 行内字符下标)
+    cursor: (usize, usize),
     undo_stack: Vec<EditorSnapshot>,
     kill_ring: Vec<String>,
-    /// 最近一次 yank 的长度(ctrl+y 后连续 yank/kill 的行为简化:单次 yank)
     history: Vec<String>,
     history_index: Option<usize>,
     /// 历史浏览前的草稿
@@ -26,163 +27,200 @@ pub struct Editor {
 
 #[derive(Clone)]
 struct EditorSnapshot {
-    buffer: Vec<char>,
-    cursor: usize,
+    lines: Vec<Vec<char>>,
+    cursor: (usize, usize),
 }
 
 impl Editor {
     pub fn new() -> Self {
-        Self::default()
+        Editor {
+            lines: vec![Vec::new()],
+            ..Default::default()
+        }
     }
 
+    /// 全文(行间 `\n` 连接)。
     pub fn text(&self) -> String {
-        self.buffer.iter().collect()
-    }
-
-    /// 光标的字符下标。
-    pub fn cursor_pos(&self) -> usize {
-        self.cursor
+        self.lines
+            .iter()
+            .map(|line| line.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
+        self.lines.len() == 1 && self.lines[0].is_empty()
+    }
+
+    /// 逻辑行数。
+    pub fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// 光标(行, 列=字符下标)。
+    pub fn cursor_pos(&self) -> (usize, usize) {
+        self.cursor
     }
 
     pub fn clear(&mut self) {
         self.push_undo();
-        self.buffer.clear();
-        self.cursor = 0;
+        self.lines = vec![Vec::new()];
+        self.cursor = (0, 0);
         self.history_index = None;
         self.draft = None;
     }
 
-    /// 设置整段文本(替换当前内容,可撤销)。
+    /// 设置整段文本(可含换行,替换当前内容,可撤销)。
     pub fn set_text(&mut self, text: &str) {
         self.push_undo();
-        self.buffer = text.chars().collect();
-        self.cursor = self.buffer.len();
+        self.lines = text
+            .split('\n')
+            .map(|line| line.chars().collect())
+            .collect();
+        if self.lines.is_empty() {
+            self.lines = vec![Vec::new()];
+        }
+        let last = self.lines.len() - 1;
+        self.cursor = (last, self.lines[last].len());
     }
 
-    /// 按键处理:返回 true 表示已消费。
+    /// 按键处理:返回 true 表示已消费。Enter 不消费(上层提交)。
     pub fn handle_key(&mut self, key: &Key) -> bool {
         match key {
             Key::Char(c) => {
                 self.push_undo();
-                self.buffer.insert(self.cursor, *c);
-                self.cursor += 1;
+                let (line, col) = self.cursor;
+                self.lines[line].insert(col, *c);
+                self.cursor.1 += 1;
                 true
             }
             Key::Paste(text) => {
                 self.push_undo();
-                let chars: Vec<char> = text
-                    .chars()
-                    .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-                    .collect();
-                let n = chars.len();
-                self.buffer.splice(self.cursor..self.cursor, chars);
-                self.cursor += n;
+                self.insert_text(text);
+                true
+            }
+            Key::ShiftEnter | Key::Ctrl('j') | Key::AltEnter => {
+                self.push_undo();
+                self.insert_newline();
                 true
             }
             Key::Backspace => {
-                if self.cursor > 0 {
+                let (line, col) = self.cursor;
+                if col > 0 {
                     self.push_undo();
-                    self.cursor -= 1;
-                    self.buffer.remove(self.cursor);
+                    self.lines[line].remove(col - 1);
+                    self.cursor.1 -= 1;
+                } else if line > 0 {
+                    // 行首回删:与上一行合并
+                    self.push_undo();
+                    let cur = self.lines.remove(line);
+                    let prev_len = self.lines[line - 1].len();
+                    self.lines[line - 1].extend(cur);
+                    self.cursor = (line - 1, prev_len);
                 }
                 true
             }
             Key::Delete => {
-                if self.cursor < self.buffer.len() {
+                let (line, col) = self.cursor;
+                if col < self.lines[line].len() {
                     self.push_undo();
-                    self.buffer.remove(self.cursor);
+                    self.lines[line].remove(col);
+                } else if line + 1 < self.lines.len() {
+                    self.push_undo();
+                    let next = self.lines.remove(line + 1);
+                    self.lines[line].extend(next);
                 }
                 true
             }
             Key::Left => {
-                self.cursor = self.cursor.saturating_sub(1);
+                let (line, col) = self.cursor;
+                if col > 0 {
+                    self.cursor.1 -= 1;
+                } else if line > 0 {
+                    self.cursor = (line - 1, self.lines[line - 1].len());
+                }
                 true
             }
             Key::Right => {
-                if self.cursor < self.buffer.len() {
-                    self.cursor += 1;
-                }
-                true
-            }
-            Key::Home => {
-                self.cursor = 0;
-                true
-            }
-            Key::End => {
-                self.cursor = self.buffer.len();
-                true
-            }
-            Key::Ctrl('a') => {
-                self.cursor = 0;
-                true
-            }
-            Key::Ctrl('e') => {
-                self.cursor = self.buffer.len();
-                true
-            }
-            // 词导航:option+方向键同 emacs 默认(alt 序列本 UI 不解析,用
-            // ctrl+b/f 的 emacs 词跳变体:ctrl+left/right 由终端映射,这里
-            // 提供 ctrl+w 删词 + alt+b/f 等价的 Home/End 词跳经 meta 键缺失
-            // 时的替代 —— b/f 词跳绑定到 Ctrl+Left/Right 场景由上层映射)
-            Key::Escape => {
-                // Esc 不清输入(abort 语义在上层)
-                false
-            }
-            Key::Ctrl('u') => {
-                // kill 光标前全部(emacs 习惯)
-                if self.cursor > 0 {
-                    self.push_undo();
-                    let killed: String = self.buffer[..self.cursor].iter().collect();
-                    self.push_kill(killed);
-                    self.buffer.drain(..self.cursor);
-                    self.cursor = 0;
-                }
-                true
-            }
-            Key::Ctrl('k') => {
-                // kill 光标到行尾
-                if self.cursor < self.buffer.len() {
-                    self.push_undo();
-                    let killed: String = self.buffer[self.cursor..].iter().collect();
-                    self.push_kill(killed);
-                    self.buffer.truncate(self.cursor);
-                }
-                true
-            }
-            Key::Ctrl('w') => {
-                // kill 前一个词
-                let word_start = self.prev_word_index();
-                if word_start < self.cursor {
-                    self.push_undo();
-                    let killed: String = self.buffer[word_start..self.cursor].iter().collect();
-                    self.push_kill(killed);
-                    self.buffer.drain(word_start..self.cursor);
-                    self.cursor = word_start;
-                }
-                true
-            }
-            Key::Ctrl('y') => {
-                // yank:粘回最近 kill 的内容
-                let last = self.kill_ring.last().cloned();
-                if let Some(text) = last {
-                    self.push_undo();
-                    let chars: Vec<char> = text.chars().collect();
-                    let n = chars.len();
-                    self.buffer.splice(self.cursor..self.cursor, chars);
-                    self.cursor += n;
+                let (line, col) = self.cursor;
+                if col < self.lines[line].len() {
+                    self.cursor.1 += 1;
+                } else if line + 1 < self.lines.len() {
+                    self.cursor = (line + 1, 0);
                 }
                 true
             }
             Key::Up => {
-                self.history_prev();
+                if self.lines.len() == 1 {
+                    self.history_prev();
+                } else {
+                    self.cursor.0 = self.cursor.0.saturating_sub(1);
+                    self.clamp_col();
+                }
                 true
             }
             Key::Down => {
-                self.history_next();
+                if self.lines.len() == 1 {
+                    self.history_next();
+                } else if self.cursor.0 + 1 < self.lines.len() {
+                    self.cursor.0 += 1;
+                    self.clamp_col();
+                }
+                true
+            }
+            Key::Home | Key::Ctrl('a') => {
+                self.cursor.1 = 0;
+                true
+            }
+            Key::End | Key::Ctrl('e') => {
+                self.cursor.1 = self.lines[self.cursor.0].len();
+                true
+            }
+            Key::Ctrl('u') => {
+                // kill 光标前行首内容(emacs 习惯)
+                let (line, col) = self.cursor;
+                if col > 0 {
+                    self.push_undo();
+                    let killed: String = self.lines[line][..col].iter().collect();
+                    self.push_kill(killed);
+                    self.lines[line].drain(..col);
+                    self.cursor.1 = 0;
+                }
+                true
+            }
+            Key::Ctrl('k') => {
+                // kill 光标到行尾;行尾则删除换行(合并下一行)
+                let (line, col) = self.cursor;
+                if col < self.lines[line].len() {
+                    self.push_undo();
+                    let killed: String = self.lines[line][col..].iter().collect();
+                    self.push_kill(killed);
+                    self.lines[line].truncate(col);
+                } else if line + 1 < self.lines.len() {
+                    self.push_undo();
+                    let next = self.lines.remove(line + 1);
+                    self.lines[line].extend(next);
+                }
+                true
+            }
+            Key::Ctrl('w') => {
+                let (line, col) = self.cursor;
+                let word_start = self.prev_word_index();
+                if word_start < col {
+                    self.push_undo();
+                    let killed: String = self.lines[line][word_start..col].iter().collect();
+                    self.push_kill(killed);
+                    self.lines[line].drain(word_start..col);
+                    self.cursor.1 = word_start;
+                }
+                true
+            }
+            Key::Ctrl('y') => {
+                let last = self.kill_ring.last().cloned();
+                if let Some(text) = last {
+                    self.push_undo();
+                    self.insert_text(&text);
+                }
                 true
             }
             _ => false,
@@ -191,17 +229,96 @@ impl Editor {
 
     pub fn undo(&mut self) {
         if let Some(snapshot) = self.undo_stack.pop() {
-            self.buffer = snapshot.buffer;
+            self.lines = snapshot.lines;
             self.cursor = snapshot.cursor;
             self.history_index = None;
         }
+    }
+
+    /// 提交时把当前文本压入历史(空文本不记)。
+    pub fn commit_history(&mut self) {
+        let text = self.text();
+        if !text.trim().is_empty() && self.history.last().map(|h| h != &text).unwrap_or(true) {
+            self.history.push(text);
+        }
+        self.history_index = None;
+        self.draft = None;
+    }
+
+    /// 可视化视图:逻辑行按宽度折行成视觉行(最多 max_rows 行,超出取尾部),
+    /// 并给出光标在视觉行中的 (行, 显示列)。
+    pub fn view(&self, width: usize, max_rows: usize) -> EditorView {
+        let width = width.max(1);
+        let mut rows: Vec<String> = Vec::new();
+        let mut cursor: Option<(usize, usize)> = None;
+        for (line_index, line) in self.lines.iter().enumerate() {
+            let text: String = line.iter().collect();
+            let wrapped = wrap_to_width(&text, width);
+            for (row_in_line, row_text) in wrapped.iter().enumerate() {
+                rows.push(row_text.clone());
+                // 光标落点:光标所在逻辑行的第 N 视觉行
+                if line_index == self.cursor.0 {
+                    let col = self.cursor.1;
+                    let before: String = line[..col.min(line.len())].iter().collect();
+                    let before_rows = wrap_to_width(&before, width);
+                    let cursor_row_in_line = before_rows.len().saturating_sub(1);
+                    if cursor_row_in_line == row_in_line {
+                        let row_prefix = before_rows.last().map(String::as_str).unwrap_or("");
+                        cursor = Some((rows.len() - 1, display_width(row_prefix)));
+                    }
+                }
+            }
+        }
+        let total = rows.len();
+        let skip = total.saturating_sub(max_rows.max(1));
+        let rows: Vec<String> = rows.into_iter().skip(skip).collect();
+        let cursor = cursor.map(|(row, col)| (row.saturating_sub(skip), col));
+        EditorView {
+            rows,
+            cursor,
+            total_rows: total,
+        }
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        let segments: Vec<&str> = text
+            .split('\n')
+            .map(|s| s.strip_suffix('\r').unwrap_or(s))
+            .collect();
+        let (start_line, start_col) = self.cursor;
+        // 尾段先摘下:首段进当前行,其余段逐行插入,尾段拼回最后一行
+        let tail: Vec<char> = self.lines[start_line].split_off(start_col);
+        self.lines[start_line].extend(segments[0].chars());
+        let mut current_line = start_line;
+        for segment in &segments[1..] {
+            self.lines
+                .insert(current_line + 1, segment.chars().collect());
+            current_line += 1;
+        }
+        self.lines[current_line].extend(tail.iter());
+        self.cursor = (current_line, self.lines[current_line].len() - tail.len());
+    }
+
+    fn insert_newline(&mut self) {
+        let (line, col) = self.cursor;
+        let tail: Vec<char> = self.lines[line].split_off(col);
+        self.lines.insert(line + 1, tail);
+        self.cursor = (line + 1, 0);
+    }
+
+    fn clamp_col(&mut self) {
+        let len = self.lines[self.cursor.0].len();
+        self.cursor.1 = self.cursor.1.min(len);
     }
 
     fn push_undo(&mut self) {
         if self.undo_stack.len() >= MAX_UNDO {
             self.undo_stack.remove(0);
         }
-        self.undo_stack.push(EditorSnapshot { buffer: self.buffer.clone(), cursor: self.cursor });
+        self.undo_stack.push(EditorSnapshot {
+            lines: self.lines.clone(),
+            cursor: self.cursor,
+        });
     }
 
     fn push_kill(&mut self, text: String) {
@@ -213,13 +330,14 @@ impl Editor {
         }
     }
 
-    /// 前一个词的起始下标(词 = 非空白连续段)。
+    /// 前一个词的起始下标(词 = 非空白连续段;不跨行)。
     fn prev_word_index(&self) -> usize {
-        let mut i = self.cursor;
-        while i > 0 && self.buffer[i - 1].is_whitespace() {
+        let (line, mut i) = self.cursor;
+        let chars = &self.lines[line];
+        while i > 0 && chars[i - 1].is_whitespace() {
             i -= 1;
         }
-        while i > 0 && !self.buffer[i - 1].is_whitespace() {
+        while i > 0 && !chars[i - 1].is_whitespace() {
             i -= 1;
         }
         i
@@ -238,57 +356,64 @@ impl Editor {
             Some(i) => i - 1,
         };
         self.history_index = Some(index);
-        self.buffer = self.history[index].chars().collect();
-        self.cursor = self.buffer.len();
+        let text = self.history[index].clone();
+        self.set_text_quiet(&text);
     }
 
     fn history_next(&mut self) {
         let index = match self.history_index {
             None => return,
             Some(i) if i + 1 >= self.history.len() => {
-                // 回到草稿
                 self.history_index = None;
-                self.buffer = self.draft.take().unwrap_or_default().chars().collect();
-                self.cursor = self.buffer.len();
+                let draft = self.draft.take().unwrap_or_default();
+                self.set_text_quiet(&draft);
                 return;
             }
             Some(i) => i + 1,
         };
         self.history_index = Some(index);
-        self.buffer = self.history[index].chars().collect();
-        self.cursor = self.buffer.len();
+        let text = self.history[index].clone();
+        self.set_text_quiet(&text);
     }
 
-    /// 提交时把当前文本压入历史(空文本不记)。
-    pub fn commit_history(&mut self) {
-        let text = self.text();
-        if !text.trim().is_empty() && self.history.last().map(|h| h != &text).unwrap_or(true) {
-            self.history.push(text);
+    /// 历史替换不入 undo 栈。
+    fn set_text_quiet(&mut self, text: &str) {
+        self.lines = text
+            .split('\n')
+            .map(|line| line.chars().collect())
+            .collect();
+        if self.lines.is_empty() {
+            self.lines = vec![Vec::new()];
         }
-        self.history_index = None;
-        self.draft = None;
+        let last = self.lines.len() - 1;
+        self.cursor = (last, self.lines[last].len());
     }
+}
+
+/// 编辑器可视化视图。
+pub struct EditorView {
+    /// 视觉行(已折行,≤ max_rows)
+    pub rows: Vec<String>,
+    /// 光标在视觉行中的 (行, 显示列);相对返回的 rows
+    pub cursor: Option<(usize, usize)>,
+    /// 折行后的总视觉行数(窗口裁剪前)
+    pub total_rows: usize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn keys(input: &[Key]) -> Vec<Key> {
-        input.to_vec()
-    }
-
     #[test]
     fn typing_and_backspace() {
         let mut editor = Editor::new();
-        for k in keys(&[Key::Char('a'), Key::Char('b'), Key::Char('c')]) {
+        for k in [Key::Char('a'), Key::Char('b'), Key::Char('c')] {
             editor.handle_key(&k);
         }
         assert_eq!(editor.text(), "abc");
-        assert_eq!(editor.cursor_pos(), 3);
+        assert_eq!(editor.cursor_pos(), (0, 3));
         editor.handle_key(&Key::Backspace);
         assert_eq!(editor.text(), "ab");
-        assert_eq!(editor.cursor_pos(), 2);
     }
 
     #[test]
@@ -299,91 +424,54 @@ mod tests {
     }
 
     #[test]
-    fn cursor_navigation_and_insert_middle() {
+    fn multiline_newline_and_join() {
         let mut editor = Editor::new();
-        editor.set_text("ac");
+        editor.set_text("ab");
+        editor.handle_key(&Key::ShiftEnter);
+        editor.handle_key(&Key::Char('c'));
+        assert_eq!(editor.text(), "ab\nc");
+        assert_eq!(editor.cursor_pos(), (1, 1));
+        // 行首回删合并上一行
         editor.handle_key(&Key::Home);
-        editor.handle_key(&Key::Right);
-        editor.handle_key(&Key::Char('b'));
-        assert_eq!(editor.text(), "abc");
-        assert_eq!(editor.cursor_pos(), 2);
-    }
-
-    #[test]
-    fn multibyte_insert_and_delete() {
-        let mut editor = Editor::new();
-        editor.set_text("中文");
-        editor.handle_key(&Key::Left);
-        editor.handle_key(&Key::Char('x'));
-        assert_eq!(editor.text(), "中x文");
         editor.handle_key(&Key::Backspace);
-        assert_eq!(editor.text(), "中文");
+        assert_eq!(editor.text(), "abc");
+        assert_eq!(editor.cursor_pos(), (0, 2));
     }
 
     #[test]
-    fn paste_inserts_text_with_newlines_flattened() {
+    fn paste_preserves_newlines() {
         let mut editor = Editor::new();
         editor.handle_key(&Key::Paste("ab\ncd".into()));
-        assert_eq!(editor.text(), "ab cd");
+        assert_eq!(editor.text(), "ab\ncd");
+        assert_eq!(editor.line_count(), 2);
     }
 
     #[test]
-    fn undo_restores_previous_state() {
+    fn paste_middle_of_line_splits() {
         let mut editor = Editor::new();
-        editor.set_text("hello");
-        editor.handle_key(&Key::Char('!'));
-        assert_eq!(editor.text(), "hello!");
-        editor.undo();
-        assert_eq!(editor.text(), "hello");
-        assert_eq!(editor.cursor_pos(), 5);
-    }
-
-    #[test]
-    fn kill_and_yank_ring() {
-        let mut editor = Editor::new();
-        editor.set_text("hello world");
-        editor.handle_key(&Key::Ctrl('a')); // 光标到行首
-        editor.handle_key(&Key::Ctrl('k')); // kill 全部? 不,行首 kill 到行尾 = 全部
-        assert_eq!(editor.text(), "");
-        editor.handle_key(&Key::Ctrl('y'));
-        assert_eq!(editor.text(), "hello world");
-    }
-
-    #[test]
-    fn kill_word_backwards() {
-        let mut editor = Editor::new();
-        editor.set_text("foo bar");
-        editor.handle_key(&Key::Ctrl('w'));
-        assert_eq!(editor.text(), "foo ");
-        assert_eq!(editor.cursor_pos(), 4);
-        editor.handle_key(&Key::Ctrl('y'));
-        assert_eq!(editor.text(), "foo bar");
-    }
-
-    #[test]
-    fn ctrl_u_kills_to_start() {
-        let mut editor = Editor::new();
-        editor.set_text("abcdef");
+        editor.set_text("ab");
         editor.handle_key(&Key::Left);
-        editor.handle_key(&Key::Left);
-        editor.handle_key(&Key::Ctrl('u'));
-        assert_eq!(editor.text(), "ef");
+        editor.handle_key(&Key::Paste("X\nY".into()));
+        assert_eq!(editor.text(), "aX\nYb");
     }
 
     #[test]
-    fn word_navigation_boundary() {
+    fn cursor_moves_across_lines() {
         let mut editor = Editor::new();
-        editor.set_text("ab cd");
-        editor.handle_key(&Key::Ctrl('a'));
-        assert_eq!(editor.cursor_pos(), 0);
-        // prev_word_index 只在 ctrl+w 用;这里验证边界:空缓冲 kill word 安全
-        let mut empty = Editor::new();
-        empty.handle_key(&Key::Ctrl('w'));
-        assert_eq!(empty.text(), "");
+        editor.set_text("ab\nc");
+        editor.handle_key(&Key::Up);
+        // 列保留(不重置到行首)
+        assert_eq!(editor.cursor_pos(), (0, 1));
+        editor.handle_key(&Key::End);
+        assert_eq!(editor.cursor_pos(), (0, 2));
+        editor.handle_key(&Key::Down);
+        assert_eq!(editor.cursor_pos(), (1, 1));
+        editor.handle_key(&Key::Left);
+        assert_eq!(editor.cursor_pos(), (1, 0));
     }
 
     #[test]
-    fn history_navigates_and_returns_to_draft() {
+    fn history_only_on_single_line() {
         let mut editor = Editor::new();
         editor.set_text("first");
         editor.commit_history();
@@ -395,32 +483,82 @@ mod tests {
         assert_eq!(editor.text(), "second");
         editor.handle_key(&Key::Up);
         assert_eq!(editor.text(), "first");
-        editor.handle_key(&Key::Up); // 已到最早,不动
-        assert_eq!(editor.text(), "first");
         editor.handle_key(&Key::Down);
-        assert_eq!(editor.text(), "second");
         editor.handle_key(&Key::Down);
-        assert_eq!(editor.text(), "draft"); // 回到草稿
+        assert_eq!(editor.text(), "draft");
+
+        // 多行时 Up/Down 是行导航,不是历史
+        editor.set_text("a\nb");
+        editor.handle_key(&Key::Up);
+        assert_eq!(editor.text(), "a\nb");
+        assert_eq!(editor.cursor_pos(), (0, 1));
     }
 
     #[test]
-    fn commit_history_skips_empty_and_duplicates() {
+    fn kill_yank_and_undo() {
         let mut editor = Editor::new();
-        editor.set_text("hello");
-        editor.commit_history();
-        editor.set_text("hello");
-        editor.commit_history();
-        editor.clear();
-        editor.commit_history();
+        editor.set_text("hello world");
+        editor.handle_key(&Key::Ctrl('a'));
+        editor.handle_key(&Key::Ctrl('k'));
+        assert_eq!(editor.text(), "");
+        editor.handle_key(&Key::Ctrl('y'));
+        assert_eq!(editor.text(), "hello world");
+        editor.undo();
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn kill_word_backwards() {
+        let mut editor = Editor::new();
+        editor.set_text("foo bar");
+        editor.handle_key(&Key::Ctrl('w'));
+        assert_eq!(editor.text(), "foo ");
+        editor.handle_key(&Key::Ctrl('y'));
+        assert_eq!(editor.text(), "foo bar");
+    }
+
+    #[test]
+    fn multibyte_insert_and_width() {
+        let mut editor = Editor::new();
+        editor.set_text("中文");
+        editor.handle_key(&Key::Left);
+        editor.handle_key(&Key::Char('x'));
+        assert_eq!(editor.text(), "中x文");
+        let view = editor.view(40, 10);
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.cursor, Some((0, 3))); // 中(2) + x(1)
+    }
+
+    #[test]
+    fn view_wraps_and_keeps_cursor_visible() {
+        let mut editor = Editor::new();
+        editor.set_text(&"x".repeat(50));
+        editor.handle_key(&Key::Left); // 光标在末尾前一格
+        let view = editor.view(10, 4);
+        assert!(view.rows.len() <= 4);
+        assert_eq!(view.total_rows, 5);
+        let (row, col) = view.cursor.unwrap();
+        assert!(row < view.rows.len());
+        assert!(col <= 10);
+    }
+
+    #[test]
+    fn view_multiline_cursor_rows() {
+        let mut editor = Editor::new();
+        editor.set_text("aaa\nb\nccc");
         editor.handle_key(&Key::Up);
-        assert_eq!(editor.text(), "hello");
+        editor.handle_key(&Key::Up);
+        let view = editor.view(10, 10);
+        assert_eq!(view.rows, vec!["aaa", "b", "ccc"]);
+        // 两次 Up:ccc → b → aaa,列保留
+        assert_eq!(view.cursor, Some((0, 1)));
     }
 
     #[test]
     fn unconsumed_keys_return_false() {
         let mut editor = Editor::new();
         assert!(!editor.handle_key(&Key::Enter));
-        assert!(!editor.handle_key(&Key::Escape));
+        assert!(!editor.handle_key(&Key::Esc));
         assert!(!editor.handle_key(&Key::Ctrl('c')));
     }
 }

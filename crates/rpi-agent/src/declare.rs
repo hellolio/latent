@@ -15,7 +15,12 @@ use crate::tool::Tool;
 pub fn declared_tools(messages: &[AgentMessage]) -> Vec<DeclaredTool> {
     let mut tools: Vec<DeclaredTool> = Vec::new();
     for message in messages {
-        if let AgentMessage::System { tools_added, tools_removed, .. } = message {
+        if let AgentMessage::System {
+            tools_added,
+            tools_removed,
+            ..
+        } = message
+        {
             for removed in tools_removed {
                 tools.retain(|tool| tool.name != removed.name);
             }
@@ -56,7 +61,9 @@ pub fn declare_tool_changes(
     let mut removed: Vec<ToolReference> = current
         .iter()
         .filter(|c| !desired.iter().any(|d| d.name == c.name))
-        .map(|c| ToolReference { name: c.name.clone() })
+        .map(|c| ToolReference {
+            name: c.name.clone(),
+        })
         .collect();
 
     if added.is_empty() && removed.is_empty() {
@@ -66,7 +73,12 @@ pub fn declare_tool_changes(
     let mut out = pending;
     let mut replaced = false;
     for message in out.iter_mut() {
-        if let AgentMessage::System { tools_added, tools_removed, .. } = message {
+        if let AgentMessage::System {
+            tools_added,
+            tools_removed,
+            ..
+        } = message
+        {
             if !replaced {
                 // 首个 system 消息:工具字段替换为计算出的增量
                 *tools_added = std::mem::take(&mut added);
@@ -130,8 +142,16 @@ mod tests {
         AgentMessage::System {
             content: String::new(),
             sections: Default::default(),
-            tools_added: added.iter().map(|n| DeclaredTool::new(*n, "", serde_json::json!({"type": "object"}))).collect(),
-            tools_removed: removed.iter().map(|n| ToolReference { name: n.to_string() }).collect(),
+            tools_added: added
+                .iter()
+                .map(|n| DeclaredTool::new(*n, "", serde_json::json!({"type": "object"})))
+                .collect(),
+            tools_removed: removed
+                .iter()
+                .map(|n| ToolReference {
+                    name: n.to_string(),
+                })
+                .collect(),
             timestamp: 0,
         }
     }
@@ -172,7 +192,12 @@ mod tests {
         let pending = vec![AgentMessage::system("追加指令"), AgentMessage::user("hi")];
         let injected = declare_tool_changes(&transcript, &tools, pending);
         match &injected[0] {
-            AgentMessage::System { content, tools_added, tools_removed, .. } => {
+            AgentMessage::System {
+                content,
+                tools_added,
+                tools_removed,
+                ..
+            } => {
                 // 既有 system 消息:content 保留,工具字段替换为增量
                 assert_eq!(content, "追加指令");
                 assert_eq!(tools_added.len(), 1);

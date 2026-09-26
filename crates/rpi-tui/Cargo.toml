@@ -5,3 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# 与 ratatui 0.30 内部 ratatui-crossterm 的 crossterm 0.29 对齐(ratatui::crossterm 再导出同一实例)
+crossterm = { version = "0.29.0", default-features = false, features = ["bracketed-paste", "events", "libc"] }
+ratatui = "0.30.2"
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }

@@ -56,7 +56,9 @@ const BASE_RULES: &[&str] = &[
 
 /// 构建 sections 状态(preamble 无标签,tools/rules/addendum/project_context/cwd
 /// + 扩展自定义节)。
-pub fn build_system_prompt_sections(options: &SystemPromptOptions) -> Result<SystemPromptSections, CoreError> {
+pub fn build_system_prompt_sections(
+    options: &SystemPromptOptions,
+) -> Result<SystemPromptSections, CoreError> {
     for name in options.sections.keys() {
         validate_section_name(name)?;
     }
@@ -160,11 +162,15 @@ pub fn sections_to_text(sections: &SystemPromptSections) -> String {
 }
 
 /// 构建 state:force_system_prompt 优先。
-pub fn build_system_prompt_state(options: &SystemPromptOptions) -> Result<SystemPromptState, CoreError> {
+pub fn build_system_prompt_state(
+    options: &SystemPromptOptions,
+) -> Result<SystemPromptState, CoreError> {
     if let Some(forced) = &options.force_system_prompt {
         return Ok(SystemPromptState::Forced(forced.clone()));
     }
-    Ok(SystemPromptState::Sections(build_system_prompt_sections(options)?))
+    Ok(SystemPromptState::Sections(build_system_prompt_sections(
+        options,
+    )?))
 }
 
 /// 对旧节 diff,产出 SystemMessage.sections patch(变更节 = 新文本,消失节 = null;

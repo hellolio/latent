@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use rpi_agent::{
-    AgentEvent, AgentMessage, LoopHooks, RequestUpdate, Subscriber, ToolBlock, ToolPatch,
-    ToolResultCtx, ToolCallCtx, TurnCtx, TurnDecision, TurnUpdate,
+    AgentEvent, AgentMessage, LoopHooks, RequestUpdate, Subscriber, ToolBlock, ToolCallCtx,
+    ToolPatch, ToolResultCtx, TurnCtx, TurnDecision, TurnUpdate,
 };
 use rpi_ai::ThinkingLevel;
 
@@ -95,7 +95,7 @@ impl ExtensionEvent {
     }
 
     /// 观察类通知的发送超时(挂在 Subscriber 串行链上,挂起不得击穿宿主)。
-/// 决策类事件:同步请求-回应,扩展可干预。
+    /// 决策类事件:同步请求-回应,扩展可干预。
     pub fn is_decision(&self) -> bool {
         matches!(
             self,
@@ -173,7 +173,10 @@ pub fn spawn_diagnostics_printer(sink: DiagnosticsSink) {
             let entries = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             while cursor < entries.len() {
                 let diagnostic = &entries[cursor];
-                eprintln!("[rpi][extension:{}] {}", diagnostic.extension, diagnostic.message);
+                eprintln!(
+                    "[rpi][extension:{}] {}",
+                    diagnostic.extension, diagnostic.message
+                );
                 cursor += 1;
             }
         }
@@ -223,7 +226,10 @@ pub struct ExtensionEventBus {
 
 impl ExtensionEventBus {
     pub fn new(connections: Vec<Arc<McpConnection>>, diagnostics: DiagnosticsSink) -> Self {
-        ExtensionEventBus { connections, diagnostics }
+        ExtensionEventBus {
+            connections,
+            diagnostics,
+        }
     }
 
     pub fn diagnostics(&self) -> &DiagnosticsSink {
@@ -306,7 +312,10 @@ impl ExtensionEventBus {
                 continue;
             };
             let timeout = Duration::from_millis(policy.timeout_ms);
-            match connection.send_event_request(event, &payload, timeout).await {
+            match connection
+                .send_event_request(event, &payload, timeout)
+                .await
+            {
                 Ok(response) => {
                     if merge_decision(
                         event,
@@ -351,7 +360,10 @@ impl ExtensionEventBus {
 
     pub async fn dispatch_tool_call(&self, ctx: &ToolCallCtx) -> DecisionOutcome {
         match self
-            .dispatch(ExtensionEvent::ToolCall, serde_json::to_value(ctx).unwrap_or(Value::Null))
+            .dispatch(
+                ExtensionEvent::ToolCall,
+                serde_json::to_value(ctx).unwrap_or(Value::Null),
+            )
             .await
         {
             EventOutcome::Decision(outcome) => *outcome,
@@ -361,7 +373,10 @@ impl ExtensionEventBus {
 
     pub async fn dispatch_tool_result(&self, ctx: &ToolResultCtx) -> DecisionOutcome {
         match self
-            .dispatch(ExtensionEvent::ToolResult, serde_json::to_value(ctx).unwrap_or(Value::Null))
+            .dispatch(
+                ExtensionEvent::ToolResult,
+                serde_json::to_value(ctx).unwrap_or(Value::Null),
+            )
             .await
         {
             EventOutcome::Decision(outcome) => *outcome,
@@ -394,8 +409,15 @@ impl ExtensionEventBus {
         }
     }
 
-    pub async fn dispatch_turn_boundary(&self, event: ExtensionEvent, ctx: &TurnCtx) -> DecisionOutcome {
-        debug_assert!(matches!(event, ExtensionEvent::PrepareNextTurn | ExtensionEvent::FinishTurn));
+    pub async fn dispatch_turn_boundary(
+        &self,
+        event: ExtensionEvent,
+        ctx: &TurnCtx,
+    ) -> DecisionOutcome {
+        debug_assert!(matches!(
+            event,
+            ExtensionEvent::PrepareNextTurn | ExtensionEvent::FinishTurn
+        ));
         // TurnCtx 非 Serialize 类型,手工组 wire 载荷(字段均为可序列化类型)
         let payload = json!({
             "message": ctx.message,
@@ -483,8 +505,10 @@ fn merge_decision(
             };
             let messages: Vec<AgentMessage> = parse!(Vec<AgentMessage>, messages);
             if let Some(object) = payload.as_object_mut() {
-                object
-                    .insert("messages".into(), serde_json::to_value(&messages).unwrap_or(Value::Null));
+                object.insert(
+                    "messages".into(),
+                    serde_json::to_value(&messages).unwrap_or(Value::Null),
+                );
             }
             outcome.messages = Some(messages);
             false
@@ -501,7 +525,10 @@ fn merge_decision(
             if parsed.model.is_some() {
                 outcome.request.model = parsed.model.clone();
                 if let Some(object) = payload.as_object_mut() {
-                    object.insert("model".into(), serde_json::to_value(&parsed.model).unwrap_or(Value::Null));
+                    object.insert(
+                        "model".into(),
+                        serde_json::to_value(&parsed.model).unwrap_or(Value::Null),
+                    );
                 }
             }
             if parsed.thinking_level.is_some() {
@@ -536,7 +563,10 @@ fn merge_decision(
             if parsed.model.is_some() {
                 outcome.turn_update.model = parsed.model.clone();
                 if let Some(object) = payload.as_object_mut() {
-                    object.insert("model".into(), serde_json::to_value(&parsed.model).unwrap_or(Value::Null));
+                    object.insert(
+                        "model".into(),
+                        serde_json::to_value(&parsed.model).unwrap_or(Value::Null),
+                    );
                 }
             }
             if parsed.thinking_level.is_some() {
@@ -587,7 +617,10 @@ impl Subscriber for ExtensionEventBus {
         let (event, payload) = match event {
             AgentEvent::AgentStart => (ExtensionEvent::AgentStart, json!({})),
             AgentEvent::TurnStart => (ExtensionEvent::TurnStart, json!({})),
-            AgentEvent::TurnEnd { message, tool_results } => (
+            AgentEvent::TurnEnd {
+                message,
+                tool_results,
+            } => (
                 ExtensionEvent::TurnEnd,
                 json!({ "message": message, "toolResults": tool_results }),
             ),
@@ -598,8 +631,13 @@ impl Subscriber for ExtensionEventBus {
                 // T2 类型化增量:Text 保持旧 wire 形态,Thinking/ToolCallArgs 各自展开
                 let payload = match delta {
                     rpi_agent::MessageDeltaPayload::Text { delta } => json!({ "delta": delta }),
-                    rpi_agent::MessageDeltaPayload::Thinking { delta } => json!({ "thinking": delta }),
-                    rpi_agent::MessageDeltaPayload::ToolCallArgs { content_index, delta } => json!({
+                    rpi_agent::MessageDeltaPayload::Thinking { delta } => {
+                        json!({ "thinking": delta })
+                    }
+                    rpi_agent::MessageDeltaPayload::ToolCallArgs {
+                        content_index,
+                        delta,
+                    } => json!({
                         "toolCall": { "contentIndex": content_index, "delta": delta }
                     }),
                 };
@@ -611,15 +649,28 @@ impl Subscriber for ExtensionEventBus {
             AgentEvent::MessageEnd { message } => {
                 (ExtensionEvent::MessageEnd, json!({ "message": message }))
             }
-            AgentEvent::ToolExecutionStart { tool_call_id, tool_name, args } => (
+            AgentEvent::ToolExecutionStart {
+                tool_call_id,
+                tool_name,
+                args,
+            } => (
                 ExtensionEvent::ToolExecutionStart,
                 json!({ "toolCallId": tool_call_id, "toolName": tool_name, "args": args }),
             ),
-            AgentEvent::ToolExecutionUpdate { tool_call_id, tool_name, partial } => (
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id,
+                tool_name,
+                partial,
+            } => (
                 ExtensionEvent::ToolExecutionUpdate,
                 json!({ "toolCallId": tool_call_id, "toolName": tool_name, "partial": partial }),
             ),
-            AgentEvent::ToolExecutionEnd { tool_call_id, tool_name, output, is_error } => (
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                tool_name,
+                output,
+                is_error,
+            } => (
                 ExtensionEvent::ToolExecutionEnd,
                 json!({ "toolCallId": tool_call_id, "toolName": tool_name, "output": output, "isError": is_error }),
             ),
@@ -642,11 +693,18 @@ impl SessionSubscriber for ExtensionEventBus {
         let (event, payload) = match event {
             AgentSessionEvent::Agent(_) => return,
             AgentSessionEvent::AgentSettled => (ExtensionEvent::AgentSettled, json!({})),
-            AgentSessionEvent::QueueUpdate { steering, follow_up } => (
+            AgentSessionEvent::QueueUpdate {
+                steering,
+                follow_up,
+            } => (
                 ExtensionEvent::QueueUpdate,
                 json!({ "steering": steering, "followUp": follow_up }),
             ),
-            AgentSessionEvent::AutoRetryStart { attempt, delay_ms, reason } => (
+            AgentSessionEvent::AutoRetryStart {
+                attempt,
+                delay_ms,
+                reason,
+            } => (
                 ExtensionEvent::AutoRetryStart,
                 json!({ "attempt": attempt, "delayMs": delay_ms, "reason": reason }),
             ),
@@ -722,7 +780,10 @@ impl LoopHooks for ExtensionHooks {
         if !self.bus.has_subscriber(ExtensionEvent::PrepareNextTurn) {
             return self.inner.prepare_next_turn(ctx).await;
         }
-        let mut outcome = self.bus.dispatch_turn_boundary(ExtensionEvent::PrepareNextTurn, &ctx).await;
+        let mut outcome = self
+            .bus
+            .dispatch_turn_boundary(ExtensionEvent::PrepareNextTurn, &ctx)
+            .await;
         if let Some(inner) = self.inner.prepare_next_turn(ctx).await {
             if inner.messages.is_some() {
                 outcome.turn_update.messages = inner.messages;
@@ -744,7 +805,10 @@ impl LoopHooks for ExtensionHooks {
         if !self.bus.has_subscriber(ExtensionEvent::FinishTurn) {
             return self.inner.finish_turn(ctx).await;
         }
-        let outcome = self.bus.dispatch_turn_boundary(ExtensionEvent::FinishTurn, &ctx).await;
+        let outcome = self
+            .bus
+            .dispatch_turn_boundary(ExtensionEvent::FinishTurn, &ctx)
+            .await;
         // 与 prepare_request/prepare_next_turn 统一:内层(宿主权威)胜出
         match self.inner.finish_turn(ctx).await {
             Some(decision) => Some(decision),

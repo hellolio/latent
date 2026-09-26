@@ -19,12 +19,19 @@ pub fn session_event_to_json(event: &AgentSessionEvent) -> Option<Value> {
     match event {
         AgentSessionEvent::Agent(agent_event) => agent_event_to_json(agent_event),
         AgentSessionEvent::AgentSettled => Some(json!({ "type": "agent_settled" })),
-        AgentSessionEvent::QueueUpdate { steering, follow_up } => Some(json!({
+        AgentSessionEvent::QueueUpdate {
+            steering,
+            follow_up,
+        } => Some(json!({
             "type": "queue_update",
             "steering": steering,
             "follow_up": follow_up,
         })),
-        AgentSessionEvent::AutoRetryStart { attempt, delay_ms, reason } => Some(json!({
+        AgentSessionEvent::AutoRetryStart {
+            attempt,
+            delay_ms,
+            reason,
+        } => Some(json!({
             "type": "auto_retry_start",
             "attempt": attempt,
             "delay_ms": delay_ms,
@@ -42,7 +49,10 @@ fn agent_event_to_json(event: &AgentEvent) -> Option<Value> {
     match event {
         AgentEvent::AgentStart => Some(json!({ "type": "agent_start" })),
         AgentEvent::TurnStart => Some(json!({ "type": "turn_start" })),
-        AgentEvent::TurnEnd { message, tool_results } => Some(json!({
+        AgentEvent::TurnEnd {
+            message,
+            tool_results,
+        } => Some(json!({
             "type": "turn_end",
             "message": message,
             "tool_results": tool_results,
@@ -55,7 +65,11 @@ fn agent_event_to_json(event: &AgentEvent) -> Option<Value> {
         AgentEvent::MessageEnd { message } => {
             Some(json!({ "type": "message_end", "message": message }))
         }
-        AgentEvent::ToolExecutionStart { tool_call_id, tool_name, args } => Some(json!({
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => Some(json!({
             "type": "toolcall_start",
             "id": tool_call_id,
             "toolName": tool_name,
@@ -63,15 +77,18 @@ fn agent_event_to_json(event: &AgentEvent) -> Option<Value> {
         })),
         // 工具输出增量也是流式 partial:剥离
         AgentEvent::ToolExecutionUpdate { .. } => None,
-        AgentEvent::ToolExecutionEnd { tool_call_id, tool_name, output, is_error } => {
-            Some(json!({
-                "type": "toolcall_end",
-                "id": tool_call_id,
-                "toolName": tool_name,
-                "output": output,
-                "isError": is_error,
-            }))
-        }
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            tool_name,
+            output,
+            is_error,
+        } => Some(json!({
+            "type": "toolcall_end",
+            "id": tool_call_id,
+            "toolName": tool_name,
+            "output": output,
+            "isError": is_error,
+        })),
         AgentEvent::AgentEnd { messages } => {
             Some(json!({ "type": "agent_end", "messages": messages }))
         }

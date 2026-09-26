@@ -138,9 +138,15 @@ fn session_env_fn(
             env.push(("PI_MODEL".into(), model.id.clone()));
         }
         if let Some(level) = snapshot.thinking_level {
-            env.push(("PI_REASONING_LEVEL".into(), thinking_level_name(level).into()));
+            env.push((
+                "PI_REASONING_LEVEL".into(),
+                thinking_level_name(level).into(),
+            ));
         }
-        env.push(("PI_SESSION_ID".into(), session_manager.session_id().to_string()));
+        env.push((
+            "PI_SESSION_ID".into(),
+            session_manager.session_id().to_string(),
+        ));
         if let Some(path) = session_manager.file_path() {
             env.push(("PI_SESSION_FILE".into(), path.display().to_string()));
         }
@@ -175,14 +181,24 @@ pub fn parse_thinking_level(name: &str) -> Option<rpi_ai::ThinkingLevel> {
 /// 共享装配:扩展连接失败不阻断(诊断打 stderr,07 §8.5)。
 pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let BuildOptions { provider, model, ui, extension_specs, spawn_hook, session_store } = options;
+    let BuildOptions {
+        provider,
+        model,
+        ui,
+        extension_specs,
+        spawn_hook,
+        session_store,
+    } = options;
 
     // 扩展:settings → spawn → 总线;连接失败 = 诊断 + 跳过(绝不击穿宿主)
     let diagnostics = rpi_core::create_diagnostics_sink();
     let (bus, extension_tools) =
         create_extension_event_bus(extension_specs, ui.clone(), diagnostics.clone()).await;
     for diagnostic in diagnostics.lock().unwrap().iter() {
-        eprintln!("[rpi][extension:{}] {}", diagnostic.extension, diagnostic.message);
+        eprintln!(
+            "[rpi][extension:{}] {}",
+            diagnostic.extension, diagnostic.message
+        );
     }
 
     // 运行期诊断可见:后台 drain 打 stderr(07 §8.5 面向 mode 可见)
@@ -192,7 +208,10 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     let hooks: Arc<dyn rpi_agent::LoopHooks> = if bus.is_empty() {
         Arc::new(rpi_agent::PassthroughHooks)
     } else {
-        Arc::new(ExtensionHooks::new(Arc::new(rpi_agent::PassthroughHooks), bus.clone()))
+        Arc::new(ExtensionHooks::new(
+            Arc::new(rpi_agent::PassthroughHooks),
+            bus.clone(),
+        ))
     };
 
     // 会话树管理器先于工具装配创建:T9 的 PI_* 环境闭包需要读 session id/file。
@@ -201,9 +220,11 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         SessionStore::Memory => rpi_session::create_session(None::<String>)
             .map_err(|e| e.to_string())?
             .into(),
-        SessionStore::New { dir } => rpi_session::create_session_in_dir(dir, &cwd.display().to_string(), None)
-            .map_err(|e| e.to_string())?
-            .into(),
+        SessionStore::New { dir } => {
+            rpi_session::create_session_in_dir(dir, &cwd.display().to_string(), None)
+                .map_err(|e| e.to_string())?
+                .into()
+        }
         SessionStore::Resume { file } => rpi_session::create_session(Some(file))
             .map_err(|e| e.to_string())?
             .into(),
@@ -225,19 +246,28 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // T9/T10:shell 工具装配选项 —— PI_* 会话环境 + settings 命令前缀 + spawn 钩子
     let session_cell: Arc<Mutex<Weak<AgentSession>>> = Arc::new(Mutex::new(Weak::new()));
     let shell = rpi_tools::ShellSpawnOptions {
-        session_env: Some(session_env_fn(session_cell.clone(), session_manager.clone())),
+        session_env: Some(session_env_fn(
+            session_cell.clone(),
+            session_manager.clone(),
+        )),
         command_prefix: load_shell_command_prefix(),
         spawn_hook,
     };
 
     // 内置工具 + 扩展注册工具(McpTool,名字带扩展前缀)
-    let mut tools = rpi_tools::create_tools_at_with_shell(&cwd, shell).all().to_vec();
+    let mut tools = rpi_tools::create_tools_at_with_shell(&cwd, shell)
+        .all()
+        .to_vec();
     tools.extend(extension_tools);
 
     // 重试装饰器(pi 的 retryAssistantCall 注入点)+ AutoRetry 事件面
     let subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>> = Arc::new(Mutex::new(Vec::new()));
     let retry_hooks = rpi_core::create_session_retry_hooks(subscribers.clone());
-    let provider = rpi_core::create_retrying_provider(provider, rpi_ai::RetryPolicy::default(), Some(retry_hooks));
+    let provider = rpi_core::create_retrying_provider(
+        provider,
+        rpi_ai::RetryPolicy::default(),
+        Some(retry_hooks),
+    );
 
     let compactor: Arc<dyn rpi_core::ContextCompactor> = Arc::new(SessionCompactor {
         manager: session_manager.clone(),
@@ -278,16 +308,24 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
 
     // 装配期诊断(编译期扩展 init 失败跳过等)
     for diagnostic in session.extension_diagnostics() {
-        eprintln!("[rpi][extension:{}] {}", diagnostic.extension, diagnostic.message);
+        eprintln!(
+            "[rpi][extension:{}] {}",
+            diagnostic.extension, diagnostic.message
+        );
     }
 
     // 观察类埋点:总线作为订阅者挂上两条事件汇(07 §8.3 接入方式)
     if !bus.is_empty() {
-        session.agent().subscribe(bus.clone() as Arc<dyn rpi_agent::Subscriber>);
+        session
+            .agent()
+            .subscribe(bus.clone() as Arc<dyn rpi_agent::Subscriber>);
         session.subscribe(bus.clone() as SessionSharedSubscriber);
     }
 
-    Ok(BuiltSession { session, session_manager: Some(session_manager) })
+    Ok(BuiltSession {
+        session,
+        session_manager: Some(session_manager),
+    })
 }
 
 /// print 模式便捷封装(旧行为,端到端测试复用):装配 + 跑一轮 prompt,
@@ -315,9 +353,15 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
     if let Some(subscriber) = request.extra_subscriber {
         built.session.subscribe(subscriber);
     }
-    built.session.subscribe(Arc::new(PrintSubscriber::default()));
+    built
+        .session
+        .subscribe(Arc::new(PrintSubscriber::default()));
 
-    let outcome = built.session.prompt(request.prompt).await.map_err(|e| e.to_string())?;
+    let outcome = built
+        .session
+        .prompt(request.prompt)
+        .await
+        .map_err(|e| e.to_string())?;
     built.session.wait_idle().await;
     Ok(outcome.stop())
 }
@@ -393,7 +437,13 @@ impl rpi_session::Summarizer for ProviderSummarizer {
         let llm_messages = rpi_agent::PassthroughHooks.convert_to_llm(&messages);
         let mut stream = self
             .provider
-            .stream(&self.model, rpi_ai::TranscriptContext { messages: llm_messages }, Default::default())
+            .stream(
+                &self.model,
+                rpi_ai::TranscriptContext {
+                    messages: llm_messages,
+                },
+                Default::default(),
+            )
             .await;
         use futures::StreamExt;
         let mut result: Option<rpi_session::SummarizationResponse> = None;
@@ -408,7 +458,9 @@ impl rpi_session::Summarizer for ProviderSummarizer {
                     });
                 }
                 rpi_ai::AssistantMessageEvent::Error(error) => {
-                    return Err(error.error_message.unwrap_or_else(|| "summarizer error".into()));
+                    return Err(error
+                        .error_message
+                        .unwrap_or_else(|| "summarizer error".into()));
                 }
                 _ => {}
             }
@@ -432,7 +484,12 @@ impl rpi_core::ContextCompactor for SessionCompactor {
         // 末尾是 overflow 错误 assistant 时剔除出上下文(append-only ContextEdit;
         // 同时满足 continue_run"最后一条非 assistant"的前置条件)
         let entries = self.manager.branch_entries();
-        if let Some(rpi_session::Entry::Message { id, message: rpi_agent::AgentMessage::Assistant(assistant), .. }) = entries.last() {
+        if let Some(rpi_session::Entry::Message {
+            id,
+            message: rpi_agent::AgentMessage::Assistant(assistant),
+            ..
+        }) = entries.last()
+        {
             if matches!(assistant.stop_reason, rpi_ai::StopReason::Error) {
                 self.manager
                     .append_context_edit(id, None)
@@ -441,7 +498,10 @@ impl rpi_core::ContextCompactor for SessionCompactor {
         }
 
         let entries = self.manager.branch_entries();
-        let summarizer = ProviderSummarizer { provider: self.provider.clone(), model: model.clone() };
+        let summarizer = ProviderSummarizer {
+            provider: self.provider.clone(),
+            model: model.clone(),
+        };
         if let Some(outcome) =
             rpi_session::run_compaction(&entries, &self.settings, &summarizer).await?
         {
@@ -494,7 +554,11 @@ impl SessionSubscriber for PrintSubscriber {
             },
             AgentSessionEvent::AgentSettled => {}
             AgentSessionEvent::QueueUpdate { .. } => {}
-            AgentSessionEvent::AutoRetryStart { attempt, delay_ms, reason } => {
+            AgentSessionEvent::AutoRetryStart {
+                attempt,
+                delay_ms,
+                reason,
+            } => {
                 eprintln!("[retry #{attempt} in {delay_ms}ms] {reason}");
             }
             AgentSessionEvent::AutoRetryEnd { .. } => {}
@@ -509,7 +573,11 @@ mod tests {
     struct TempDir(std::path::PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("rpi_prefix_test_{}_{}", tag, std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "rpi_prefix_test_{}_{}",
+                tag,
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             TempDir(path)
@@ -573,7 +641,9 @@ mod tests {
         let manager: Arc<rpi_session::SessionManager> =
             rpi_session::create_session(None::<String>).unwrap().into();
         let sink = SessionManagerSink(manager.clone());
-        sink.append(&rpi_agent::AgentMessage::user("hi")).await.unwrap();
+        sink.append(&rpi_agent::AgentMessage::user("hi"))
+            .await
+            .unwrap();
         sink.append_model_change("openai", "gpt-5").await.unwrap();
         sink.append_thinking_level_change("high").await.unwrap();
         sink.append_usage("message", "openai", "gpt-5", rpi_ai::Usage::default())
@@ -590,7 +660,10 @@ mod tests {
                 _ => "other".into(),
             })
             .collect();
-        assert_eq!(kinds, vec!["message", "model_change", "thinking_level", "usage"]);
+        assert_eq!(
+            kinds,
+            vec!["message", "model_change", "thinking_level", "usage"]
+        );
     }
 
     #[tokio::test]
@@ -609,17 +682,23 @@ mod tests {
                 timestamp: 0,
             })
             .unwrap();
-        manager.append_message(AgentMessage::user("第一轮问题")).unwrap();
+        manager
+            .append_message(AgentMessage::user("第一轮问题"))
+            .unwrap();
         let m = rpi_ai::Model::minimal("m", "mock", "mock");
         let mut ok = rpi_ai::AssistantMessage::pending(&m);
         ok.content = vec![rpi_ai::ContentBlock::text("回答")];
         ok.stop_reason = rpi_ai::StopReason::Stop;
         ok.usage.total_tokens = 100;
-        manager.append_message(AgentMessage::Assistant(Box::new(ok))).unwrap();
+        manager
+            .append_message(AgentMessage::Assistant(Box::new(ok)))
+            .unwrap();
         let mut error = rpi_ai::AssistantMessage::pending(&m);
         error.stop_reason = rpi_ai::StopReason::Error;
         error.error_message = Some("prompt is too long: 2000 tokens > 100 maximum".into());
-        manager.append_message(AgentMessage::Assistant(Box::new(error))).unwrap();
+        manager
+            .append_message(AgentMessage::Assistant(Box::new(error)))
+            .unwrap();
 
         let compactor = SessionCompactor {
             manager: manager.clone(),
@@ -636,19 +715,33 @@ mod tests {
         // 原始历史保留(append-only):4 条消息 entry 都在
         let entries = manager.entries();
         assert_eq!(
-            entries.iter().filter(|e| matches!(e, rpi_session::Entry::Message { .. })).count(),
+            entries
+                .iter()
+                .filter(|e| matches!(e, rpi_session::Entry::Message { .. }))
+                .count(),
             4,
             "原始消息不删除"
         );
         // Compaction + ContextEdit(剔除错误 assistant)entry 已落盘
-        assert!(entries.iter().any(|e| matches!(e, rpi_session::Entry::Compaction { .. })));
-        assert!(entries.iter().any(|e| matches!(e, rpi_session::Entry::ContextEdit { .. })));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, rpi_session::Entry::Compaction { .. })));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, rpi_session::Entry::ContextEdit { .. })));
         // 压缩后上下文来自 projection:system 快照 + 摘要,被摘要消息不再出现
         // 压缩后上下文:system 快照 + 摘要 + 保留的近期回复;
         // 错误 assistant(ContextEdit 剔除)与被摘要的 user 不再出现
-        assert!(matches!(messages.first(), Some(AgentMessage::System { .. })));
-        assert!(messages.iter().any(|m| matches!(m, AgentMessage::CompactionSummary { .. })));
-        assert!(!messages.iter().any(|m| matches!(m, AgentMessage::User { .. })));
+        assert!(matches!(
+            messages.first(),
+            Some(AgentMessage::System { .. })
+        ));
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, AgentMessage::CompactionSummary { .. })));
+        assert!(!messages
+            .iter()
+            .any(|m| matches!(m, AgentMessage::User { .. })));
         assert!(
             !messages.iter().any(|m| matches!(m,
                 AgentMessage::Assistant(a) if matches!(a.stop_reason, rpi_ai::StopReason::Error))),

@@ -81,14 +81,23 @@ impl ModelResolver {
     ) {
         self.provider_overrides.insert(
             provider_id.to_string(),
-            ProviderOverride { base_url, api: api.to_string(), api_key, headers },
+            ProviderOverride {
+                base_url,
+                api: api.to_string(),
+                api_key,
+                headers,
+            },
         );
     }
 
     /// 解析 `provider/model`、`provider`(取默认模型)或已注册的自定义模型 id。
     pub fn resolve(&self, spec: &str) -> Result<Model, String> {
         let spec = spec.trim();
-        if let Some(model) = self.extra_models.iter().find(|m| m.id == spec || format!("{}/{}", m.provider, m.id) == spec) {
+        if let Some(model) = self
+            .extra_models
+            .iter()
+            .find(|m| m.id == spec || format!("{}/{}", m.provider, m.id) == spec)
+        {
             return Ok(model.clone());
         }
 
@@ -117,7 +126,10 @@ impl ModelResolver {
                 .map(|model| model.to_string())
                 .or_else(|| {
                     // 自定义 provider(models.json models 列表):首个模型为默认
-                    self.extra_models.iter().find(|m| m.provider == provider_id).map(|m| m.id.clone())
+                    self.extra_models
+                        .iter()
+                        .find(|m| m.provider == provider_id)
+                        .map(|m| m.id.clone())
                 })
                 .ok_or_else(|| format!("unknown provider `{provider_id}`: no default model"))?,
         };
@@ -202,9 +214,14 @@ mod tests {
         let models = resolver.available_models();
         assert_eq!(models.first().unwrap().id, "my-model", "自定义模型在前");
         // 自定义 provider 不应挤掉内置默认表;每个候选都可解析
-        let specs: Vec<String> =
-            models.iter().map(|m| format!("{}/{}", m.provider, m.id)).collect();
-        assert!(specs.contains(&"anthropic/claude-sonnet-4-5".to_string()), "{specs:?}");
+        let specs: Vec<String> = models
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.id))
+            .collect();
+        assert!(
+            specs.contains(&"anthropic/claude-sonnet-4-5".to_string()),
+            "{specs:?}"
+        );
         assert!(specs.contains(&"zai/glm-4.7".to_string()), "{specs:?}");
         // 无重复候选(精确 provider+id 去重,自定义模型与内置默认并列)
         let mut sorted = specs.clone();
@@ -229,7 +246,13 @@ mod tests {
             .iter()
             .map(|m| format!("{}/{}", m.provider, m.id))
             .collect();
-        assert!(specs.contains(&"openai/my-proxy-model".to_string()), "{specs:?}");
-        assert!(specs.contains(&"openai/gpt-4.1-mini".to_string()), "{specs:?}");
+        assert!(
+            specs.contains(&"openai/my-proxy-model".to_string()),
+            "{specs:?}"
+        );
+        assert!(
+            specs.contains(&"openai/gpt-4.1-mini".to_string()),
+            "{specs:?}"
+        );
     }
 }

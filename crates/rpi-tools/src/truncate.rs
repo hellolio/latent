@@ -48,11 +48,7 @@ fn split_lines(content: &str) -> Vec<&str> {
 }
 
 /// 保留头部截断(read 用)。
-pub fn truncate_head(
-    content: &str,
-    max_lines: usize,
-    max_bytes: usize,
-) -> TruncationResult {
+pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> TruncationResult {
     let lines = split_lines(content);
     let total_lines = lines.len();
     let total_bytes = content.len();
@@ -105,11 +101,7 @@ pub fn truncate_head(
 }
 
 /// 保留尾部截断(bash 用):超出时保留末尾 max_lines 行 / max_bytes 字节。
-pub fn truncate_tail(
-    content: &str,
-    max_lines: usize,
-    max_bytes: usize,
-) -> TruncationResult {
+pub fn truncate_tail(content: &str, max_lines: usize, max_bytes: usize) -> TruncationResult {
     let lines = split_lines(content);
     let total_lines = lines.len();
     let total_bytes = content.len();
@@ -152,7 +144,11 @@ pub fn truncate_tail(
         content,
         truncated,
         truncated_by: if truncated {
-            if start_by_lines > 0 { "lines" } else { "bytes" }
+            if start_by_lines > 0 {
+                "lines"
+            } else {
+                "bytes"
+            }
         } else {
             "none"
         },
@@ -169,7 +165,10 @@ mod tests {
 
     #[test]
     fn head_truncation_respects_lines_and_reports_total() {
-        let content = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_head(&content, 10, DEFAULT_MAX_BYTES);
         assert!(result.truncated);
         assert_eq!(result.output_lines, 10);
@@ -181,7 +180,10 @@ mod tests {
 
     #[test]
     fn tail_truncation_keeps_end() {
-        let content = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_tail(&content, 10, DEFAULT_MAX_BYTES);
         assert!(result.truncated);
         assert_eq!(result.output_lines, 10);

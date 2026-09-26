@@ -72,7 +72,10 @@ pub fn create_bash_tool_with_session_env(cwd: &Path, env: SessionEnvFn) -> Arc<d
     create_shell_tool(
         bash_config(),
         cwd,
-        ShellSpawnOptions { session_env: Some(env), ..Default::default() },
+        ShellSpawnOptions {
+            session_env: Some(env),
+            ..Default::default()
+        },
     )
 }
 
@@ -142,8 +145,16 @@ fn powershell_config() -> ShellToolConfig {
     }
 }
 
-fn create_shell_tool(config: ShellToolConfig, cwd: &Path, spawn: ShellSpawnOptions) -> Arc<dyn Tool> {
-    Arc::new(ShellTool { config, cwd: cwd.to_path_buf(), spawn })
+fn create_shell_tool(
+    config: ShellToolConfig,
+    cwd: &Path,
+    spawn: ShellSpawnOptions,
+) -> Arc<dyn Tool> {
+    Arc::new(ShellTool {
+        config,
+        cwd: cwd.to_path_buf(),
+        spawn,
+    })
 }
 
 struct ParsedArgs {
@@ -156,19 +167,25 @@ fn parse_args(name: &str, args: &serde_json::Value) -> Result<ParsedArgs, ToolEr
         name: name.to_string(),
         message: message.to_string(),
     };
-    let obj = args.as_object().ok_or_else(|| fail("arguments must be an object"))?;
+    let obj = args
+        .as_object()
+        .ok_or_else(|| fail("arguments must be an object"))?;
     let command = obj
         .get("command")
         .and_then(|v| v.as_str())
         .ok_or_else(|| fail("missing required argument `command`"))?
         .to_string();
     let timeout_secs = match obj.get("timeout") {
-        Some(v) if !v.is_null() => {
-            Some(v.as_u64().ok_or_else(|| fail("`timeout` must be a positive integer"))?)
-        }
+        Some(v) if !v.is_null() => Some(
+            v.as_u64()
+                .ok_or_else(|| fail("`timeout` must be a positive integer"))?,
+        ),
         _ => None,
     };
-    Ok(ParsedArgs { command, timeout_secs })
+    Ok(ParsedArgs {
+        command,
+        timeout_secs,
+    })
 }
 
 /// 流式读取一个管道到 accumulator,每块更新一次快照(让 TUI 实时可见;
@@ -182,7 +199,10 @@ async fn pipe_into<S: tokio::io::AsyncRead + Unpin>(
     use tokio::io::AsyncReadExt;
     let mut buf = vec![0u8; 65536];
     loop {
-        let n = stream.read(&mut buf).await.map_err(|e| fail(format!("command failed: {e}")))?;
+        let n = stream
+            .read(&mut buf)
+            .await
+            .map_err(|e| fail(format!("command failed: {e}")))?;
         if n == 0 {
             break;
         }
@@ -209,8 +229,14 @@ async fn run(
     let spawn_options = &tool.spawn;
     let cwd = &tool.cwd;
     let name = config.name;
-    let fail = |message: String| ToolError::Failed { name: name.to_string(), message };
-    if timeout_secs.map(|t| (t as u128) * 1000 > MAX_TIMEOUT_MS).unwrap_or(false) {
+    let fail = |message: String| ToolError::Failed {
+        name: name.to_string(),
+        message,
+    };
+    if timeout_secs
+        .map(|t| (t as u128) * 1000 > MAX_TIMEOUT_MS)
+        .unwrap_or(false)
+    {
         return Err(fail("timeout exceeds maximum allowed duration".into()));
     }
 
@@ -235,7 +261,9 @@ async fn run(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let mut child = cmd.spawn().map_err(|e| fail(format!("failed to spawn shell: {e}")))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| fail(format!("failed to spawn shell: {e}")))?;
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -260,12 +288,15 @@ async fn run(
             err?;
             // 超时/中止分支落选后,持有 child 的分支 future 被 drop;
             // kill_on_drop(true) 兜底(pi 进程组隔离的最后一道)
-            let status = child.wait().await.map_err(|e| fail(format!("command failed: {e}")))?;
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| fail(format!("command failed: {e}")))?;
             // 信号死亡无 exit code:按 shell 惯例换算 128 + signal(05 文档 §4)
             #[cfg(unix)]
-            let code = status
-                .code()
-                .unwrap_or_else(|| 128 + std::os::unix::process::ExitStatusExt::signal(&status).unwrap_or(0));
+            let code = status.code().unwrap_or_else(|| {
+                128 + std::os::unix::process::ExitStatusExt::signal(&status).unwrap_or(0)
+            });
             #[cfg(not(unix))]
             let code = status.code().unwrap_or(-1);
             Ok(code)
@@ -287,7 +318,9 @@ async fn run(
             kill_process_tree(&mut child);
             let _ = child.wait().await;
             match exit {
-                Exit::Cancelled => Err(ToolError::Aborted { name: name.to_string() }),
+                Exit::Cancelled => Err(ToolError::Aborted {
+                    name: name.to_string(),
+                }),
                 _ => {
                     // 超时恰是长输出超限的场景:聚合已捕获输出(必要时落盘)随错误返回
                     // (pi appendStatus:输出 + "Command timed out after N seconds")
@@ -343,7 +376,10 @@ fn settle_output(snapshot: OutputSnapshot) -> ToolOutput {
                 path.display()
             ));
         }
-        details.insert("truncation".into(), serde_json::to_value(&snapshot.truncation).unwrap_or_default());
+        details.insert(
+            "truncation".into(),
+            serde_json::to_value(&snapshot.truncation).unwrap_or_default(),
+        );
         if let Some(path) = &snapshot.full_output_path {
             details.insert("fullOutputPath".into(), json!(path.display().to_string()));
         }
@@ -394,7 +430,10 @@ impl Tool for ShellTool {
         cancel: CancellationToken,
         updater: &dyn ToolUpdater,
     ) -> Result<ToolOutput, ToolError> {
-        let ParsedArgs { command, timeout_secs } = parse_args(self.config.name, &call.args)?;
+        let ParsedArgs {
+            command,
+            timeout_secs,
+        } = parse_args(self.config.name, &call.args)?;
 
         // T10:hook 先改写(检查的是用户命令),prefix 最后前置;
         // hook 返回 Err = 拒绝执行,直接产出错误结果、不 spawn(07 §8.5)
@@ -417,9 +456,19 @@ impl Tool for ShellTool {
 
         updater.update(format!("$ {effective}")).await;
 
-        let accumulator = Arc::new(Mutex::new(OutputAccumulator::new(DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES)));
-        let code =
-            run(self, &effective, timeout_secs, &cancel, accumulator.clone(), updater).await?;
+        let accumulator = Arc::new(Mutex::new(OutputAccumulator::new(
+            DEFAULT_MAX_LINES,
+            DEFAULT_MAX_BYTES,
+        )));
+        let code = run(
+            self,
+            &effective,
+            timeout_secs,
+            &cancel,
+            accumulator.clone(),
+            updater,
+        )
+        .await?;
 
         // 结束聚合并取最终快照
         let snapshot = {
@@ -441,7 +490,11 @@ impl Tool for ShellTool {
 
 /// T10:空前缀(全空白)= 无操作。
 fn effective_prefix(prefix: &Option<String>) -> Option<String> {
-    prefix.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()).map(str::to_string)
+    prefix
+        .as_ref()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -463,8 +516,21 @@ mod tests {
         }
     }
 
-    async fn exec(tool: &ShellTool, args: serde_json::Value, cancel: CancellationToken) -> Result<ToolOutput, ToolError> {
-        tool.execute(ToolCall { id: "t".into(), name: tool.name().into(), args }, cancel, &Noop).await
+    async fn exec(
+        tool: &ShellTool,
+        args: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        tool.execute(
+            ToolCall {
+                id: "t".into(),
+                name: tool.name().into(),
+                args,
+            },
+            cancel,
+            &Noop,
+        )
+        .await
     }
 
     fn bash_at(cwd: &Path) -> Arc<ShellTool> {
@@ -476,15 +542,23 @@ mod tests {
     }
 
     fn bash_with(cwd: &Path, spawn: ShellSpawnOptions) -> Arc<ShellTool> {
-        Arc::new(ShellTool { config: bash_config(), cwd: cwd.to_path_buf(), spawn })
+        Arc::new(ShellTool {
+            config: bash_config(),
+            cwd: cwd.to_path_buf(),
+            spawn,
+        })
     }
 
     #[tokio::test]
     async fn runs_command_and_returns_output() {
         let tool = bash_at(&std::env::temp_dir());
-        let output = exec(&tool, serde_json::json!({"command": "echo hello"}), CancellationToken::new())
-            .await
-            .unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo hello"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output.output.trim(), "hello");
     }
 
@@ -512,9 +586,13 @@ mod tests {
     #[tokio::test]
     async fn non_zero_exit_is_error_with_status() {
         let tool = bash_at(&std::env::temp_dir());
-        let err = exec(&tool, serde_json::json!({"command": "echo boom >&2; exit 3"}), CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = exec(
+            &tool,
+            serde_json::json!({"command": "echo boom >&2; exit 3"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("boom"), "错误应携带输出: {message}");
         assert!(message.contains("Command exited with code 3"));
@@ -523,9 +601,13 @@ mod tests {
     #[tokio::test]
     async fn timeout_kills_command() {
         let tool = bash_at(&std::env::temp_dir());
-        let err = exec(&tool, serde_json::json!({"command": "sleep 30", "timeout": 1}), CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = exec(
+            &tool,
+            serde_json::json!({"command": "sleep 30", "timeout": 1}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("timed out"));
     }
 
@@ -558,7 +640,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(output.output.contains("Full output:"), "超限应提示落盘: {}", &output.output[..200]);
+        assert!(
+            output.output.contains("Full output:"),
+            "超限应提示落盘: {}",
+            &output.output[..200]
+        );
         assert!(output.details["fullOutputPath"].is_string());
         let path = output.details["fullOutputPath"].as_str().unwrap();
         let full = std::fs::read_to_string(path).unwrap();
@@ -569,7 +655,11 @@ mod tests {
     #[tokio::test]
     async fn powershell_runs_when_available() {
         // pwsh 不在(多数开发机)则跳过;工厂与 schema 由 all_tools 测试覆盖
-        if std::process::Command::new("pwsh").arg("--version").output().is_err() {
+        if std::process::Command::new("pwsh")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
         let tool = ShellTool {
@@ -577,9 +667,13 @@ mod tests {
             cwd: std::env::temp_dir(),
             spawn: ShellSpawnOptions::default(),
         };
-        let output = exec(&tool, serde_json::json!({"command": "Write-Output hello"}), CancellationToken::new())
-            .await
-            .unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "Write-Output hello"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output.output.trim(), "hello");
     }
 
@@ -590,13 +684,19 @@ mod tests {
         let tool = bash_with(
             &std::env::temp_dir(),
             ShellSpawnOptions {
-                session_env: Some(Arc::new(|| vec![("PI_RPI_TEST_MODEL".into(), "test-model".into())])),
+                session_env: Some(Arc::new(|| {
+                    vec![("PI_RPI_TEST_MODEL".into(), "test-model".into())]
+                })),
                 ..Default::default()
             },
         );
-        let output = exec(&tool, serde_json::json!({"command": "echo $PI_RPI_TEST_MODEL"}), CancellationToken::new())
-            .await
-            .unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo $PI_RPI_TEST_MODEL"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output.output.trim(), "test-model");
     }
 
@@ -614,9 +714,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        let output = exec(&tool, serde_json::json!({"command": "echo $PI_RPI_TEST_KEEP"}), CancellationToken::new())
-            .await
-            .unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo $PI_RPI_TEST_KEEP"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output.output.trim(), "keep");
         match guard {
             Some(previous) => std::env::set_var(key, previous),
@@ -633,9 +737,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        let output = exec(&tool, serde_json::json!({"command": "echo ok"}), CancellationToken::new())
-            .await
-            .unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo ok"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output.output.trim(), "ok");
     }
 
@@ -645,11 +753,18 @@ mod tests {
     async fn command_prefix_is_prepended() {
         let tool = bash_with(
             &std::env::temp_dir(),
-            ShellSpawnOptions { command_prefix: Some("echo wrapped;".into()), ..Default::default() },
+            ShellSpawnOptions {
+                command_prefix: Some("echo wrapped;".into()),
+                ..Default::default()
+            },
         );
-        let output = exec(&tool, serde_json::json!({"command": "echo hello"}), CancellationToken::new())
-            .await
-            .unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo hello"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(output.output.contains("wrapped"), "{}", output.output);
         assert!(output.output.contains("hello"), "{}", output.output);
     }
@@ -658,11 +773,18 @@ mod tests {
     async fn blank_prefix_is_noop() {
         let tool = bash_with(
             &std::env::temp_dir(),
-            ShellSpawnOptions { command_prefix: Some("   ".into()), ..Default::default() },
+            ShellSpawnOptions {
+                command_prefix: Some("   ".into()),
+                ..Default::default()
+            },
         );
-        let output = exec(&tool, serde_json::json!({"command": "echo plain"}), CancellationToken::new())
-            .await
-            .unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo plain"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output.output.trim(), "plain");
     }
 
@@ -694,11 +816,19 @@ mod tests {
                 ..Default::default()
             },
         );
-        let output = exec(&tool, serde_json::json!({"command": "echo secret"}), CancellationToken::new())
-            .await
-            .unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo secret"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(output.output.contains("rewritten"), "{}", output.output);
-        assert!(output.output.contains("wrapped"), "prefix 在 hook 之后前置: {}", output.output);
+        assert!(
+            output.output.contains("wrapped"),
+            "prefix 在 hook 之后前置: {}",
+            output.output
+        );
         assert!(!output.output.contains("secret"), "{}", output.output);
     }
 
@@ -709,11 +839,18 @@ mod tests {
         let script = format!("touch {}", side_effect.display());
         let tool = bash_with(
             &std::env::temp_dir(),
-            ShellSpawnOptions { spawn_hook: Some(Arc::new(RejectingHook)), ..Default::default() },
+            ShellSpawnOptions {
+                spawn_hook: Some(Arc::new(RejectingHook)),
+                ..Default::default()
+            },
         );
-        let err = exec(&tool, serde_json::json!({"command": script}), CancellationToken::new())
-            .await
-            .unwrap_err();
+        let err = exec(
+            &tool,
+            serde_json::json!({"command": script}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("forbidden by policy"), "{err}");
         assert!(!side_effect.exists(), "hook 拒绝后不得产生子进程副作用");
     }
@@ -742,7 +879,10 @@ mod tests {
 
         // SIGKILL 后稍等回收,再验证孙进程已死(kill -0 失败 = 进程不存在)
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let grandchild = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        let grandchild = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .to_string();
         let probe = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!("kill -0 {grandchild}"))
@@ -751,5 +891,4 @@ mod tests {
         assert!(!probe.success(), "孙进程 {grandchild} 应已被进程组杀灭回收");
         let _ = std::fs::remove_file(&pidfile);
     }
-
 }

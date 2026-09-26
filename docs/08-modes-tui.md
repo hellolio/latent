@@ -1,6 +1,6 @@
 # 08 — 运行模式、TUI 与周边包
 
-> **一句话**:四种运行模式(interactive/print/json/rpc)只是同一业务核的 I/O 壳;编辑器集成走 stdio 上的 JSONL RPC;TUI 是完全独立的零依赖库(差分渲染 + 同步输出),经 `ExtensionUIContext` 受限代理接入;另有实验性的 CBOR RPC 栈与持久化 harness(coding-agent 主线未用)。
+> **一句话**:四种运行模式(interactive/print/json/rpc)只是同一业务核的 I/O 壳;编辑器集成走 stdio 上的 JSONL RPC;TUI 以 ratatui/crossterm 为底的自有组件层(Inline 视口 + 语义主题,2026-09 起从零依赖手写渲染迁移),经 `ExtensionUIContext` 受限代理接入;另有实验性的 CBOR RPC 栈与持久化 harness(coding-agent 主线未用)。
 
 ## 1. 四种运行模式(`packages/coding-agent/src/modes/`)
 
@@ -122,3 +122,6 @@
 - **2026-09-26 rpc 客户端断连会挂死扩展 UI 调用**:扩展等 `confirm/select` 应答时客户端关 stdin,未决 oneshot 无人 resolve → `wait_idle` 永不返回 → 解法:stdin EOF 后 `RpcUi::close_all()` 清空 pending,让等待方走 Err 分支落默认值(confirm 默认**拒绝**,不 fail-open)。 (关联文件:`crates/rpi-cli/src/modes/rpc.rs`)
 - **2026-09-26 retry hooks 与 SessionBridge 需要同一个订阅者列表**:`create_session_retry_hooks` 产生的 AutoRetry 事件要进 mode 可见的事件流,但 core 内部自建列表拿不到 → 解法:`AgentSessionConfig` 加可选 `subscribers` 字段,装配方预建列表同时交给 SessionBridge 与 retry hooks(带默认值的加法变更,不动接缝签名)。 (关联文件:`crates/rpi-core/src/session.rs`)
 - **2026-09-26 M5/M6 子集取舍(有意为之,非遗漏)**:rpi-tui 只实现主缓冲单实现 + 4 个组件(Text/Markdown/SelectList/Editor),pi 的 TuiAltScreen 双实现、Image/Kitty 图片、完整键位表(keybindings.ts 可配置默认表)未引入;rpc 只实现业务核已支持的 12 命令,未知命令返回明确错误而非静默。扩充时按 §7 索引的优先级逐项对照。 (关联文件:`crates/rpi-tui/src/lib.rs`、`crates/rpi-cli/src/modes/rpc.rs`)
+- **2026-09-26 TUI 迁移到 ratatui(2026-09-26)**:零依赖手写差分渲染整体替换为 ratatui 0.30 `Viewport::Inline`(pi 主屏模型对应物:定稿行 `insert_before` 进 scrollback,底部视口每帧重绘);组件层(Theme/markdown+syntect/多行 Editor/Loader/tool_card/header/footer)仍为纯函数(`状态 → Vec<Line>`)可直接单测。Inline 视口不支持运行期改高,`set_viewport_height` 用「insert_before 腾位 + 清视口区 + 重建 Terminal」实现。 (关联文件:`crates/rpi-tui/src/app.rs`、`crates/rpi-cli/src/modes/interactive/`)
+- **2026-09-26 crossterm fd 多读者:光标查询会被按键线程吞应答**:Inline 视口构建/resize 内部向终端发 DSR(`ESC[6n`)并等待应答字节;若按键读取线程同时在 `event::read/poll` 同一 fd,应答被其消费 → 查询超时("cursor position could not be read")。解法:暂停协议 —— 查询前置 `READER_PAUSE`,读取线程在 poll 循环边界(`reader_checkpoint()`)看到后停读并置 `READER_PARKED`,查询方等到停靠确认再发查询。 (关联文件:`crates/rpi-tui/src/app.rs`、`crates/rpi-cli/src/modes/interactive/mod.rs`)
+- **2026-09-26 冒烟测试要用 tmux 而非 `script`**:`script` 的 pty 不模拟终端、不应答 DSR,任何 Inline TUI 都会启动失败;tmux 是真终端模拟器(应答 ESC[6n),`tmux new-session -d -x W -y H` + `send-keys`/`capture-pane` 可全自动验证 TUI。另:capture-pane 输出中 CJK 字符间的空格是宽字符单元格显示伪影,不是文本损坏(以会话 JSONL 为准)。 (关联文件:冒烟流程,无代码)

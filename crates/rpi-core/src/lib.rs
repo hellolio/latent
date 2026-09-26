@@ -15,10 +15,9 @@ pub mod system_prompt;
 pub use config::{create_model_resolver_from_config, load_default_model_selection};
 pub use extensions::{
     bridge_elicitation, connect_stdio, create_diagnostics_sink, create_extension_event_bus,
-    spawn_diagnostics_printer,
-    Extension, ExtensionActions, ExtensionApi, ExtensionDiagnostic, ExtensionEvent,
-    ExtensionEventBus, ExtensionHooks, ExtensionRegistry, ExtensionUi, McpConnection,
-    McpServerSpec, NoopUi,
+    spawn_diagnostics_printer, Extension, ExtensionActions, ExtensionApi, ExtensionDiagnostic,
+    ExtensionEvent, ExtensionEventBus, ExtensionHooks, ExtensionRegistry, ExtensionUi,
+    McpConnection, McpServerSpec, NoopUi,
 };
 pub use model::{create_model_resolver, default_model_for, ModelResolver};
 pub use retry::{create_retrying_provider, RetryHooks};

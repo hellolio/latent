@@ -1,35 +1,48 @@
-//! rpi-tui —— 零依赖差分渲染终端 UI 库(08 文档 §3)。
+//! rpi-tui —— ratatui 为底的终端 UI 组件库(08 文档 §3,2026-09 起从零依赖
+//! 手写渲染迁移到 ratatui/crossterm;依赖方向约束不变:**不知道 agent 的
+//! 存在**,无内部 crate 依赖,整体可拆卸)。
 //!
-//! 与 pi 的 packages/tui 同构的定位:**不知道 agent/coding-agent 的存在**,
-//! 无任何外部 crate 依赖,整体可拆卸。本 crate 提供四样东西(方针 §2 三规则):
+//! 本 crate 提供四样东西(方针 §2 三规则):
 //!
-//! 1. **工厂**:`create_main_screen_tui()` 出厂主缓冲渲染器;
-//! 2. **trait**:`Tui`(滚动提交 + 视口差分重绘 + 收尾)、`Component`(`render(width)` 纯函数);
-//! 3. **类型**:`Key`/`KeyParser`、`Editor`、`Text`/`Markdown`/`SelectList`、`RowChange`。
+//! 1. **工厂**:`TuiApp::open()` 出厂 Inline 视口终端应用;
+//! 2. **语义主题**:`Theme`(角色 → 颜色,真彩色/ANSI16 双调色板);
+//! 3. **组件**:多行 `Editor`、`Markdown`(syntect 高亮)、`SelectList`、
+//!    `tool_card`/`header`/`footer`、`loader`;
+//! 4. **类型**:`Key`(crossterm 事件归一)、`text`(span 感知折行工具)。
 //!
-//! 渲染模型(08 文档 §3):**差分渲染**(视口内只重画变化行)+ **CSI 2026
-//! 同步输出**(防闪烁)+ **括号粘贴模式**。主缓冲实现保留终端 scrollback:
-//! 定稿内容经 `commit_lines` 追加进 scrollback(只打印一次),视口固定占据
-//! 终端底部 `viewport_height` 行(状态行 + 小部件 + 输入行),每次更新按行
-//! diff、仅重写变化的行。退出时 `finish` 清掉视口,最终文档留在 scrollback。
+//! 渲染模型(pi TuiMainScreen 对应):**Inline 视口** —— 定稿内容经
+//! `commit_lines` 插入视口上方、滚入终端原生 scrollback(保留回滚);
+//! 屏幕底部固定视口承载编辑器/状态栏/选择列表,每帧重绘。视口高度随内容
+//! 动态调整(`set_viewport_height`),`redraw_full` 支持全文重绘(ctrl+o)。
 //!
-//! 测试策略:diff/宽度/按键/编辑器/组件全部纯函数化,直接单测;终端 I/O
-//! (`Terminal`)是唯一 sidecar,`Tui` 实现对 `Write` 泛型,可用内存缓冲验证
-//! 输出的字节流。
+//! 测试策略:全部组件为纯函数(状态 → `Vec<Line>`),直接单测;终端 I/O
+//! 集中在 `app.rs`,用 TestBackend 验证结构性不变量。
 
-pub mod ansi;
-pub mod components;
-pub mod diff;
+pub mod app;
 pub mod editor;
-pub mod keys;
-pub mod screen;
-pub mod terminal;
+pub mod footer;
+pub mod header;
+pub mod highlight;
+pub mod key;
+pub mod loader;
+pub mod markdown;
+pub mod select_list;
+pub mod text;
+pub mod theme;
+pub mod tool_card;
 pub mod width;
 
-pub use components::{Component, Markdown, SelectList, Text};
-pub use diff::{diff_rows, RowChange};
-pub use editor::Editor;
-pub use keys::{matches_key, Key, KeyParser};
-pub use screen::{create_main_screen_tui, MainScreenTui, Tui, DEFAULT_VIEWPORT_HEIGHT};
-pub use terminal::Terminal;
+pub use app::{reader_checkpoint, TuiApp};
+pub use editor::{Editor, EditorView};
+pub use footer::{ctx_segment, FooterData};
+pub use header as header_view;
+pub use highlight::Highlighter;
+pub use key::{from_event, Key};
+pub use loader as loader_view;
+pub use markdown::Markdown;
+pub use select_list::SelectList;
+pub use theme::Theme;
 pub use width::{char_width, display_width, truncate_to_width, wrap_to_width};
+
+/// UI 行类型(静态生命周期,组件纯函数的输出)。
+pub type UiLine = ratatui::text::Line<'static>;

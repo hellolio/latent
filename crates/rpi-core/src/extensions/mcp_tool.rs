@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rmcp::model::{CallToolRequest, CallToolRequestParams, ClientRequest, JsonObject, ServerResult};
+use rmcp::model::{
+    CallToolRequest, CallToolRequestParams, ClientRequest, JsonObject, ServerResult,
+};
 use rmcp::service::PeerRequestOptions;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -28,8 +30,7 @@ pub struct McpToolMeta {
 
 /// 进度路由表:progress token → 转发器(跨任务可达,handler 收到
 /// `notifications/progress` 时按 token 查表)。
-pub(crate) type ProgressRoutes =
-    Arc<Mutex<HashMap<String, Arc<dyn ToolUpdater>>>>;
+pub(crate) type ProgressRoutes = Arc<Mutex<HashMap<String, Arc<dyn ToolUpdater>>>>;
 
 /// 远端 MCP 工具的宿主侧执行体。
 pub struct McpTool {
@@ -54,7 +55,13 @@ impl McpTool {
         schema: Value,
     ) -> Self {
         let wire_name = super::mcp_host::tool_wire_name(connection.name(), &remote_name);
-        McpTool { connection, remote_name, wire_name, description, schema }
+        McpTool {
+            connection,
+            remote_name,
+            wire_name,
+            description,
+            schema,
+        }
     }
 }
 
@@ -123,11 +130,10 @@ impl Tool for McpTool {
 
         // 可取消请求:rmcp 自动分配 progress token,进度通知按它回路由表
         // 入队阶段同样可被挂起的扩展卡住(select 覆盖发送与等待全程)
-        let mut dispatch = std::pin::pin!(
-            self.connection
-                .peer()
-                .send_cancellable_request(request, PeerRequestOptions::no_options())
-        );
+        let mut dispatch = std::pin::pin!(self
+            .connection
+            .peer()
+            .send_cancellable_request(request, PeerRequestOptions::no_options()));
         let handle = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -153,8 +159,14 @@ impl Tool for McpTool {
 
         let routes = self.connection.progress_routes().clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        routes.lock().unwrap().insert(token_key.clone(), Arc::new(ChannelUpdater { tx }));
-        let guard = RouteGuard { routes: routes.clone(), token: token_key.clone() };
+        routes
+            .lock()
+            .unwrap()
+            .insert(token_key.clone(), Arc::new(ChannelUpdater { tx }));
+        let guard = RouteGuard {
+            routes: routes.clone(),
+            token: token_key.clone(),
+        };
 
         // 本地转发:channel → 借用态 updater(在本次 execute 的任务内)
         let forward = async {
@@ -232,7 +244,11 @@ fn convert_tool_result(
     if result.is_error.unwrap_or(false) {
         return Err(ToolError::Failed {
             name: tool.wire_name.clone(),
-            message: if text.is_empty() { "tool reported error".into() } else { text },
+            message: if text.is_empty() {
+                "tool reported error".into()
+            } else {
+                text
+            },
         });
     }
     Ok(ToolOutput {

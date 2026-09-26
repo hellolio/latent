@@ -38,13 +38,21 @@ mod tests {
 
     #[test]
     fn appends_to_memory_and_persists_jsonl() {
-        let path = std::env::temp_dir().join(format!("rpi-session-test-{}.jsonl", uuid::Uuid::now_v7()));
+        let path =
+            std::env::temp_dir().join(format!("rpi-session-test-{}.jsonl", uuid::Uuid::now_v7()));
         let session = create_session(Some(&path)).unwrap();
-        let first = session.append_message(AgentMessage::user("第一条")).unwrap();
-        session.append_message(AgentMessage::user("第二条")).unwrap();
+        let first = session
+            .append_message(AgentMessage::user("第一条"))
+            .unwrap();
+        session
+            .append_message(AgentMessage::user("第二条"))
+            .unwrap();
 
         assert_eq!(session.entries().len(), 2);
-        assert_eq!(session.get_leaf_id().as_deref(), Some(session.entries()[1].id()));
+        assert_eq!(
+            session.get_leaf_id().as_deref(),
+            Some(session.entries()[1].id())
+        );
         let _ = first;
 
         // 文件:首行 header + 两条 message entry
@@ -61,7 +69,8 @@ mod tests {
 
     #[test]
     fn reloads_existing_session_file() {
-        let path = std::env::temp_dir().join(format!("rpi-session-reload-{}.jsonl", uuid::Uuid::now_v7()));
+        let path =
+            std::env::temp_dir().join(format!("rpi-session-reload-{}.jsonl", uuid::Uuid::now_v7()));
         let (leaf, id) = {
             let session = create_session(Some(&path)).unwrap();
             let id = session.session_id().to_string();
@@ -76,18 +85,27 @@ mod tests {
         assert_eq!(session.entries().len(), 1);
         // 续写:parentId 接上原 leaf
         let next = session.append_message(AgentMessage::user("again")).unwrap();
-        assert_eq!(session.get_entry(&next).unwrap().parent_id(), Some(leaf.as_str()));
+        assert_eq!(
+            session.get_entry(&next).unwrap().parent_id(),
+            Some(leaf.as_str())
+        );
         std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
     fn corrupt_lines_are_skipped_and_counted() {
-        let path = std::env::temp_dir().join(format!("rpi-session-corrupt-{}.jsonl", uuid::Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!(
+            "rpi-session-corrupt-{}.jsonl",
+            uuid::Uuid::now_v7()
+        ));
         let session = create_session(Some(&path)).unwrap();
         session.append_message(AgentMessage::user("good")).unwrap();
         drop(session);
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(file, "{{not json").unwrap();
         writeln!(file).unwrap();
         writeln!(file, "{{\"type\":\"message\",\"id\":\"x\"}}").unwrap(); // 缺 message 字段 → 损坏

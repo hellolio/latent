@@ -21,7 +21,8 @@ struct HooksAdapter(Arc<dyn RetryHooks>);
 
 impl rpi_ai::RetryCallbacks for HooksAdapter {
     fn on_retry_scheduled(&self, attempt: u32, max_attempts: u32, delay_ms: u64, error: &str) {
-        self.0.on_retry_scheduled(attempt, max_attempts, delay_ms, error);
+        self.0
+            .on_retry_scheduled(attempt, max_attempts, delay_ms, error);
     }
 
     fn on_retry_finished(&self, success: bool, attempt: u32, final_error: Option<&str>) {
@@ -53,7 +54,9 @@ mod tests {
         Model::minimal("mock-1", "mock", "mock")
     }
 
-    async fn terminal_of(stream: &mut rpi_ai::AssistantMessageEventStream) -> AssistantMessageEvent {
+    async fn terminal_of(
+        stream: &mut rpi_ai::AssistantMessageEventStream,
+    ) -> AssistantMessageEvent {
         use futures::StreamExt;
         let mut last = None;
         while let Some(event) = stream.next().await {
@@ -82,11 +85,18 @@ mod tests {
         }
         let provider = create_retrying_provider(
             Arc::new(scripted),
-            RetryPolicy { base_delay_ms: 1, ..Default::default() },
+            RetryPolicy {
+                base_delay_ms: 1,
+                ..Default::default()
+            },
             Some(Arc::new(Hooks(scheduled.clone()))),
         );
         let mut stream = provider
-            .stream(&m, TranscriptContext { messages: vec![] }, StreamOptions::default())
+            .stream(
+                &m,
+                TranscriptContext { messages: vec![] },
+                StreamOptions::default(),
+            )
             .await;
         let terminal = terminal_of(&mut stream).await;
         match terminal {
@@ -107,11 +117,18 @@ mod tests {
         );
         let provider = create_retrying_provider(
             Arc::new(scripted),
-            RetryPolicy { base_delay_ms: 1, ..Default::default() },
+            RetryPolicy {
+                base_delay_ms: 1,
+                ..Default::default()
+            },
             None,
         );
         let mut stream = provider
-            .stream(&m, TranscriptContext { messages: vec![] }, StreamOptions::default())
+            .stream(
+                &m,
+                TranscriptContext { messages: vec![] },
+                StreamOptions::default(),
+            )
             .await;
         match terminal_of(&mut stream).await {
             AssistantMessageEvent::Error(message) => {
@@ -130,15 +147,21 @@ mod tests {
             None,
         );
         let mut stream = provider
-            .stream(&m, TranscriptContext { messages: vec![] }, StreamOptions::default())
+            .stream(
+                &m,
+                TranscriptContext { messages: vec![] },
+                StreamOptions::default(),
+            )
             .await;
         match terminal_of(&mut stream).await {
             AssistantMessageEvent::Done(message) => {
                 assert_eq!(message.text_content(), "hi");
-                assert!(message.content.iter().any(|b| matches!(b, ContentBlock::Text { .. })));
+                assert!(message
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { .. })));
             }
             other => panic!("expected done, got {other:?}"),
         }
     }
-
 }

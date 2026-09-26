@@ -37,7 +37,10 @@ impl ProviderRegistry {
     /// 内置适配器注册表:anthropic-messages + openai-completions。
     pub fn with_builtin_adapters() -> Self {
         let mut registry = Self::new();
-        registry.register("anthropic-messages", crate::adapters::anthropic::create_anthropic_adapter());
+        registry.register(
+            "anthropic-messages",
+            crate::adapters::anthropic::create_anthropic_adapter(),
+        );
         registry.register(
             "openai-completions",
             crate::adapters::openai_completions::create_openai_completions_adapter(),
@@ -75,17 +78,41 @@ pub fn create_default_provider(provider_id: &str) -> Option<Arc<dyn Provider>> {
 /// 内置 provider 表(id, api, baseUrl):`default_provider_endpoint` 与
 /// `/model` 选择器的候选清单共用,新增 provider 只改这里。
 pub const BUILTIN_PROVIDERS: &[(&str, &str, &str)] = &[
-    ("anthropic", "anthropic-messages", "https://api.anthropic.com"),
+    (
+        "anthropic",
+        "anthropic-messages",
+        "https://api.anthropic.com",
+    ),
     ("openai", "openai-completions", "https://api.openai.com/v1"),
     ("deepseek", "openai-completions", "https://api.deepseek.com"),
-    ("groq", "openai-completions", "https://api.groq.com/openai/v1"),
+    (
+        "groq",
+        "openai-completions",
+        "https://api.groq.com/openai/v1",
+    ),
     ("xai", "openai-completions", "https://api.x.ai/v1"),
-    ("openrouter", "openai-completions", "https://openrouter.ai/api/v1"),
+    (
+        "openrouter",
+        "openai-completions",
+        "https://openrouter.ai/api/v1",
+    ),
     ("zai", "openai-completions", "https://api.z.ai/api/paas/v4"),
     ("mistral", "openai-completions", "https://api.mistral.ai/v1"),
-    ("moonshotai", "openai-completions", "https://api.moonshot.ai/v1"),
-    ("together", "openai-completions", "https://api.together.xyz/v1"),
-    ("fireworks", "openai-completions", "https://api.fireworks.ai/inference/v1"),
+    (
+        "moonshotai",
+        "openai-completions",
+        "https://api.moonshot.ai/v1",
+    ),
+    (
+        "together",
+        "openai-completions",
+        "https://api.together.xyz/v1",
+    ),
+    (
+        "fireworks",
+        "openai-completions",
+        "https://api.fireworks.ai/inference/v1",
+    ),
 ];
 
 /// 内置 provider id 清单(顺序与 BUILTIN_PROVIDERS 一致)。

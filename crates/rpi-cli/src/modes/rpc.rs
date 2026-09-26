@@ -62,11 +62,23 @@ pub struct RpcResponse {
 
 impl RpcResponse {
     fn ok(id: u64, result: Value) -> Self {
-        Self { kind: "response", id, ok: true, result: Some(result), error: None }
+        Self {
+            kind: "response",
+            id,
+            ok: true,
+            result: Some(result),
+            error: None,
+        }
     }
 
     fn err(id: u64, error: impl Into<String>) -> Self {
-        Self { kind: "response", id, ok: false, result: None, error: Some(error.into()) }
+        Self {
+            kind: "response",
+            id,
+            ok: false,
+            result: None,
+            error: Some(error.into()),
+        }
     }
 }
 
@@ -188,9 +200,14 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
     reader: R,
     writer: SharedRpcWriter,
 ) -> Result<(), String> {
-    let BuiltSession { session, session_manager } = built;
+    let BuiltSession {
+        session,
+        session_manager,
+    } = built;
 
-    let subscriber: SessionSharedSubscriber = Arc::new(RpcEventSubscriber { writer: writer.clone() });
+    let subscriber: SessionSharedSubscriber = Arc::new(RpcEventSubscriber {
+        writer: writer.clone(),
+    });
     session.subscribe(subscriber);
 
     let ui = Arc::new(RpcUi::new(writer.clone()));
@@ -210,13 +227,23 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
         let command: RpcCommand = match serde_json::from_str(&line) {
             Ok(command) => command,
             Err(error) => {
-                write_response(&writer, RpcResponse::err(command_id, format!("命令解析失败: {error}")))
-                    .await;
+                write_response(
+                    &writer,
+                    RpcResponse::err(command_id, format!("命令解析失败: {error}")),
+                )
+                .await;
                 continue;
             }
         };
-        if let Some(task) =
-            dispatch(&session, session_manager.as_deref(), &ui, &writer, command_id, command).await
+        if let Some(task) = dispatch(
+            &session,
+            session_manager.as_deref(),
+            &ui,
+            &writer,
+            command_id,
+            command,
+        )
+        .await
         {
             in_flight.push(task);
         }
@@ -233,7 +260,9 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
 
 async fn write_response(writer: &SharedRpcWriter, response: RpcResponse) {
     let mut writer = writer.lock().await;
-    writer.write_line(&serde_json::to_string(&response).unwrap_or_default()).await;
+    writer
+        .write_line(&serde_json::to_string(&response).unwrap_or_default())
+        .await;
     writer.flush().await;
 }
 
@@ -312,8 +341,11 @@ async fn dispatch(
         RpcCommand::SetThinkingLevel { level } => match parse_level(level.as_deref()) {
             Ok(level) => {
                 session.agent().set_thinking_level(level);
-                write_response(writer, RpcResponse::ok(id, json!({ "thinkingLevel": level.map(level_name) })))
-                    .await;
+                write_response(
+                    writer,
+                    RpcResponse::ok(id, json!({ "thinkingLevel": level.map(level_name) })),
+                )
+                .await;
             }
             Err(error) => write_response(writer, RpcResponse::err(id, error)).await,
         },
@@ -333,7 +365,11 @@ async fn dispatch(
         },
         RpcCommand::GetTree => match session_manager {
             Some(manager) => {
-                write_response(writer, RpcResponse::ok(id, json!({ "tree": manager.get_tree() }))).await;
+                write_response(
+                    writer,
+                    RpcResponse::ok(id, json!({ "tree": manager.get_tree() })),
+                )
+                .await;
             }
             None => write_response(writer, RpcResponse::err(id, "会话持久化未装配")).await,
         },
@@ -348,22 +384,27 @@ async fn dispatch(
                 .output()
                 .await;
             match output {
-                Ok(output) => write_response(
-                    writer,
-                    RpcResponse::ok(
-                        id,
-                        json!({
-                            "exitCode": output.status.code().unwrap_or(-1),
-                            "stdout": String::from_utf8_lossy(&output.stdout),
-                            "stderr": String::from_utf8_lossy(&output.stderr),
-                        }),
-                    ),
-                )
-                .await,
+                Ok(output) => {
+                    write_response(
+                        writer,
+                        RpcResponse::ok(
+                            id,
+                            json!({
+                                "exitCode": output.status.code().unwrap_or(-1),
+                                "stdout": String::from_utf8_lossy(&output.stdout),
+                                "stderr": String::from_utf8_lossy(&output.stderr),
+                            }),
+                        ),
+                    )
+                    .await
+                }
                 Err(error) => write_response(writer, RpcResponse::err(id, error.to_string())).await,
             }
         }
-        RpcCommand::ExtensionUiResponse { id: request_id, value } => {
+        RpcCommand::ExtensionUiResponse {
+            id: request_id,
+            value,
+        } => {
             // 反向通道应答是单向消息:路由即可,不回 response 帧(pi 语义)
             ui.resolve(request_id, value).await;
         }

@@ -23,7 +23,9 @@ pub struct GrepTool {
 
 /// 工厂。
 pub fn create_grep_tool(cwd: &Path) -> Arc<dyn Tool> {
-    Arc::new(GrepTool { cwd: cwd.to_path_buf() })
+    Arc::new(GrepTool {
+        cwd: cwd.to_path_buf(),
+    })
 }
 
 struct GrepArgs {
@@ -62,7 +64,10 @@ fn parse_args(args: &serde_json::Value) -> Result<GrepArgs, String> {
     let ignore_case = flag("ignoreCase")?;
     let literal = flag("literal")?;
     let context = match obj.get("context") {
-        Some(v) if !v.is_null() => v.as_u64().ok_or("`context` must be a non-negative integer")? as usize,
+        Some(v) if !v.is_null() => {
+            v.as_u64()
+                .ok_or("`context` must be a non-negative integer")? as usize
+        }
         _ => 0,
     };
     let limit = match obj.get("limit") {
@@ -72,7 +77,15 @@ fn parse_args(args: &serde_json::Value) -> Result<GrepArgs, String> {
         }
         _ => DEFAULT_LIMIT,
     };
-    Ok(GrepArgs { pattern, path, glob, ignore_case, literal, context, limit })
+    Ok(GrepArgs {
+        pattern,
+        path,
+        glob,
+        ignore_case,
+        literal,
+        context,
+        limit,
+    })
 }
 
 /// 相对搜索根的显示路径;非目录搜索时用文件名(pi 的 formatPath)。
@@ -110,7 +123,9 @@ fn build_walker(search_root: &Path, glob: Option<&str>) -> Result<ignore::Walk, 
         overrides
             .add(glob)
             .map_err(|e| format!("invalid glob `{glob}`: {e}"))?;
-        let overrides = overrides.build().map_err(|e| format!("invalid glob `{glob}`: {e}"))?;
+        let overrides = overrides
+            .build()
+            .map_err(|e| format!("invalid glob `{glob}`: {e}"))?;
         walker.overrides(overrides);
     }
     Ok(walker.build())
@@ -154,8 +169,10 @@ impl Tool for GrepTool {
         cancel: CancellationToken,
         _updater: &dyn ToolUpdater,
     ) -> Result<ToolOutput, ToolError> {
-        let args = parse_args(&call.args)
-            .map_err(|message| ToolError::Failed { name: "grep".into(), message })?;
+        let args = parse_args(&call.args).map_err(|message| ToolError::Failed {
+            name: "grep".into(),
+            message,
+        })?;
 
         let search_root = match &args.path {
             Some(p) if Path::new(p).is_absolute() => PathBuf::from(p),
@@ -165,8 +182,12 @@ impl Tool for GrepTool {
         let search_root_is_dir = std::fs::metadata(&search_root)
             .map(|m| m.is_dir())
             .unwrap_or(false);
-        let walker = build_walker(&search_root, args.glob.as_deref())
-            .map_err(|message| ToolError::Failed { name: "grep".into(), message })?;
+        let walker = build_walker(&search_root, args.glob.as_deref()).map_err(|message| {
+            ToolError::Failed {
+                name: "grep".into(),
+                message,
+            }
+        })?;
 
         let pattern = if args.literal {
             regex::escape(&args.pattern)
@@ -188,7 +209,9 @@ impl Tool for GrepTool {
 
         'outer: for entry in walker {
             if cancel.is_cancelled() {
-                return Err(ToolError::Aborted { name: "grep".into() });
+                return Err(ToolError::Aborted {
+                    name: "grep".into(),
+                });
             }
             let Ok(entry) = entry else { continue };
             // rg 只搜文件
@@ -196,7 +219,9 @@ impl Tool for GrepTool {
                 continue;
             }
             let path = entry.into_path();
-            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
             // 二进制文件跳过(rg 默认行为)
             if bytes.contains(&0) {
                 continue;
@@ -215,7 +240,8 @@ impl Tool for GrepTool {
                 }
                 let line_number = index + 1;
                 if args.context == 0 {
-                    let (text, was_truncated) = truncate_line(line.trim_end_matches('\r'), GREP_MAX_LINE_LENGTH);
+                    let (text, was_truncated) =
+                        truncate_line(line.trim_end_matches('\r'), GREP_MAX_LINE_LENGTH);
                     lines_truncated |= was_truncated;
                     output_lines.push(format!("{display}:{line_number}: {text}"));
                 } else {
@@ -259,7 +285,10 @@ impl Tool for GrepTool {
         }
         if truncation.truncated {
             notices.push(format!("{}KB limit reached", DEFAULT_MAX_BYTES / 1024));
-            details.insert("truncation".into(), serde_json::to_value(&truncation).unwrap_or_default());
+            details.insert(
+                "truncation".into(),
+                serde_json::to_value(&truncation).unwrap_or_default(),
+            );
         }
         if lines_truncated {
             notices.push(format!(
@@ -293,19 +322,37 @@ mod tests {
     }
 
     async fn exec(tool: &GrepTool, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
-        tool.execute(ToolCall { id: "t".into(), name: "grep".into(), args }, CancellationToken::new(), &Noop)
-            .await
+        tool.execute(
+            ToolCall {
+                id: "t".into(),
+                name: "grep".into(),
+                args,
+            },
+            CancellationToken::new(),
+            &Noop,
+        )
+        .await
     }
 
     async fn fixture() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("rpi-grep-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(dir.join("src")).await.unwrap();
-        tokio::fs::write(dir.join("src/a.ts"), "let alpha = 1;\nlet beta = 2;\n").await.unwrap();
-        tokio::fs::write(dir.join("b.txt"), "alpha here\n").await.unwrap();
+        tokio::fs::write(dir.join("src/a.ts"), "let alpha = 1;\nlet beta = 2;\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("b.txt"), "alpha here\n")
+            .await
+            .unwrap();
         // node_modules 内的匹配应被 .gitignore 排除
-        tokio::fs::create_dir_all(dir.join("node_modules")).await.unwrap();
-        tokio::fs::write(dir.join("node_modules/c.ts"), "alpha in deps\n").await.unwrap();
-        tokio::fs::write(dir.join(".gitignore"), "node_modules/\n").await.unwrap();
+        tokio::fs::create_dir_all(dir.join("node_modules"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("node_modules/c.ts"), "alpha in deps\n")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join(".gitignore"), "node_modules/\n")
+            .await
+            .unwrap();
         dir
     }
 
@@ -314,9 +361,17 @@ mod tests {
         let dir = fixture().await;
         let tool = GrepTool { cwd: dir.clone() };
         let output = exec(&tool, json!({"pattern": "alpha"})).await.unwrap();
-        assert!(output.output.contains("src/a.ts:1: let alpha = 1;"), "{}", output.output);
+        assert!(
+            output.output.contains("src/a.ts:1: let alpha = 1;"),
+            "{}",
+            output.output
+        );
         assert!(output.output.contains("b.txt:1: alpha here"));
-        assert!(!output.output.contains("node_modules"), "应尊重 .gitignore: {}", output.output);
+        assert!(
+            !output.output.contains("node_modules"),
+            "应尊重 .gitignore: {}",
+            output.output
+        );
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
@@ -325,16 +380,24 @@ mod tests {
         let dir = fixture().await;
         let tool = GrepTool { cwd: dir.clone() };
         // glob 过滤:只搜 .ts
-        let output = exec(&tool, json!({"pattern": "alpha", "glob": "*.ts"})).await.unwrap();
+        let output = exec(&tool, json!({"pattern": "alpha", "glob": "*.ts"}))
+            .await
+            .unwrap();
         assert!(output.output.contains("src/a.ts"));
         assert!(!output.output.contains("b.txt"));
         // literal:正则元字符按字面
-        tokio::fs::write(dir.join("src/d.ts"), "a.b\naxb\n").await.unwrap();
-        let output = exec(&tool, json!({"pattern": "a.b", "literal": true})).await.unwrap();
+        tokio::fs::write(dir.join("src/d.ts"), "a.b\naxb\n")
+            .await
+            .unwrap();
+        let output = exec(&tool, json!({"pattern": "a.b", "literal": true}))
+            .await
+            .unwrap();
         assert!(output.output.contains("a.b"));
         assert!(!output.output.contains("axb"));
         // ignoreCase
-        let output = exec(&tool, json!({"pattern": "ALPHA", "ignoreCase": true})).await.unwrap();
+        let output = exec(&tool, json!({"pattern": "ALPHA", "ignoreCase": true}))
+            .await
+            .unwrap();
         assert!(output.output.contains("src/a.ts"));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
@@ -343,11 +406,15 @@ mod tests {
     async fn context_lines_and_match_limit() {
         let dir = fixture().await;
         let tool = GrepTool { cwd: dir.clone() };
-        let output = exec(&tool, json!({"pattern": "beta", "context": 1})).await.unwrap();
+        let output = exec(&tool, json!({"pattern": "beta", "context": 1}))
+            .await
+            .unwrap();
         assert!(output.output.contains("src/a.ts-1- let alpha = 1;"));
         assert!(output.output.contains("src/a.ts:2: let beta = 2;"));
         // limit 触发 notice + details
-        let output = exec(&tool, json!({"pattern": "let", "limit": 2})).await.unwrap();
+        let output = exec(&tool, json!({"pattern": "let", "limit": 2}))
+            .await
+            .unwrap();
         assert!(output.output.contains("2 matches limit reached"));
         assert_eq!(output.details["matchLimitReached"], json!(2));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
@@ -362,7 +429,9 @@ mod tests {
         let output = exec(&tool, json!({"pattern": "hit"})).await.unwrap();
         assert!(output.output.contains("Some lines truncated to 500 chars"));
         assert_eq!(output.details["linesTruncated"], json!(true));
-        let output = exec(&tool, json!({"pattern": "nope-nowhere"})).await.unwrap();
+        let output = exec(&tool, json!({"pattern": "nope-nowhere"}))
+            .await
+            .unwrap();
         assert_eq!(output.output, "No matches found");
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
@@ -371,9 +440,13 @@ mod tests {
     async fn missing_path_is_error_and_single_file_search() {
         let dir = fixture().await;
         let tool = GrepTool { cwd: dir.clone() };
-        let err = exec(&tool, json!({"pattern": "x", "path": "missing-dir"})).await.unwrap_err();
+        let err = exec(&tool, json!({"pattern": "x", "path": "missing-dir"}))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("Path not found"));
-        let output = exec(&tool, json!({"pattern": "alpha", "path": "b.txt"})).await.unwrap();
+        let output = exec(&tool, json!({"pattern": "alpha", "path": "b.txt"}))
+            .await
+            .unwrap();
         assert!(output.output.starts_with("b.txt:1:"));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }

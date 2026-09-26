@@ -44,7 +44,10 @@ pub enum ContentBlock {
 
 impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
-        ContentBlock::Text { text: text.into(), text_signature: None }
+        ContentBlock::Text {
+            text: text.into(),
+            text_signature: None,
+        }
     }
 
     /// 文本块内容(text 块之外返回 None)
@@ -148,8 +151,17 @@ pub struct Tool {
 }
 
 impl Tool {
-    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: serde_json::Value) -> Self {
-        Tool { name: name.into(), description: description.into(), parameters, constrained_sampling: None }
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Tool {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+            constrained_sampling: None,
+        }
     }
 }
 
@@ -211,14 +223,28 @@ fn now_ms() -> i64 {
 
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
-        Message::System { content: text.into(), sections: BTreeMap::new(), tools_added: Vec::new(), tools_removed: Vec::new(), timestamp: now_ms() }
+        Message::System {
+            content: text.into(),
+            sections: BTreeMap::new(),
+            tools_added: Vec::new(),
+            tools_removed: Vec::new(),
+            timestamp: now_ms(),
+        }
     }
 
     pub fn user_text(text: impl Into<String>) -> Self {
-        Message::User { content: UserContent::Text(text.into()), timestamp: now_ms() }
+        Message::User {
+            content: UserContent::Text(text.into()),
+            timestamp: now_ms(),
+        }
     }
 
-    pub fn tool_result(tool_call_id: impl Into<String>, tool_name: impl Into<String>, content: Vec<ContentBlock>, is_error: bool) -> Self {
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: Vec<ContentBlock>,
+        is_error: bool,
+    ) -> Self {
         Message::ToolResult {
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
@@ -286,7 +312,11 @@ impl AssistantMessage {
     /// 失败编码进流:stopReason=error/aborted 的终态消息(02 文档流协议)。
     pub fn error(model: &Model, message: impl Into<String>, aborted: bool) -> Self {
         let mut m = AssistantMessage::pending(model);
-        m.stop_reason = if aborted { StopReason::Aborted } else { StopReason::Error };
+        m.stop_reason = if aborted {
+            StopReason::Aborted
+        } else {
+            StopReason::Error
+        };
         m.error_message = Some(message.into());
         m
     }
@@ -298,7 +328,9 @@ impl AssistantMessage {
     }
 
     pub fn has_tool_calls(&self) -> bool {
-        self.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+        self.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
     }
 }
 
@@ -402,7 +434,11 @@ pub struct Model {
 
 impl Model {
     /// 测试/骨架用最小模型:零价格、默认窗口。
-    pub fn minimal(id: impl Into<String>, api: impl Into<String>, provider: impl Into<String>) -> Self {
+    pub fn minimal(
+        id: impl Into<String>,
+        api: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Self {
         Model {
             id: id.into(),
             name: String::new(),
@@ -425,12 +461,24 @@ impl Model {
     /// pi models.ts calculateCost:分层定价 + Anthropic 1h 缓存写入 2x 计价。
     pub fn calculate_cost(&self, usage: &mut Usage) {
         let input_tokens = usage.input + usage.cache_read + usage.cache_write;
-        let mut rates = (&self.cost.input, &self.cost.output, &self.cost.cache_read, &self.cost.cache_write);
+        let mut rates = (
+            &self.cost.input,
+            &self.cost.output,
+            &self.cost.cache_read,
+            &self.cost.cache_write,
+        );
         let mut matched: i64 = -1;
         if let Some(tiers) = &self.cost.tiers {
             for tier in tiers {
-                if input_tokens > tier.input_tokens_above && (tier.input_tokens_above as i64) > matched {
-                    rates = (&tier.input, &tier.output, &tier.cache_read, &tier.cache_write);
+                if input_tokens > tier.input_tokens_above
+                    && (tier.input_tokens_above as i64) > matched
+                {
+                    rates = (
+                        &tier.input,
+                        &tier.output,
+                        &tier.cache_read,
+                        &tier.cache_write,
+                    );
                     matched = tier.input_tokens_above as i64;
                 }
             }
@@ -440,7 +488,8 @@ impl Model {
         usage.cost.input = rates.0 / 1_000_000.0 * usage.input as f64;
         usage.cost.output = rates.1 / 1_000_000.0 * usage.output as f64;
         usage.cost.cache_read = rates.2 / 1_000_000.0 * usage.cache_read as f64;
-        usage.cost.cache_write = (rates.3 * short_write as f64 + rates.0 * 2.0 * long_write as f64) / 1_000_000.0;
+        usage.cost.cache_write =
+            (rates.3 * short_write as f64 + rates.0 * 2.0 * long_write as f64) / 1_000_000.0;
         usage.cost.total =
             usage.cost.input + usage.cost.output + usage.cost.cache_read + usage.cost.cache_write;
     }
@@ -548,15 +597,39 @@ pub struct StreamOptions {
 #[derive(Debug, Clone)]
 pub enum AssistantMessageEvent {
     Start,
-    TextStart { content_index: usize },
-    TextDelta { content_index: usize, delta: String },
-    TextEnd { content_index: usize, content: String },
-    ThinkingStart { content_index: usize },
-    ThinkingDelta { content_index: usize, delta: String },
-    ThinkingEnd { content_index: usize, content: String },
-    ToolCallStart { content_index: usize },
-    ToolCallDelta { content_index: usize, delta: String },
-    ToolCallEnd { content_index: usize, tool_call: ContentBlock },
+    TextStart {
+        content_index: usize,
+    },
+    TextDelta {
+        content_index: usize,
+        delta: String,
+    },
+    TextEnd {
+        content_index: usize,
+        content: String,
+    },
+    ThinkingStart {
+        content_index: usize,
+    },
+    ThinkingDelta {
+        content_index: usize,
+        delta: String,
+    },
+    ThinkingEnd {
+        content_index: usize,
+        content: String,
+    },
+    ToolCallStart {
+        content_index: usize,
+    },
+    ToolCallDelta {
+        content_index: usize,
+        delta: String,
+    },
+    ToolCallEnd {
+        content_index: usize,
+        tool_call: ContentBlock,
+    },
     /// 终态:正常结束(stop/length/toolUse),携带最终消息
     Done(Box<AssistantMessage>),
     /// 终态:失败编码进流(error/aborted),不抛异常
@@ -577,7 +650,11 @@ mod tests {
         message.stop_reason = StopReason::Stop;
         let value = serde_json::to_value(Message::assistant(message.clone())).unwrap();
         assert_eq!(value["role"], "assistant");
-        assert!(value.as_object().unwrap().iter().all(|(k, _)| k != "AssistantMessage"));
+        assert!(value
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(|(k, _)| k != "AssistantMessage"));
 
         // roundtrip
         let back: Message = serde_json::from_value(value).unwrap();
@@ -587,16 +664,27 @@ mod tests {
     #[test]
     fn message_roles_match_pi_jsonl() {
         let tool_result = Message::tool_result("t1", "read", vec![ContentBlock::text("x")], false);
-        assert_eq!(serde_json::to_value(&tool_result).unwrap()["role"], "toolResult");
+        assert_eq!(
+            serde_json::to_value(&tool_result).unwrap()["role"],
+            "toolResult"
+        );
 
         let user = Message::user_text("q");
         assert_eq!(serde_json::to_value(&user).unwrap()["role"], "user");
 
-        let tool_call = ContentBlock::ToolCall { id: "1".into(), name: "read".into(), arguments: json!({}) };
-        assert_eq!(serde_json::to_value(&tool_call).unwrap()["type"], "toolCall");
+        let tool_call = ContentBlock::ToolCall {
+            id: "1".into(),
+            name: "read".into(),
+            arguments: json!({}),
+        };
+        assert_eq!(
+            serde_json::to_value(&tool_call).unwrap()["type"],
+            "toolCall"
+        );
 
         // roundtrip 保持判别符
-        let back: Message = serde_json::from_value(serde_json::to_value(&tool_result).unwrap()).unwrap();
+        let back: Message =
+            serde_json::from_value(serde_json::to_value(&tool_result).unwrap()).unwrap();
         assert_eq!(back, tool_result);
     }
 
@@ -616,7 +704,12 @@ mod tests {
                 cache_write: 1.25,
             }]),
         };
-        let mut usage = Usage { input: 200, output: 10, cache_write_1h: Some(20), ..Usage::zero() };
+        let mut usage = Usage {
+            input: 200,
+            output: 10,
+            cache_write_1h: Some(20),
+            ..Usage::zero()
+        };
         usage.cache_write = 50;
         model.calculate_cost(&mut usage);
         // 命中高档:input=200>100 → 整单 1.0/5.0 档

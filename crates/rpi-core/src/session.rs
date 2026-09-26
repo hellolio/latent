@@ -75,9 +75,19 @@ pub enum AgentSessionEvent {
     Agent(AgentEvent),
     /// agent_end 之后(run 结算完成)
     AgentSettled,
-    QueueUpdate { steering: usize, follow_up: usize },
-    AutoRetryStart { attempt: u32, delay_ms: u64, reason: String },
-    AutoRetryEnd { success: bool, reason: String },
+    QueueUpdate {
+        steering: usize,
+        follow_up: usize,
+    },
+    AutoRetryStart {
+        attempt: u32,
+        delay_ms: u64,
+        reason: String,
+    },
+    AutoRetryEnd {
+        success: bool,
+        reason: String,
+    },
 }
 
 /// session 事件订阅者(mode/持久化/扩展 UI)。
@@ -198,8 +208,14 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
 
     // 系统提示词 sections(工具片段来自激活工具)
     let mut options = config.system_prompt;
-    options.tool_snippets.extend(active_tools.iter().filter_map(|tool| tool.prompt_snippet()));
-    options.tool_guidelines.extend(active_tools.iter().flat_map(|tool| tool.prompt_guidelines()));
+    options
+        .tool_snippets
+        .extend(active_tools.iter().filter_map(|tool| tool.prompt_snippet()));
+    options.tool_guidelines.extend(
+        active_tools
+            .iter()
+            .flat_map(|tool| tool.prompt_guidelines()),
+    );
     let state = build_system_prompt_state(&options)?;
     let sections = match &state {
         SystemPromptState::Sections(sections) => sections.clone(),
@@ -219,7 +235,10 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
             .map_err(CoreError::Agent)?;
     }
 
-    let subscribers = config.subscribers.clone().unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+    let subscribers = config
+        .subscribers
+        .clone()
+        .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
     agent.subscribe(Arc::new(SessionBridge {
         subscribers: subscribers.clone(),
         sink: config.session_sink.clone(),
@@ -271,14 +290,20 @@ impl Subscriber for SessionBridge {
             // usage 一致:assistant 定稿即记录 usage entry(不进模型上下文)
             if let AgentMessage::Assistant(assistant) = message.as_ref() {
                 if let Err(error) = sink
-                    .append_usage("message", &assistant.provider, &assistant.model, assistant.usage)
+                    .append_usage(
+                        "message",
+                        &assistant.provider,
+                        &assistant.model,
+                        assistant.usage,
+                    )
                     .await
                 {
                     eprintln!("[rpi] session sink usage append failed: {error}");
                 }
             }
         }
-        self.broadcast(&AgentSessionEvent::Agent(event.clone())).await;
+        self.broadcast(&AgentSessionEvent::Agent(event.clone()))
+            .await;
         if matches!(event, AgentEvent::AgentEnd { .. }) {
             self.broadcast(&AgentSessionEvent::AgentSettled).await;
         }
@@ -397,10 +422,40 @@ impl AgentSession {
         self.agent.wait_idle().await;
     }
 
+    /// `!` bash 执行记录(pi 的 bash 透传):BashExecution 消息进转录
+    /// (内存 + 持久化);convert_to_llm 语义使其在下一轮进入模型上下文,
+    /// 本调用不触发模型 run。run 期间拒绝(转录变更限制)。
+    pub async fn record_bash_execution(
+        &self,
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+    ) -> Result<(), CoreError> {
+        let message = AgentMessage::BashExecution {
+            command: command.clone(),
+            output: output.clone(),
+            exit_code,
+            timestamp: rpi_agent::now_ms(),
+        };
+        let mut messages = self.agent.messages();
+        messages.push(message.clone());
+        self.agent.set_messages(messages).map_err(CoreError::from)?;
+        if let Some(sink) = &self.session_sink {
+            sink.append(&message).await.map_err(|error| {
+                CoreError::SystemPrompt(format!("session sink append: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
     /// 切换激活工具集(pi @1279):工具集变更由循环的 declareToolChanges
     /// 公告给模型;系统提示词 tools/rules 节随之 diff 出一条 system patch。
     pub fn set_active_tools_by_name(&self, names: &[String]) -> Result<(), CoreError> {
-        let known: Vec<String> = self.tools_all.iter().map(|tool| tool.name().to_string()).collect();
+        let known: Vec<String> = self
+            .tools_all
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
         for name in names {
             if !known.contains(name) {
                 return Err(CoreError::SystemPrompt(format!("unknown tool `{name}`")));
@@ -419,10 +474,14 @@ impl AgentSession {
             // 在原始 options 上替换工具片段(保留 custom_prompt/context_files/
             // append/prompt_guidelines 等全部用户配置);Forced 整 prompt 不参与重建
             let mut options = runtime.system_prompt_options.clone();
-            options.tool_snippets =
-                active_tools.iter().filter_map(|tool| tool.prompt_snippet()).collect();
-            options.tool_guidelines =
-                active_tools.iter().flat_map(|tool| tool.prompt_guidelines()).collect();
+            options.tool_snippets = active_tools
+                .iter()
+                .filter_map(|tool| tool.prompt_snippet())
+                .collect();
+            options.tool_guidelines = active_tools
+                .iter()
+                .flat_map(|tool| tool.prompt_guidelines())
+                .collect();
             // Forced 整 prompt:提示词不随工具集变化,只换工具集本身
             let forced = matches!(runtime.system_prompt, SystemPromptState::Forced(_));
             let new_sections = build_system_prompt_sections(&options)?;
@@ -434,7 +493,8 @@ impl AgentSession {
             runtime.sections = new_sections.clone();
             if !patch.is_empty() {
                 runtime.system_prompt = SystemPromptState::Sections(new_sections);
-                self.agent.set_system_prompt(Some(runtime.system_prompt.to_text()));
+                self.agent
+                    .set_system_prompt(Some(runtime.system_prompt.to_text()));
                 runtime.pending_system_messages.push(AgentMessage::System {
                     content: String::new(),
                     sections: patch,
@@ -488,7 +548,9 @@ impl AgentSession {
             .ok_or("compaction 需要 model")?;
         let messages = compactor.compact(&model).await?;
         let count = messages.len();
-        self.agent.set_messages(messages).map_err(|e| e.to_string())?;
+        self.agent
+            .set_messages(messages)
+            .map_err(|e| e.to_string())?;
         Ok(count)
     }
 
@@ -500,7 +562,8 @@ impl AgentSession {
         runtime.sections = new_sections.clone();
         if !patch.is_empty() {
             runtime.system_prompt = SystemPromptState::Sections(new_sections);
-            self.agent.set_system_prompt(Some(runtime.system_prompt.to_text()));
+            self.agent
+                .set_system_prompt(Some(runtime.system_prompt.to_text()));
             runtime.pending_system_messages.push(AgentMessage::System {
                 content: String::new(),
                 sections: patch,
@@ -515,7 +578,10 @@ impl AgentSession {
     async fn emit_queue_update(&self) {
         let (steering, follow_up) = self.agent.queue_depths();
         let subscribers = self.subscribers.lock().unwrap().clone();
-        let event = AgentSessionEvent::QueueUpdate { steering, follow_up };
+        let event = AgentSessionEvent::QueueUpdate {
+            steering,
+            follow_up,
+        };
         for subscriber in subscribers {
             subscriber.on_session_event(&event).await;
         }

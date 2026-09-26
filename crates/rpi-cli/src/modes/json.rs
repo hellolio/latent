@@ -25,7 +25,11 @@ pub async fn run_json_mode(
     let subscriber: SessionSharedSubscriber = Arc::new(JsonEventSubscriber { out });
     built.session.subscribe(subscriber);
 
-    let outcome = built.session.prompt(prompt).await.map_err(|e| e.to_string())?;
+    let outcome = built
+        .session
+        .prompt(prompt)
+        .await
+        .map_err(|e| e.to_string())?;
     built.session.wait_idle().await;
     Ok(outcome.stop())
 }

@@ -41,8 +41,16 @@ fn two_turn_provider() -> Arc<ScriptedProvider> {
         }],
         rpi_ai::StopReason::ToolUse,
     );
-    first.usage = rpi_ai::Usage { input: 1, output: 1, total_tokens: 2, ..Default::default() };
-    scripted_provider(vec![ScriptedTurn::new(first), ScriptedTurn::text(&m, "all done")])
+    first.usage = rpi_ai::Usage {
+        input: 1,
+        output: 1,
+        total_tokens: 2,
+        ..Default::default()
+    };
+    scripted_provider(vec![
+        ScriptedTurn::new(first),
+        ScriptedTurn::text(&m, "all done"),
+    ])
 }
 
 // ---- 内存 writer(json 模式用:std::io::Write) ----
@@ -117,13 +125,9 @@ async fn json_mode_emits_jsonl_without_streaming_partials() {
     let built = build_with(two_turn_provider()).await;
     let buffer = SharedVec::default();
 
-    let stop = modes::json::run_json_mode(
-        built,
-        "hi".into(),
-        Arc::new(Mutex::new(buffer.clone())),
-    )
-    .await
-    .expect("json run");
+    let stop = modes::json::run_json_mode(built, "hi".into(), Arc::new(Mutex::new(buffer.clone())))
+        .await
+        .expect("json run");
 
     assert!(matches!(stop, rpi_agent::RunStop::EndTurn));
     let output = buffer.text();
@@ -136,11 +140,16 @@ async fn json_mode_emits_jsonl_without_streaming_partials() {
     assert!(types.contains(&"message_end"));
     assert!(types.contains(&"agent_end"));
     assert!(types.contains(&"agent_settled"));
-    let toolcall_start =
-        lines.iter().find(|v| v["type"] == "toolcall_start").expect("toolcall_start 事件");
+    let toolcall_start = lines
+        .iter()
+        .find(|v| v["type"] == "toolcall_start")
+        .expect("toolcall_start 事件");
     assert_eq!(toolcall_start["id"], "call-1");
     assert_eq!(toolcall_start["toolName"], "bash");
-    let toolcall_end = lines.iter().find(|v| v["type"] == "toolcall_end").expect("toolcall_end");
+    let toolcall_end = lines
+        .iter()
+        .find(|v| v["type"] == "toolcall_end")
+        .expect("toolcall_end");
     assert_eq!(toolcall_end["isError"], false);
 
     // 边界:流式 partial(delta/update)全部剥离
@@ -149,7 +158,10 @@ async fn json_mode_emits_jsonl_without_streaming_partials() {
     assert!(!output.contains("message_delta"));
 
     // T4:usage 已随 turn_end 事件输出(数值与 provider 返回一致)
-    let turn_end = lines.iter().find(|v| v["type"] == "turn_end").expect("turn_end 事件");
+    let turn_end = lines
+        .iter()
+        .find(|v| v["type"] == "turn_end")
+        .expect("turn_end 事件");
     assert_eq!(turn_end["message"]["usage"]["input"].as_u64(), Some(1));
     assert_eq!(turn_end["message"]["usage"]["output"].as_u64(), Some(1));
 }
@@ -161,16 +173,14 @@ async fn json_mode_reports_error_stop_as_event_stream() {
     let built = build_with(provider).await;
     let buffer = SharedVec::default();
 
-    let stop = modes::json::run_json_mode(
-        built,
-        "hi".into(),
-        Arc::new(Mutex::new(buffer.clone())),
-    )
-    .await
-    .unwrap();
+    let stop = modes::json::run_json_mode(built, "hi".into(), Arc::new(Mutex::new(buffer.clone())))
+        .await
+        .unwrap();
     assert!(matches!(stop, rpi_agent::RunStop::Error(_)));
-    let types: Vec<String> =
-        json_lines(&buffer.text()).iter().filter_map(|v| v["type"].as_str().map(str::to_string)).collect();
+    let types: Vec<String> = json_lines(&buffer.text())
+        .iter()
+        .filter_map(|v| v["type"].as_str().map(str::to_string))
+        .collect();
     assert!(types.contains(&"agent_end".to_string()));
     assert!(types.contains(&"agent_settled".to_string()));
 }
@@ -192,25 +202,37 @@ async fn rpc_mode_dispatches_commands_and_streams_events() {
 
     use tokio::io::AsyncWriteExt;
     client
-        .write_all(concat!(
-            r#"{"type":"get_state"}"#, "\n",
-            r#"{"type":"prompt","message":"hi"}"#, "\n",
-            r#"{"type":"bash","command":"echo rpc-bash"}"#, "\n",
-            r#"{"type":"set_thinking_level","level":"high"}"#, "\n",
-            "not json\n",
-            r#"{"type":"prompt"}"#, "\n",
+        .write_all(
+            concat!(
+                r#"{"type":"get_state"}"#,
+                "\n",
+                r#"{"type":"prompt","message":"hi"}"#,
+                "\n",
+                r#"{"type":"bash","command":"echo rpc-bash"}"#,
+                "\n",
+                r#"{"type":"set_thinking_level","level":"high"}"#,
+                "\n",
+                "not json\n",
+                r#"{"type":"prompt"}"#,
+                "\n",
+            )
+            .as_bytes(),
         )
-        .as_bytes())
         .await
         .unwrap();
     wait_for_event(&buffer, "agent_settled").await;
     client
-        .write_all(concat!(
-            r#"{"type":"get_messages"}"#, "\n",
-            r#"{"type":"get_entries"}"#, "\n",
-            r#"{"type":"get_tree"}"#, "\n",
+        .write_all(
+            concat!(
+                r#"{"type":"get_messages"}"#,
+                "\n",
+                r#"{"type":"get_entries"}"#,
+                "\n",
+                r#"{"type":"get_tree"}"#,
+                "\n",
+            )
+            .as_bytes(),
         )
-        .as_bytes())
         .await
         .unwrap();
     drop(client);
@@ -220,7 +242,11 @@ async fn rpc_mode_dispatches_commands_and_streams_events() {
     let lines = json_lines(&output);
     let responses: Vec<&serde_json::Value> =
         lines.iter().filter(|v| v["type"] == "response").collect();
-    assert_eq!(responses.len(), 9, "每条命令(含两条坏命令)都恰好一个应答:{output}");
+    assert_eq!(
+        responses.len(),
+        9,
+        "每条命令(含两条坏命令)都恰好一个应答:{output}"
+    );
     // rpc 是异步协议:应答按 id 对应命令,到达顺序不保证
     let by_id = |id: u64| {
         responses
@@ -237,8 +263,11 @@ async fn rpc_mode_dispatches_commands_and_streams_events() {
     // prompt:ok + stopReason;事件流与应答在同一 stdout
     assert_eq!(by_id(2)["ok"], true);
     assert_eq!(by_id(2)["result"]["stopReason"], "end_turn");
-    let event_types: Vec<&str> =
-        lines.iter().filter(|v| v["type"] != "response").filter_map(|v| v["type"].as_str()).collect();
+    let event_types: Vec<&str> = lines
+        .iter()
+        .filter(|v| v["type"] != "response")
+        .filter_map(|v| v["type"].as_str())
+        .collect();
     assert!(event_types.contains(&"agent_start"));
     assert!(event_types.contains(&"toolcall_start"));
     assert!(event_types.contains(&"agent_settled"));
@@ -250,7 +279,10 @@ async fn rpc_mode_dispatches_commands_and_streams_events() {
     // bash:exitCode 0 + stdout
     assert_eq!(by_id(3)["ok"], true);
     assert_eq!(by_id(3)["result"]["exitCode"], 0);
-    assert_eq!(by_id(3)["result"]["stdout"].as_str().unwrap().trim(), "rpc-bash");
+    assert_eq!(
+        by_id(3)["result"]["stdout"].as_str().unwrap().trim(),
+        "rpc-bash"
+    );
 
     // set_thinking_level:ok
     assert_eq!(by_id(4)["ok"], true);
@@ -270,7 +302,10 @@ async fn rpc_mode_dispatches_commands_and_streams_events() {
 /// 轮询缓冲直到指定事件上线(测试辅助)。
 async fn wait_for_event(buffer: &SharedAsyncVec, event_type: &str) {
     for _ in 0..200 {
-        if buffer.text().contains(&format!("\"type\":\"{event_type}\"")) {
+        if buffer
+            .text()
+            .contains(&format!("\"type\":\"{event_type}\""))
+        {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -290,13 +325,18 @@ async fn rpc_mode_supports_steer_during_run() {
     let writer: modes::rpc::SharedRpcWriter = Arc::new(tokio::sync::Mutex::new(buffer.clone()));
 
     let input: &[u8] = concat!(
-        r#"{"type":"prompt","message":"start"}"#, "\n",
-        r#"{"type":"steer","message":"change course"}"#, "\n",
-        r#"{"type":"get_state"}"#, "\n",
+        r#"{"type":"prompt","message":"start"}"#,
+        "\n",
+        r#"{"type":"steer","message":"change course"}"#,
+        "\n",
+        r#"{"type":"get_state"}"#,
+        "\n",
     )
     .as_bytes();
 
-    modes::rpc::run_rpc_mode(built, input, writer).await.expect("rpc run");
+    modes::rpc::run_rpc_mode(built, input, writer)
+        .await
+        .expect("rpc run");
 
     let lines = json_lines(&buffer.text());
     let responses: Vec<&serde_json::Value> =
@@ -351,9 +391,15 @@ async fn rpc_extension_ui_backchannel_roundtrip() {
 #[tokio::test]
 async fn print_mode_runs_one_prompt_to_completion() {
     let provider = scripted_provider(vec![ScriptedTurn::text(&test_model(), "printed reply")]);
-    let stop = modes::print_mode::run_print_mode(provider, test_model(), "hello".into(), Vec::new(), rpi_cli::assembly::SessionStore::Memory)
-        .await
-        .expect("print run");
+    let stop = modes::print_mode::run_print_mode(
+        provider,
+        test_model(),
+        "hello".into(),
+        Vec::new(),
+        rpi_cli::assembly::SessionStore::Memory,
+    )
+    .await
+    .expect("print run");
     assert!(matches!(stop, rpi_agent::RunStop::EndTurn));
 }
 
@@ -372,7 +418,10 @@ async fn bash_tool_receives_pi_session_env_via_build_session() {
         }],
         rpi_ai::StopReason::ToolUse,
     );
-    let provider = scripted_provider(vec![ScriptedTurn::new(first), ScriptedTurn::text(&m, "done")]);
+    let provider = scripted_provider(vec![
+        ScriptedTurn::new(first),
+        ScriptedTurn::text(&m, "done"),
+    ]);
     let built = build_with(provider).await;
 
     // prompt 期间 bash 实际执行;工具结果经转录可查
@@ -466,10 +515,18 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         let file = dir.join(format!("{session_id}.jsonl"));
         let resumed = rpi_session::create_session(Some(&file)).unwrap();
         let messages = session_messages(&resumed.entries());
-        assert!(matches!(&messages[0], rpi_agent::AgentMessage::System { .. }), "首条 system baseline");
+        assert!(
+            matches!(&messages[0], rpi_agent::AgentMessage::System { .. }),
+            "首条 system baseline"
+        );
         let turns: Vec<_> = messages
             .iter()
-            .filter(|m| matches!(m, rpi_agent::AgentMessage::User { .. } | rpi_agent::AgentMessage::Assistant(_)))
+            .filter(|m| {
+                matches!(
+                    m,
+                    rpi_agent::AgentMessage::User { .. } | rpi_agent::AgentMessage::Assistant(_)
+                )
+            })
             .collect();
         assert_eq!(turns.len(), 2, "user + assistant");
         assert!(matches!(turns[0], rpi_agent::AgentMessage::User { .. }));
@@ -478,11 +535,8 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         let leaf_before = resumed.get_leaf_id().unwrap();
         drop(resumed);
         let provider = scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-2")]);
-        let built = build_with_store(
-            provider,
-            rpi_cli::assembly::SessionStore::Resume { file },
-        )
-        .await;
+        let built =
+            build_with_store(provider, rpi_cli::assembly::SessionStore::Resume { file }).await;
         built.session.prompt("再来一条").await.expect("prompt");
         built.session.wait_idle().await;
         let manager = built.session_manager.clone().unwrap();
@@ -491,9 +545,15 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         // resume 后续聊接在同一树上:工具集相对既有 baseline 无变化时,
         // declare_tool_changes(不变量 I6)不重复注入 system baseline
         assert_eq!(messages.len(), 5, "一段 system baseline + 两轮对话");
-        assert!(matches!(&messages[0], rpi_agent::AgentMessage::System { .. }));
+        assert!(matches!(
+            &messages[0],
+            rpi_agent::AgentMessage::System { .. }
+        ));
         assert!(matches!(&messages[3], rpi_agent::AgentMessage::User { .. }));
-        assert!(matches!(&messages[4], rpi_agent::AgentMessage::Assistant(_)));
+        assert!(matches!(
+            &messages[4],
+            rpi_agent::AgentMessage::Assistant(_)
+        ));
         let _ = leaf_before;
     }
 
@@ -518,7 +578,10 @@ async fn jsonl_rebuild_matches_agent_context_after_tool_run() {
         }],
         rpi_ai::StopReason::ToolUse,
     );
-    let provider = scripted_provider(vec![ScriptedTurn::new(first), ScriptedTurn::text(&m, "done")]);
+    let provider = scripted_provider(vec![
+        ScriptedTurn::new(first),
+        ScriptedTurn::text(&m, "done"),
+    ]);
     let built = build_with_store(
         provider,
         rpi_cli::assembly::SessionStore::New { dir: dir.clone() },
@@ -554,7 +617,10 @@ async fn jsonl_rebuild_matches_agent_context_after_tool_run() {
     );
     // usage entry 已随 assistant 定稿落盘
     assert!(
-        manager.entries().iter().any(|e| matches!(e, rpi_session::Entry::Usage { .. })),
+        manager
+            .entries()
+            .iter()
+            .any(|e| matches!(e, rpi_session::Entry::Usage { .. })),
         "usage entry 应落盘"
     );
 

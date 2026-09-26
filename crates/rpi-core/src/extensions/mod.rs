@@ -25,7 +25,9 @@ pub use event_bus::{
     EventOutcome, EventPolicy, ExtensionDiagnostic, ExtensionEvent, ExtensionEventBus,
     ExtensionHooks, ExtensionRegistration, DEFAULT_EVENT_TIMEOUT_MS,
 };
-pub use mcp_host::{bridge_elicitation, connect_stdio, connect_transport, McpConnection, McpServerSpec};
+pub use mcp_host::{
+    bridge_elicitation, connect_stdio, connect_transport, McpConnection, McpServerSpec,
+};
 pub use mcp_tool::{McpTool, McpToolMeta};
 
 /// 装配便利工厂:连接扩展进程 + 建总线,返回(总线, 已连接扩展注册的工具)。
@@ -38,13 +40,20 @@ pub async fn create_extension_event_bus(
     let mut connections = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
     for spec in specs {
-        let name = spec
-            .name
-            .clone()
-            .unwrap_or_else(|| spec.command.rsplit(['/', '\\']).next().unwrap_or("mcp").to_string());
+        let name = spec.name.clone().unwrap_or_else(|| {
+            spec.command
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("mcp")
+                .to_string()
+        });
         // 装配期唯一性:重名扩展的工具前缀会冲突,记诊断跳过(07 §8.5)
         if !seen_names.insert(name.clone()) {
-            record_diagnostic(&diagnostics, &name, "duplicate extension name, skipped".into());
+            record_diagnostic(
+                &diagnostics,
+                &name,
+                "duplicate extension name, skipped".into(),
+            );
             continue;
         }
         match connect_stdio(spec, ui.clone(), diagnostics.clone()).await {

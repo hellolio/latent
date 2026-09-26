@@ -164,10 +164,17 @@ fn resolve_credential_value(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-fn resolve_headers(headers: &BTreeMap<String, String>) -> std::collections::HashMap<String, String> {
+fn resolve_headers(
+    headers: &BTreeMap<String, String>,
+) -> std::collections::HashMap<String, String> {
     headers
         .iter()
-        .map(|(key, value)| (key.clone(), resolve_credential_value(value).unwrap_or_else(|| value.clone())))
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                resolve_credential_value(value).unwrap_or_else(|| value.clone()),
+            )
+        })
         .collect()
 }
 
@@ -191,7 +198,10 @@ fn register_config(resolver: &mut ModelResolver, providers: BTreeMap<String, Pro
                 }
             },
         };
-        let api_key = provider.api_key.as_deref().and_then(resolve_credential_value);
+        let api_key = provider
+            .api_key
+            .as_deref()
+            .and_then(resolve_credential_value);
         let headers = provider.headers.as_ref().map(resolve_headers);
         let compat = provider.compat.clone();
 
@@ -206,13 +216,18 @@ fn register_config(resolver: &mut ModelResolver, providers: BTreeMap<String, Pro
 
         for model in provider.models {
             if model.id.trim().is_empty() {
-                eprintln!("[rpi] models.json: provider `{provider_id}` 存在缺少 id 的 model,已跳过");
+                eprintln!(
+                    "[rpi] models.json: provider `{provider_id}` 存在缺少 id 的 model,已跳过"
+                );
                 continue;
             }
             let model_api = model.api.as_deref().unwrap_or(&api);
             let mut resolved = Model::minimal(&model.id, model_api, &provider_id);
             resolved.name = model.name.unwrap_or_default();
-            resolved.base_url = model.base_url.or(provider.base_url.clone()).unwrap_or_default();
+            resolved.base_url = model
+                .base_url
+                .or(provider.base_url.clone())
+                .unwrap_or_default();
             // 凭据:模型级 > provider 级;env 名优先,未命中当字面值
             resolved.api_key = model
                 .api_key
@@ -249,7 +264,10 @@ fn register_config(resolver: &mut ModelResolver, providers: BTreeMap<String, Pro
 /// 从 项目 `.rpi/models.json` + 全局 `~/.rpi/models.json` 加载配置并构建
 /// resolver(内置 provider 端点表始终可用)。文件缺失 = 空配置;解析失败 =
 /// 诊断 + 跳过。
-pub fn create_model_resolver_from_config(project_dir: Option<&Path>, home: Option<&Path>) -> ModelResolver {
+pub fn create_model_resolver_from_config(
+    project_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> ModelResolver {
     let mut resolver = create_model_resolver();
     let mut providers = BTreeMap::new();
     for path in models_config_paths(project_dir, home) {
@@ -339,8 +357,11 @@ mod tests {
     struct TempDir(std::path::PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let path =
-                std::env::temp_dir().join(format!("rpi_config_test_{}_{}", tag, std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "rpi_config_test_{}_{}",
+                tag,
+                std::process::id()
+            ));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             TempDir(path)

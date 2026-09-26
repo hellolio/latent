@@ -7,10 +7,10 @@ use std::sync::Mutex;
 
 use rpi_agent::{AgentMessage, Usage};
 
-use crate::entry::{
-    generate_id, ContextReplacement, Entry, SessionHeader, SessionTreeNode,
+use crate::entry::{generate_id, ContextReplacement, Entry, SessionHeader, SessionTreeNode};
+use crate::projection::{
+    build_context_entries, build_session_projection, ModelRef, SessionProjection,
 };
-use crate::projection::{build_context_entries, build_session_projection, ModelRef, SessionProjection};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -41,7 +41,10 @@ pub struct SessionManager {
 
 /// 工厂:传入路径即持久化会话(存在则加载续聊),`None` 为纯内存会话。
 pub fn create_session(path: Option<impl AsRef<Path>>) -> Result<Box<SessionManager>, SessionError> {
-    let cwd = std::env::current_dir().unwrap_or_default().display().to_string();
+    let cwd = std::env::current_dir()
+        .unwrap_or_default()
+        .display()
+        .to_string();
     create_session_with(path, &cwd, None)
 }
 
@@ -61,25 +64,43 @@ pub fn create_session_with(
     }
     let (header, entries, corrupt_lines) = match &path {
         Some(path) if path.exists() => load_file(path)?,
-        _ => (SessionHeader::new(new_session_id(), cwd.to_string(), parent_session.map(str::to_string)), Vec::new(), 0),
+        _ => (
+            SessionHeader::new(
+                new_session_id(),
+                cwd.to_string(),
+                parent_session.map(str::to_string),
+            ),
+            Vec::new(),
+            0,
+        ),
     };
     // 新文件先落 header 首行(06 文档 §1.1)
     if fresh_file {
         if let Some(path) = &path {
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
             writeln!(file, "{}", serde_json::to_string(&header)?)?;
         }
     }
 
-    let by_id: HashMap<String, usize> =
-        entries.iter().enumerate().map(|(i, entry)| (entry.id().to_string(), i)).collect();
+    let by_id: HashMap<String, usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| (entry.id().to_string(), i))
+        .collect();
     let leaf_id = entries.last().map(|entry| entry.id().to_string());
 
     let manager = SessionManager {
         path,
         header,
-        state: Mutex::new(State { entries, by_id, leaf_id }),
+        state: Mutex::new(State {
+            entries,
+            by_id,
+            leaf_id,
+        }),
         corrupt_lines,
     };
     Ok(Box::new(manager))
@@ -104,7 +125,10 @@ pub fn create_session_in_dir(
     let header = SessionHeader::new(id, cwd.to_string(), parent_session.map(str::to_string));
     {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
         writeln!(file, "{}", serde_json::to_string(&header)?)?;
     }
     create_session_with(Some(path), cwd, parent_session)
@@ -172,7 +196,9 @@ fn load_file(path: &Path) -> Result<(SessionHeader, Vec<Entry>, usize), SessionE
             Err(_) => corrupt += 1,
         }
     }
-    header.map(|header| (header, entries, corrupt)).ok_or(SessionError::MissingHeader)
+    header
+        .map(|header| (header, entries, corrupt))
+        .ok_or(SessionError::MissingHeader)
 }
 
 impl SessionManager {
@@ -231,17 +257,61 @@ impl SessionManager {
         let id = generate_id(&|id| state.by_id.contains_key(id));
         entry.set_parent(state.leaf_id.clone());
         match &mut entry {
-            Entry::Message { id: entry_id, timestamp, .. }
-            | Entry::ThinkingLevelChange { id: entry_id, timestamp, .. }
-            | Entry::ModelChange { id: entry_id, timestamp, .. }
-            | Entry::Usage { id: entry_id, timestamp, .. }
-            | Entry::Compaction { id: entry_id, timestamp, .. }
-            | Entry::BranchSummary { id: entry_id, timestamp, .. }
-            | Entry::Custom { id: entry_id, timestamp, .. }
-            | Entry::CustomMessage { id: entry_id, timestamp, .. }
-            | Entry::ContextEdit { id: entry_id, timestamp, .. }
-            | Entry::Label { id: entry_id, timestamp, .. }
-            | Entry::SessionInfo { id: entry_id, timestamp, .. } => {
+            Entry::Message {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::ThinkingLevelChange {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::ModelChange {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::Usage {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::Compaction {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::BranchSummary {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::Custom {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::CustomMessage {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::ContextEdit {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::Label {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::SessionInfo {
+                id: entry_id,
+                timestamp,
+                ..
+            } => {
                 *entry_id = id.clone();
                 if *timestamp == 0 {
                     *timestamp = rpi_agent::now_ms();
@@ -251,7 +321,10 @@ impl SessionManager {
         if let Some(path) = &self.path {
             let json = serde_json::to_string(&entry)?;
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
             // 单次 write_all:避免 write_fmt 拆分系统调用产生半行
             let mut line = json.into_bytes();
             line.push(b'\n');
@@ -265,10 +338,18 @@ impl SessionManager {
     }
 
     pub fn append_message(&self, message: AgentMessage) -> Result<String, SessionError> {
-        self.append_entry(Entry::Message { id: String::new(), parent_id: None, message, timestamp: 0 })
+        self.append_entry(Entry::Message {
+            id: String::new(),
+            parent_id: None,
+            message,
+            timestamp: 0,
+        })
     }
 
-    pub fn append_thinking_level_change(&self, thinking_level: impl Into<String>) -> Result<String, SessionError> {
+    pub fn append_thinking_level_change(
+        &self,
+        thinking_level: impl Into<String>,
+    ) -> Result<String, SessionError> {
         self.append_entry(Entry::ThinkingLevelChange {
             id: String::new(),
             parent_id: None,
@@ -277,7 +358,11 @@ impl SessionManager {
         })
     }
 
-    pub fn append_model_change(&self, provider: impl Into<String>, model_id: impl Into<String>) -> Result<String, SessionError> {
+    pub fn append_model_change(
+        &self,
+        provider: impl Into<String>,
+        model_id: impl Into<String>,
+    ) -> Result<String, SessionError> {
         self.append_entry(Entry::ModelChange {
             id: String::new(),
             parent_id: None,
@@ -400,7 +485,11 @@ impl SessionManager {
         })
     }
 
-    pub fn append_label(&self, target_id: impl Into<String>, label: Option<String>) -> Result<String, SessionError> {
+    pub fn append_label(
+        &self,
+        target_id: impl Into<String>,
+        label: Option<String>,
+    ) -> Result<String, SessionError> {
         self.append_entry(Entry::Label {
             id: String::new(),
             parent_id: None,
@@ -411,7 +500,12 @@ impl SessionManager {
     }
 
     pub fn append_session_info(&self, name: Option<String>) -> Result<String, SessionError> {
-        self.append_entry(Entry::SessionInfo { id: String::new(), parent_id: None, name, timestamp: 0 })
+        self.append_entry(Entry::SessionInfo {
+            id: String::new(),
+            parent_id: None,
+            name,
+            timestamp: 0,
+        })
     }
 
     /// 分支(06 文档 §1.3):把 leaf 指针移到树中较早节点继续追加 —— 同一文件
@@ -460,7 +554,13 @@ impl SessionManager {
         // label 解析:label entry 按 targetId 生效(后写覆盖)
         let mut labels: HashMap<String, (String, i64)> = HashMap::new();
         for entry in &state.entries {
-            if let Entry::Label { target_id, label: Some(label), timestamp, .. } = entry {
+            if let Entry::Label {
+                target_id,
+                label: Some(label),
+                timestamp,
+                ..
+            } = entry
+            {
                 labels.insert(target_id.clone(), (label.clone(), *timestamp));
             }
         }
@@ -473,21 +573,33 @@ impl SessionManager {
 
         // 逆序两阶段构建:children 先于 parent 定型,parent 槽位保持可访问;
         // parent 不在文件中(损坏行被跳过等)时按根处理,不 panic
-        let index: HashMap<&str, usize> =
-            state.entries.iter().enumerate().map(|(i, entry)| (entry.id(), i)).collect();
+        let index: HashMap<&str, usize> = state
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (entry.id(), i))
+            .collect();
         let mut nodes: Vec<Option<SessionTreeNode>> = state
             .entries
             .iter()
             .map(|entry| {
                 let (label, label_timestamp) = labeled(entry);
-                Some(SessionTreeNode { entry: entry.clone(), children: Vec::new(), label, label_timestamp })
+                Some(SessionTreeNode {
+                    entry: entry.clone(),
+                    children: Vec::new(),
+                    label,
+                    label_timestamp,
+                })
             })
             .collect();
         let mut roots: Vec<SessionTreeNode> = Vec::new();
         for i in (0..state.entries.len()).rev() {
             let mut node = nodes[i].take().expect("each entry yields one node");
             node.children.reverse(); // 逆序挂接恢复文件顺序
-            match state.entries[i].parent_id().and_then(|pid| index.get(pid).copied()) {
+            match state.entries[i]
+                .parent_id()
+                .and_then(|pid| index.get(pid).copied())
+            {
                 Some(parent) => match nodes[parent].as_mut() {
                     Some(parent_node) => parent_node.children.push(node),
                     // 损坏数据:parentId 指向文件中更靠后的 entry(槽位已被消费)→ 按根处理

@@ -21,8 +21,11 @@ pub struct CompactionSettings {
     pub keep_recent_tokens: u64,
 }
 
-pub const DEFAULT_COMPACTION_SETTINGS: CompactionSettings =
-    CompactionSettings { enabled: true, reserve_tokens: 16_384, keep_recent_tokens: 20_000 };
+pub const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = CompactionSettings {
+    enabled: true,
+    reserve_tokens: 16_384,
+    keep_recent_tokens: 20_000,
+};
 
 impl Default for CompactionSettings {
     fn default() -> Self {
@@ -31,7 +34,11 @@ impl Default for CompactionSettings {
 }
 
 /// `contextTokens > contextWindow - reserveTokens` 时触发(06 文档 §3.1)。
-pub fn should_compact(context_tokens: u64, context_window: u64, settings: &CompactionSettings) -> bool {
+pub fn should_compact(
+    context_tokens: u64,
+    context_window: u64,
+    settings: &CompactionSettings,
+) -> bool {
     if !settings.enabled {
         return false;
     }
@@ -54,7 +61,10 @@ pub fn calculate_context_tokens(usage: &Usage) -> u64 {
 /// 有效 usage:非 aborted/error、非全零(06 文档 getAssistantUsage)。
 fn get_assistant_usage(message: &AgentMessage) -> Option<Usage> {
     let assistant = message.as_assistant()?;
-    if matches!(assistant.stop_reason, StopReason::Aborted | StopReason::Error) {
+    if matches!(
+        assistant.stop_reason,
+        StopReason::Aborted | StopReason::Error
+    ) {
         return None;
     }
     if calculate_context_tokens(&assistant.usage) == 0 {
@@ -82,9 +92,11 @@ pub struct ContextUsageEstimate {
 
 /// usage 优先 + 其后消息逐条估算(06 文档 estimateContextTokens)。
 pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimate {
-    let usage_info = messages.iter().enumerate().rev().find_map(|(i, message)| {
-        get_assistant_usage(message).map(|usage| (i, usage))
-    });
+    let usage_info = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, message)| get_assistant_usage(message).map(|usage| (i, usage)));
     let Some((index, usage)) = usage_info else {
         let estimated: u64 = messages.iter().map(|m| estimate_tokens(m) as u64).sum();
         return ContextUsageEstimate {
@@ -95,8 +107,10 @@ pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimat
         };
     };
     let usage_tokens = calculate_context_tokens(&usage);
-    let trailing_tokens: u64 =
-        messages[index + 1..].iter().map(|m| estimate_tokens(m) as u64).sum();
+    let trailing_tokens: u64 = messages[index + 1..]
+        .iter()
+        .map(|m| estimate_tokens(m) as u64)
+        .sum();
     ContextUsageEstimate {
         tokens: usage_tokens + trailing_tokens,
         usage_tokens,
@@ -112,7 +126,9 @@ pub fn estimate_projected_context_tokens(
     branch_entries: &[Entry],
 ) -> ContextUsageEstimate {
     let estimate = estimate_context_tokens(&projection.messages);
-    let Some(last_usage_index) = estimate.last_usage_index else { return estimate };
+    let Some(last_usage_index) = estimate.last_usage_index else {
+        return estimate;
+    };
 
     // 找到 usage 所在消息的源 entry
     let mut projected_message_index = 0usize;
@@ -125,8 +141,8 @@ pub fn estimate_projected_context_tokens(
         }
         projected_message_index = next;
     }
-    let usage_entry_index = usage_entry_id
-        .and_then(|id| branch_entries.iter().position(|entry| entry.id() == id));
+    let usage_entry_index =
+        usage_entry_id.and_then(|id| branch_entries.iter().position(|entry| entry.id() == id));
     let latest_invalidating = branch_entries
         .iter()
         .rposition(|entry| matches!(entry, Entry::ContextEdit { .. } | Entry::Compaction { .. }));
@@ -142,7 +158,12 @@ pub fn estimate_projected_context_tokens(
 
     // 全量估算(system 消息单独计,其余逐条)
     let mut tokens: u64 = 0;
-    if let Some(system) = projection.messages.iter().rev().find(|m| matches!(m, AgentMessage::System { .. })) {
+    if let Some(system) = projection
+        .messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m, AgentMessage::System { .. }))
+    {
         tokens += estimate_tokens(system) as u64;
     }
     for message in &projection.messages {
@@ -150,7 +171,12 @@ pub fn estimate_projected_context_tokens(
             tokens += estimate_tokens(message) as u64;
         }
     }
-    ContextUsageEstimate { tokens, usage_tokens: 0, trailing_tokens: tokens, last_usage_index: None }
+    ContextUsageEstimate {
+        tokens,
+        usage_tokens: 0,
+        trailing_tokens: tokens,
+        last_usage_index: None,
+    }
 }
 
 /// image 内容块的估算字符数(06 文档 ESTIMATED_IMAGE_CHARS)。
@@ -170,13 +196,20 @@ fn estimate_content_blocks_chars(blocks: &[ContentBlock]) -> usize {
 /// chars/4 启发式,保守高估(06 文档 estimateTokens)。
 pub fn estimate_tokens(message: &AgentMessage) -> usize {
     let chars = match message {
-        AgentMessage::System { content, sections, tools_added, .. } => {
+        AgentMessage::System {
+            content,
+            sections,
+            tools_added,
+            ..
+        } => {
             let mut chars = content.len();
             for section in sections.values().flatten() {
                 chars += section.len();
             }
             if !tools_added.is_empty() {
-                chars += serde_json::to_string(tools_added).map(|s| s.len()).unwrap_or(0);
+                chars += serde_json::to_string(tools_added)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
             }
             chars
         }
@@ -187,9 +220,13 @@ pub fn estimate_tokens(message: &AgentMessage) -> usize {
                 match block {
                     ContentBlock::Text { text, .. } => chars += text.len(),
                     ContentBlock::Thinking { thinking, .. } => chars += thinking.len(),
-                    ContentBlock::ToolCall { name, arguments, .. } => {
+                    ContentBlock::ToolCall {
+                        name, arguments, ..
+                    } => {
                         chars += name.len()
-                            + serde_json::to_string(arguments).map(|s| s.len()).unwrap_or(0);
+                            + serde_json::to_string(arguments)
+                                .map(|s| s.len())
+                                .unwrap_or(0);
                     }
                     ContentBlock::Image { .. } => chars += ESTIMATED_IMAGE_CHARS,
                 }
@@ -197,10 +234,11 @@ pub fn estimate_tokens(message: &AgentMessage) -> usize {
             chars
         }
         AgentMessage::ToolResult { content, .. } => estimate_content_blocks_chars(content),
-        AgentMessage::BashExecution { command, output, .. } => command.len() + output.len(),
-        AgentMessage::BranchSummary { summary, .. } | AgentMessage::CompactionSummary { summary, .. } => {
-            summary.len()
-        }
+        AgentMessage::BashExecution {
+            command, output, ..
+        } => command.len() + output.len(),
+        AgentMessage::BranchSummary { summary, .. }
+        | AgentMessage::CompactionSummary { summary, .. } => summary.len(),
         AgentMessage::Custom(custom) => custom.kind.len() + custom.data.to_string().len(),
     };
     chars.div_ceil(4)
@@ -262,12 +300,19 @@ fn find_valid_cut_points(entries: &[Entry], start_index: usize, end_index: usize
 }
 
 /// 找到包含给定下标的 turn 的起始 user 消息(06 文档 findTurnStartIndex)。
-pub fn find_turn_start_index(entries: &[Entry], entry_index: usize, start_index: usize) -> Option<usize> {
+pub fn find_turn_start_index(
+    entries: &[Entry],
+    entry_index: usize,
+    start_index: usize,
+) -> Option<usize> {
     if entries.is_empty() || start_index >= entries.len() || entry_index < start_index {
         return None;
     }
     let end = entry_index.min(entries.len() - 1);
-    entries[start_index..=end].iter().rposition(is_turn_start_entry).map(|offset| start_index + offset)
+    entries[start_index..=end]
+        .iter()
+        .rposition(is_turn_start_entry)
+        .map(|offset| start_index + offset)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,7 +336,11 @@ pub fn find_cut_point(
     let end_index = end_index.min(entries.len());
     let cut_points = find_valid_cut_points(entries, start_index, end_index);
     if cut_points.is_empty() {
-        return CutPointResult { first_kept_entry_index: start_index, turn_start_index: None, is_split_turn: false };
+        return CutPointResult {
+            first_kept_entry_index: start_index,
+            turn_start_index: None,
+            is_split_turn: false,
+        };
     }
 
     let mut accumulated_tokens: u64 = 0;
@@ -308,9 +357,15 @@ pub fn find_cut_point(
         if accumulated_tokens >= keep_recent_tokens {
             // 优先不早于当前位置的最近有效切点;若尾部 toolResult 自己超预算,
             // 保留其前面的 assistant tool call(而非退回第一条消息)
-            cut_index = cut_points.iter().copied().find(|&candidate| candidate >= i).unwrap_or_else(|| {
-                *cut_points.last().expect("cut_points non-empty checked above")
-            });
+            cut_index = cut_points
+                .iter()
+                .copied()
+                .find(|&candidate| candidate >= i)
+                .unwrap_or_else(|| {
+                    *cut_points
+                        .last()
+                        .expect("cut_points non-empty checked above")
+                });
             break;
         }
     }
@@ -328,8 +383,11 @@ pub fn find_cut_point(
 
     let cut_entry = &entries[cut_index];
     let starts_turn = is_turn_start_entry(cut_entry);
-    let turn_start_index =
-        if starts_turn { None } else { find_turn_start_index(entries, cut_index, start_index) };
+    let turn_start_index = if starts_turn {
+        None
+    } else {
+        find_turn_start_index(entries, cut_index, start_index)
+    };
     CutPointResult {
         first_kept_entry_index: cut_index,
         turn_start_index,
@@ -358,12 +416,17 @@ pub struct SummarizationResponse {
 /// 摘要 LLM 调用的注入接缝(装配方提供 provider 支撑实现)。
 #[async_trait::async_trait]
 pub trait Summarizer: Send + Sync {
-    async fn summarize(&self, request: &SummarizationRequest) -> Result<SummarizationResponse, String>;
+    async fn summarize(
+        &self,
+        request: &SummarizationRequest,
+    ) -> Result<SummarizationResponse, String>;
 }
 
 /// 工厂:恒定返回固定摘要的 Summarizer(测试/离线装配用)。
 pub fn create_fixed_summarizer(summary: impl Into<String>) -> std::sync::Arc<dyn Summarizer> {
-    std::sync::Arc::new(FixedSummarizer { summary: summary.into() })
+    std::sync::Arc::new(FixedSummarizer {
+        summary: summary.into(),
+    })
 }
 
 struct FixedSummarizer {
@@ -372,7 +435,10 @@ struct FixedSummarizer {
 
 #[async_trait::async_trait]
 impl Summarizer for FixedSummarizer {
-    async fn summarize(&self, _request: &SummarizationRequest) -> Result<SummarizationResponse, String> {
+    async fn summarize(
+        &self,
+        _request: &SummarizationRequest,
+    ) -> Result<SummarizationResponse, String> {
         Ok(SummarizationResponse {
             summary: self.summary.clone(),
             stop_reason: StopReason::Stop,
@@ -392,7 +458,10 @@ fn truncate_for_summary(text: &str, max_chars: usize) -> String {
     }
     // 按字符截断(字节切片会切进多字节字符中间而 panic)
     let cut: String = text.chars().take(max_chars).collect();
-    format!("{cut}\n\n[... {} more characters truncated]", total_chars - max_chars)
+    format!(
+        "{cut}\n\n[... {} more characters truncated]",
+        total_chars - max_chars
+    )
 }
 
 fn content_blocks_text(blocks: &[ContentBlock]) -> String {
@@ -421,23 +490,40 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                 for block in &assistant.content {
                     match block {
                         ContentBlock::Thinking { thinking, .. } => thinking_parts.push(thinking),
-                        ContentBlock::ToolCall { name, arguments, .. } => {
-                            let args = arguments.as_object().map(|obj| {
-                                obj.iter()
-                                    .map(|(k, v)| format!("{k}={}", serde_json::to_string(v).unwrap_or_default()))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            }).unwrap_or_default();
+                        ContentBlock::ToolCall {
+                            name, arguments, ..
+                        } => {
+                            let args = arguments
+                                .as_object()
+                                .map(|obj| {
+                                    obj.iter()
+                                        .map(|(k, v)| {
+                                            format!(
+                                                "{k}={}",
+                                                serde_json::to_string(v).unwrap_or_default()
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                })
+                                .unwrap_or_default();
                             tool_calls.push(format!("{name}({args})"));
                         }
                         _ => {}
                     }
                 }
                 if !thinking_parts.is_empty() {
-                    parts.push(format!("[Assistant thinking]: {}", thinking_parts.join("\n")));
+                    parts.push(format!(
+                        "[Assistant thinking]: {}",
+                        thinking_parts.join("\n")
+                    ));
                 }
                 let text = content_blocks_text(&assistant.content);
-                if assistant.content.iter().any(|b| matches!(b, ContentBlock::Text { .. })) {
+                if assistant
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { .. }))
+                {
                     parts.push(format!("[Assistant]: {text}"));
                 }
                 if !tool_calls.is_empty() {
@@ -447,11 +533,16 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
             AgentMessage::ToolResult { content, .. } => {
                 let text = content_blocks_text(content);
                 if !text.is_empty() {
-                    parts.push(format!("[Tool result]: {}", truncate_for_summary(&text, TOOL_RESULT_MAX_CHARS)));
+                    parts.push(format!(
+                        "[Tool result]: {}",
+                        truncate_for_summary(&text, TOOL_RESULT_MAX_CHARS)
+                    ));
                 }
             }
             // pi 先 convertToLlm 再序列化:以下三类折叠为 user 文本后才进摘要
-            AgentMessage::BashExecution { command, output, .. } => {
+            AgentMessage::BashExecution {
+                command, output, ..
+            } => {
                 let mut text = format!("Ran `{command}`\n");
                 if output.is_empty() {
                     text.push_str("(no output)");
@@ -460,7 +551,8 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                 }
                 parts.push(format!("[User]: {text}"));
             }
-            AgentMessage::BranchSummary { summary, .. } | AgentMessage::CompactionSummary { summary, .. } => {
+            AgentMessage::BranchSummary { summary, .. }
+            | AgentMessage::CompactionSummary { summary, .. } => {
                 parts.push(format!("[User]: {summary}"));
             }
             _ => {}
@@ -490,9 +582,9 @@ pub fn get_summarization_failure(response: &SummarizationResponse, label: &str) 
             "{label} failed: {}",
             response.error_message.as_deref().unwrap_or("Unknown error")
         )),
-        StopReason::Length => {
-            Some(format!("{label} failed: generation hit the token cap and the summary is incomplete"))
-        }
+        StopReason::Length => Some(format!(
+            "{label} failed: generation hit the token cap and the summary is incomplete"
+        )),
         _ => None,
     }
 }
@@ -504,14 +596,29 @@ fn compute_file_lists(messages: &[AgentMessage]) -> (Vec<String>, Vec<String>) {
     let mut written = BTreeSet::new();
     let mut edited = BTreeSet::new();
     for message in messages {
-        let AgentMessage::Assistant(assistant) = message else { continue };
+        let AgentMessage::Assistant(assistant) = message else {
+            continue;
+        };
         for block in &assistant.content {
-            let ContentBlock::ToolCall { name, arguments, .. } = block else { continue };
-            let Some(path) = arguments.get("path").and_then(|v| v.as_str()) else { continue };
+            let ContentBlock::ToolCall {
+                name, arguments, ..
+            } = block
+            else {
+                continue;
+            };
+            let Some(path) = arguments.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
             match name.as_str() {
-                "read" => { read.insert(path.to_string()); }
-                "write" => { written.insert(path.to_string()); }
-                "edit" => { edited.insert(path.to_string()); }
+                "read" => {
+                    read.insert(path.to_string());
+                }
+                "write" => {
+                    written.insert(path.to_string());
+                }
+                "edit" => {
+                    edited.insert(path.to_string());
+                }
                 _ => {}
             }
         }
@@ -525,10 +632,16 @@ fn compute_file_lists(messages: &[AgentMessage]) -> (Vec<String>, Vec<String>) {
 fn format_file_operations(read_files: &[String], modified_files: &[String]) -> String {
     let mut sections: Vec<String> = Vec::new();
     if !read_files.is_empty() {
-        sections.push(format!("<read-files>\n{}\n</read-files>", read_files.join("\n")));
+        sections.push(format!(
+            "<read-files>\n{}\n</read-files>",
+            read_files.join("\n")
+        ));
     }
     if !modified_files.is_empty() {
-        sections.push(format!("<modified-files>\n{}\n</modified-files>", modified_files.join("\n")));
+        sections.push(format!(
+            "<modified-files>\n{}\n</modified-files>",
+            modified_files.join("\n")
+        ));
     }
     if sections.is_empty() {
         String::new()
@@ -580,29 +693,46 @@ pub async fn run_compaction(
     }
 
     // 增量:范围里已有 compaction 摘要时走 update 模板(旧摘要进 <previous-summary>)
-    let previous_summary = entries[..first_kept].iter().rev().find_map(|entry| match entry {
-        Entry::Compaction { summary, .. } => Some(summary.clone()),
-        _ => None,
-    });
+    let previous_summary = entries[..first_kept]
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            Entry::Compaction { summary, .. } => Some(summary.clone()),
+            _ => None,
+        });
     let (conversation, instruction) = match previous_summary {
         Some(previous) => (
-            format!("<previous-summary>\n{previous}\n</previous-summary>\n\n{}", serialize_conversation(&summarized_messages)),
+            format!(
+                "<previous-summary>\n{previous}\n</previous-summary>\n\n{}",
+                serialize_conversation(&summarized_messages)
+            ),
             update_summarization_prompt(),
         ),
-        None => (serialize_conversation(&summarized_messages), SUMMARIZATION_PROMPT.to_string()),
+        None => (
+            serialize_conversation(&summarized_messages),
+            SUMMARIZATION_PROMPT.to_string(),
+        ),
     };
 
     // 摘要请求消息:占位 user 承载序列化对话(实现方把它发给 LLM)
     let mut request_messages = Vec::new();
-    if let Some(system) =
-        projection.messages.iter().find(|m| matches!(m, AgentMessage::System { .. }))
+    if let Some(system) = projection
+        .messages
+        .iter()
+        .find(|m| matches!(m, AgentMessage::System { .. }))
     {
         request_messages.push(system.clone());
     }
-    request_messages.push(AgentMessage::User { content: conversation, timestamp: rpi_agent::now_ms() });
+    request_messages.push(AgentMessage::User {
+        content: conversation,
+        timestamp: rpi_agent::now_ms(),
+    });
 
     let response = summarizer
-        .summarize(&SummarizationRequest { messages: request_messages, instruction })
+        .summarize(&SummarizationRequest {
+            messages: request_messages,
+            instruction,
+        })
         .await?;
     if let Some(failure) = get_summarization_failure(&response, "summarization") {
         return Err(failure);

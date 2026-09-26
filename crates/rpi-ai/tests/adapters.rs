@@ -3,16 +3,20 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use rpi_ai::types::{
     AssistantMessageEvent, CacheRetention, Model, StopReason, StreamOptions, TranscriptContext,
 };
 use rpi_ai::{create_anthropic_adapter, create_openai_completions_adapter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 /// 起一个一次性 HTTP/SSE 服务器,返回 (base_url, 句柄)。
 /// `chunks` 逐块写出;`hold_after_ms` 为 None 时写完立即断开,否则最后一块后挂住。
-async fn spawn_sse_server(status: u16, chunks: Vec<String>, hold_after_ms: Option<u64>) -> (String, tokio::task::JoinHandle<()>) {
+async fn spawn_sse_server(
+    status: u16,
+    chunks: Vec<String>,
+    hold_after_ms: Option<u64>,
+) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -65,7 +69,10 @@ async fn collect(stream: rpi_ai::AssistantMessageEventStream) -> Vec<AssistantMe
         if std::env::var("RPI_DEBUG").is_ok() {
             eprintln!("event: {event:?}");
         }
-        let terminal = matches!(event, AssistantMessageEvent::Done(_) | AssistantMessageEvent::Error(_));
+        let terminal = matches!(
+            event,
+            AssistantMessageEvent::Done(_) | AssistantMessageEvent::Error(_)
+        );
         events.push(event);
         if terminal {
             break;
@@ -87,7 +94,10 @@ fn openai_model(base_url: &str) -> Model {
 }
 
 fn key_opts() -> StreamOptions {
-    StreamOptions { api_key: Some("test-key".into()), ..Default::default() }
+    StreamOptions {
+        api_key: Some("test-key".into()),
+        ..Default::default()
+    }
 }
 
 fn sse_lines(lines: &[&str]) -> String {
@@ -109,15 +119,25 @@ async fn anthropic_streams_text_and_usage() {
     let provider = create_anthropic_adapter();
     let events = collect(
         provider
-            .stream(&anthropic_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &anthropic_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
     server.await.unwrap();
 
     assert!(matches!(events.first(), Some(AssistantMessageEvent::Start)));
-    assert!(events.iter().find(|e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "你好")).is_some());
-    assert!(events.iter().find(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })).is_some());
+    assert!(events
+        .iter()
+        .find(|e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "你好"))
+        .is_some());
+    assert!(events
+        .iter()
+        .find(|e| matches!(e, AssistantMessageEvent::TextEnd { .. }))
+        .is_some());
     match events.last() {
         Some(AssistantMessageEvent::Done(message)) => {
             assert_eq!(message.text_content(), "你好世界");
@@ -148,7 +168,11 @@ async fn anthropic_streams_tool_call_with_partial_json() {
     let provider = create_anthropic_adapter();
     let events = collect(
         provider
-            .stream(&anthropic_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &anthropic_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
@@ -161,7 +185,11 @@ async fn anthropic_streams_tool_call_with_partial_json() {
         Some(AssistantMessageEvent::Done(message)) => {
             assert_eq!(message.stop_reason, StopReason::ToolUse);
             match message.content.first() {
-                Some(rpi_ai::types::ContentBlock::ToolCall { id, name, arguments }) => {
+                Some(rpi_ai::types::ContentBlock::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                }) => {
                     assert_eq!(id, "toolu_1");
                     assert_eq!(name, "read");
                     assert_eq!(*arguments, serde_json::json!({"path": "a.txt"}));
@@ -187,22 +215,33 @@ async fn anthropic_maps_stop_reasons_and_errors() {
     let provider = create_anthropic_adapter();
     let events = collect(
         provider
-            .stream(&anthropic_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &anthropic_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
     server.await.unwrap();
     match events.last() {
-        Some(AssistantMessageEvent::Done(message)) => assert_eq!(message.stop_reason, StopReason::Length),
+        Some(AssistantMessageEvent::Done(message)) => {
+            assert_eq!(message.stop_reason, StopReason::Length)
+        }
         other => panic!("expected done, got {other:?}"),
     }
 
     // SSE error 事件 → Error 终态
-    let body = "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"overloaded\"}}\n\n";
+    let body =
+        "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"overloaded\"}}\n\n";
     let (base, server) = spawn_sse_server(200, vec![body.into()], None).await;
     let events = collect(
         create_anthropic_adapter()
-            .stream(&anthropic_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &anthropic_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
@@ -210,7 +249,11 @@ async fn anthropic_maps_stop_reasons_and_errors() {
     match events.last() {
         Some(AssistantMessageEvent::Error(message)) => {
             assert_eq!(message.stop_reason, StopReason::Error);
-            assert!(message.error_message.as_deref().unwrap().contains("overloaded"));
+            assert!(message
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("overloaded"));
         }
         other => panic!("expected error, got {other:?}"),
     }
@@ -218,10 +261,19 @@ async fn anthropic_maps_stop_reasons_and_errors() {
 
 #[tokio::test]
 async fn anthropic_http_error_is_classified_retryable() {
-    let (base, server) = spawn_sse_server(429, vec!["{\"error\":{\"message\":\"rate limit exceeded\"}}".into()], None).await;
+    let (base, server) = spawn_sse_server(
+        429,
+        vec!["{\"error\":{\"message\":\"rate limit exceeded\"}}".into()],
+        None,
+    )
+    .await;
     let events = collect(
         create_anthropic_adapter()
-            .stream(&anthropic_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &anthropic_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
@@ -230,7 +282,9 @@ async fn anthropic_http_error_is_classified_retryable() {
         [AssistantMessageEvent::Error(message)] => {
             assert!(message.error_message.as_deref().unwrap().contains("429"));
             // 请求建立失败:不出 start
-            assert!(!events.iter().any(|e| matches!(e, AssistantMessageEvent::Start)));
+            assert!(!events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::Start)));
             assert!(rpi_ai::is_retryable_assistant_error(message));
         }
         other => panic!("expected single error event, got {other:?}"),
@@ -246,14 +300,22 @@ async fn anthropic_builtin_provider_missing_env_key_is_setup_error() {
     model.provider = "xiaomi".into();
     let events = collect(
         create_anthropic_adapter()
-            .stream(&model, TranscriptContext { messages: vec![] }, StreamOptions::default())
+            .stream(
+                &model,
+                TranscriptContext { messages: vec![] },
+                StreamOptions::default(),
+            )
             .await,
     )
     .await;
     server.abort(); // 适配器缺 key 时不发起连接,服务器不会 accept
     match events.as_slice() {
         [AssistantMessageEvent::Error(message)] => {
-            assert!(message.error_message.as_deref().unwrap().contains("No API key"));
+            assert!(message
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("No API key"));
         }
         other => panic!("expected error, got {other:?}"),
     }
@@ -268,13 +330,19 @@ async fn anthropic_keyless_custom_provider_proceeds_without_auth() {
     model.provider = "provider-without-env".into();
     let events = collect(
         create_anthropic_adapter()
-            .stream(&model, TranscriptContext { messages: vec![] }, StreamOptions::default())
+            .stream(
+                &model,
+                TranscriptContext { messages: vec![] },
+                StreamOptions::default(),
+            )
             .await,
     )
     .await;
     server.await.unwrap();
     assert!(
-        !events.iter().any(|e| matches!(e, AssistantMessageEvent::Error(m)
+        !events
+            .iter()
+            .any(|e| matches!(e, AssistantMessageEvent::Error(m)
             if m.error_message.as_deref().unwrap_or_default().contains("No API key"))),
         "自定义 provider 不应因缺 key 被前置拦截,got {events:?}"
     );
@@ -289,14 +357,22 @@ async fn anthropic_stream_end_without_message_stop_is_error() {
     let (base, server) = spawn_sse_server(200, vec![body], None).await;
     let events = collect(
         create_anthropic_adapter()
-            .stream(&anthropic_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &anthropic_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
     server.await.unwrap();
     match events.last() {
         Some(AssistantMessageEvent::Error(message)) => {
-            assert!(message.error_message.as_deref().unwrap().contains("message_stop"));
+            assert!(message
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("message_stop"));
             assert!(rpi_ai::is_retryable_assistant_error(message));
         }
         other => panic!("expected error, got {other:?}"),
@@ -316,16 +392,20 @@ async fn openai_streams_text_reasoning_and_usage() {
     let (base, server) = spawn_sse_server(200, vec![body], None).await;
     let events = collect(
         create_openai_completions_adapter()
-            .stream(&openai_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &openai_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
     server.await.unwrap();
 
     assert!(matches!(events.first(), Some(AssistantMessageEvent::Start)));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "想一下")));
+    assert!(events.iter().any(
+        |e| matches!(e, AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "想一下")
+    ));
     assert!(events
         .iter()
         .any(|e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "你好")));
@@ -352,7 +432,11 @@ async fn openai_streams_tool_calls() {
     let (base, server) = spawn_sse_server(200, vec![body], None).await;
     let events = collect(
         create_openai_completions_adapter()
-            .stream(&openai_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &openai_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
@@ -362,7 +446,11 @@ async fn openai_streams_tool_calls() {
         Some(AssistantMessageEvent::Done(message)) => {
             assert_eq!(message.stop_reason, StopReason::ToolUse);
             match message.content.first() {
-                Some(rpi_ai::types::ContentBlock::ToolCall { id, name, arguments }) => {
+                Some(rpi_ai::types::ContentBlock::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                }) => {
                     assert_eq!(id, "call_a");
                     assert_eq!(name, "read");
                     assert_eq!(*arguments, serde_json::json!({"path": "a.txt"}));
@@ -382,14 +470,22 @@ async fn openai_finish_reason_error_maps_to_error_event() {
     let (base, server) = spawn_sse_server(200, vec![body], None).await;
     let events = collect(
         create_openai_completions_adapter()
-            .stream(&openai_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &openai_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
     server.await.unwrap();
     match events.last() {
         Some(AssistantMessageEvent::Error(message)) => {
-            assert!(message.error_message.as_deref().unwrap().contains("content_filter"));
+            assert!(message
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("content_filter"));
         }
         other => panic!("expected error, got {other:?}"),
     }
@@ -404,12 +500,19 @@ async fn openai_stream_without_finish_reason_errors_when_supported() {
     let (base, server) = spawn_sse_server(200, vec![body], None).await;
     let events = collect(
         create_openai_completions_adapter()
-            .stream(&openai_model(&base), TranscriptContext { messages: vec![] }, key_opts())
+            .stream(
+                &openai_model(&base),
+                TranscriptContext { messages: vec![] },
+                key_opts(),
+            )
             .await,
     )
     .await;
     server.await.unwrap();
-    assert!(matches!(events.last(), Some(AssistantMessageEvent::Error(_))));
+    assert!(matches!(
+        events.last(),
+        Some(AssistantMessageEvent::Error(_))
+    ));
 }
 
 #[tokio::test]
@@ -419,15 +522,26 @@ async fn cancel_mid_stream_yields_aborted_error() {
     ]);
     let (base, server) = spawn_sse_server(200, vec![first], Some(30_000)).await;
     let cancel = CancellationToken::new();
-    let opts = StreamOptions { api_key: Some("test-key".into()), cancel: Some(cancel.clone()), ..Default::default() };
+    let opts = StreamOptions {
+        api_key: Some("test-key".into()),
+        cancel: Some(cancel.clone()),
+        ..Default::default()
+    };
     let stream = create_openai_completions_adapter()
-        .stream(&openai_model(&base), TranscriptContext { messages: vec![] }, opts)
+        .stream(
+            &openai_model(&base),
+            TranscriptContext { messages: vec![] },
+            opts,
+        )
         .await;
     let handle = tokio::spawn(collect(stream));
     // 等首块送达后取消
     tokio::time::sleep(Duration::from_millis(200)).await;
     cancel.cancel();
-    let events = tokio::time::timeout(Duration::from_secs(5), handle).await.unwrap().unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .unwrap()
+        .unwrap();
     match events.last() {
         Some(AssistantMessageEvent::Error(message)) => {
             assert_eq!(message.stop_reason, StopReason::Aborted);
@@ -454,10 +568,17 @@ async fn anthropic_cache_retention_none_stream_succeeds() {
     };
     let events = collect(
         create_anthropic_adapter()
-            .stream(&anthropic_model(&base), TranscriptContext { messages: vec![] }, opts)
+            .stream(
+                &anthropic_model(&base),
+                TranscriptContext { messages: vec![] },
+                opts,
+            )
             .await,
     )
     .await;
     server.await.unwrap();
-    assert!(matches!(events.last(), Some(AssistantMessageEvent::Done(_))));
+    assert!(matches!(
+        events.last(),
+        Some(AssistantMessageEvent::Done(_))
+    ));
 }

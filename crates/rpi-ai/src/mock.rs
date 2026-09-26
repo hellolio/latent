@@ -19,7 +19,9 @@ pub struct MockProvider {
 
 impl MockProvider {
     pub fn new(reply: impl Into<String>) -> Self {
-        Self { reply: reply.into() }
+        Self {
+            reply: reply.into(),
+        }
     }
 
     fn final_message(&self, model: &Model) -> AssistantMessage {
@@ -67,7 +69,10 @@ pub struct ScriptedTurn {
 
 impl ScriptedTurn {
     pub fn new(message: AssistantMessage) -> Self {
-        ScriptedTurn { delay_ms: 0, message }
+        ScriptedTurn {
+            delay_ms: 0,
+            message,
+        }
     }
 
     pub fn with_delay(mut self, delay_ms: u64) -> Self {
@@ -77,7 +82,11 @@ impl ScriptedTurn {
 
     /// 纯文本回复(stop)。
     pub fn text(model: &Model, text: impl Into<String>) -> Self {
-        ScriptedTurn::new(assistant_message(model, vec![ContentBlock::text(text)], StopReason::Stop))
+        ScriptedTurn::new(assistant_message(
+            model,
+            vec![ContentBlock::text(text)],
+            StopReason::Stop,
+        ))
     }
 
     /// 工具调用回复(toolUse)。
@@ -97,7 +106,11 @@ impl ScriptedTurn {
 }
 
 /// 测试助手:构造最终态 assistant 消息。
-pub fn assistant_message(model: &Model, content: Vec<ContentBlock>, stop_reason: StopReason) -> AssistantMessage {
+pub fn assistant_message(
+    model: &Model,
+    content: Vec<ContentBlock>,
+    stop_reason: StopReason,
+) -> AssistantMessage {
     let mut message = AssistantMessage::pending(model);
     message.content = content;
     message.stop_reason = stop_reason;
@@ -113,7 +126,10 @@ pub struct ScriptedProvider {
 
 impl ScriptedProvider {
     pub fn new(model: &Model, turns: Vec<ScriptedTurn>) -> Self {
-        ScriptedProvider { model: model.clone(), turns: Mutex::new(turns.into()) }
+        ScriptedProvider {
+            model: model.clone(),
+            turns: Mutex::new(turns.into()),
+        }
     }
 
     pub fn remaining(&self) -> usize {
@@ -224,7 +240,11 @@ mod tests {
         let provider = MockProvider::new("你好,世界");
         let model = Model::minimal("mock-1", "mock", "mock");
         let mut stream = provider
-            .stream(&model, TranscriptContext { messages: vec![] }, StreamOptions::default())
+            .stream(
+                &model,
+                TranscriptContext { messages: vec![] },
+                StreamOptions::default(),
+            )
             .await;
         let mut text = String::new();
         let mut terminal = None;
@@ -232,7 +252,9 @@ mod tests {
             match event {
                 AssistantMessageEvent::TextDelta { delta, .. } => text.push_str(&delta),
                 AssistantMessageEvent::Done(msg) => terminal = Some(*msg),
-                AssistantMessageEvent::Error(err) => panic!("mock 不应失败: {}", err.error_message.unwrap_or_default()),
+                AssistantMessageEvent::Error(err) => {
+                    panic!("mock 不应失败: {}", err.error_message.unwrap_or_default())
+                }
                 _ => {}
             }
         }
@@ -240,4 +262,3 @@ mod tests {
         assert_eq!(terminal.unwrap().text_content(), "你好,世界");
     }
 }
-

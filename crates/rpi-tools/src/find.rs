@@ -22,7 +22,9 @@ pub struct FindTool {
 
 /// 工厂。
 pub fn create_find_tool(cwd: &Path) -> Arc<dyn Tool> {
-    Arc::new(FindTool { cwd: cwd.to_path_buf() })
+    Arc::new(FindTool {
+        cwd: cwd.to_path_buf(),
+    })
 }
 
 fn parse_args(args: &serde_json::Value) -> Result<(String, Option<String>, usize), String> {
@@ -78,7 +80,10 @@ impl Tool for FindTool {
         _updater: &dyn ToolUpdater,
     ) -> Result<ToolOutput, ToolError> {
         let (pattern, path, limit) =
-            parse_args(&call.args).map_err(|message| ToolError::Failed { name: "find".into(), message })?;
+            parse_args(&call.args).map_err(|message| ToolError::Failed {
+                name: "find".into(),
+                message,
+            })?;
 
         let search_root = match &path {
             Some(p) if Path::new(p).is_absolute() => PathBuf::from(p),
@@ -93,12 +98,14 @@ impl Tool for FindTool {
         }
 
         let mut overrides = ignore::overrides::OverrideBuilder::new(&search_root);
-        overrides
-            .add(&pattern)
-            .map_err(|e| ToolError::Failed { name: "find".into(), message: format!("invalid glob `{pattern}`: {e}") })?;
-        let overrides = overrides
-            .build()
-            .map_err(|e| ToolError::Failed { name: "find".into(), message: format!("invalid glob `{pattern}`: {e}") })?;
+        overrides.add(&pattern).map_err(|e| ToolError::Failed {
+            name: "find".into(),
+            message: format!("invalid glob `{pattern}`: {e}"),
+        })?;
+        let overrides = overrides.build().map_err(|e| ToolError::Failed {
+            name: "find".into(),
+            message: format!("invalid glob `{pattern}`: {e}"),
+        })?;
 
         let mut walker = ignore::WalkBuilder::new(&search_root);
         // pi 传 --hidden:包含隐藏文件,但仍尊重 .gitignore;仓库外也应用 .gitignore
@@ -114,7 +121,9 @@ impl Tool for FindTool {
         let mut result_limit_reached = false;
         for entry in walker {
             if cancel.is_cancelled() {
-                return Err(ToolError::Aborted { name: "find".into() });
+                return Err(ToolError::Aborted {
+                    name: "find".into(),
+                });
             }
             let Ok(entry) = entry else { continue };
             // 根目录自身不算匹配结果
@@ -164,7 +173,10 @@ impl Tool for FindTool {
         }
         if truncation.truncated {
             notices.push(format!("{}KB limit reached", DEFAULT_MAX_BYTES / 1024));
-            details.insert("truncation".into(), serde_json::to_value(&truncation).unwrap_or_default());
+            details.insert(
+                "truncation".into(),
+                serde_json::to_value(&truncation).unwrap_or_default(),
+            );
         }
         if !notices.is_empty() {
             output.push_str(&format!("\n\n[{}]", notices.join(". ")));
@@ -192,18 +204,37 @@ mod tests {
     }
 
     async fn exec(tool: &FindTool, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
-        tool.execute(ToolCall { id: "t".into(), name: "find".into(), args }, CancellationToken::new(), &Noop)
-            .await
+        tool.execute(
+            ToolCall {
+                id: "t".into(),
+                name: "find".into(),
+                args,
+            },
+            CancellationToken::new(),
+            &Noop,
+        )
+        .await
     }
 
     async fn fixture() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("rpi-find-{}", uuid::Uuid::now_v7()));
-        tokio::fs::create_dir_all(dir.join("src/nested")).await.unwrap();
-        tokio::fs::create_dir_all(dir.join("node_modules/pkg")).await.unwrap();
-        for p in ["src/a.ts", "src/nested/b.spec.ts", "node_modules/pkg/c.ts", "readme.md"] {
+        tokio::fs::create_dir_all(dir.join("src/nested"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.join("node_modules/pkg"))
+            .await
+            .unwrap();
+        for p in [
+            "src/a.ts",
+            "src/nested/b.spec.ts",
+            "node_modules/pkg/c.ts",
+            "readme.md",
+        ] {
             tokio::fs::write(dir.join(p), "x").await.unwrap();
         }
-        tokio::fs::write(dir.join(".gitignore"), "node_modules/\n").await.unwrap();
+        tokio::fs::write(dir.join(".gitignore"), "node_modules/\n")
+            .await
+            .unwrap();
         dir
     }
 
@@ -214,7 +245,11 @@ mod tests {
         let output = exec(&tool, json!({"pattern": "*.ts"})).await.unwrap();
         assert!(output.output.contains("src/a.ts"));
         assert!(output.output.contains("src/nested/b.spec.ts"));
-        assert!(!output.output.contains("node_modules"), "应尊重 .gitignore: {}", output.output);
+        assert!(
+            !output.output.contains("node_modules"),
+            "应尊重 .gitignore: {}",
+            output.output
+        );
         assert!(!output.output.contains("readme.md"));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
@@ -224,8 +259,14 @@ mod tests {
         let dir = fixture().await;
         let tool = FindTool { cwd: dir.clone() };
         // 含 `/` 的 pattern 锚定到搜索根(fd --full-path 等价)
-        let output = exec(&tool, json!({"pattern": "src/**/*.spec.ts"})).await.unwrap();
-        assert!(output.output.contains("src/nested/b.spec.ts"), "{}", output.output);
+        let output = exec(&tool, json!({"pattern": "src/**/*.spec.ts"}))
+            .await
+            .unwrap();
+        assert!(
+            output.output.contains("src/nested/b.spec.ts"),
+            "{}",
+            output.output
+        );
         assert!(!output.output.contains("src/a.ts"));
         // 目录匹配保留尾 `/`
         let output = exec(&tool, json!({"pattern": "nested"})).await.unwrap();
@@ -237,7 +278,9 @@ mod tests {
     async fn limit_reached_and_no_results() {
         let dir = fixture().await;
         let tool = FindTool { cwd: dir.clone() };
-        let output = exec(&tool, json!({"pattern": "*.ts", "limit": 1})).await.unwrap();
+        let output = exec(&tool, json!({"pattern": "*.ts", "limit": 1}))
+            .await
+            .unwrap();
         assert!(output.output.contains("1 results limit reached"));
         assert_eq!(output.details["resultLimitReached"], json!(1));
         let output = exec(&tool, json!({"pattern": "*.zig"})).await.unwrap();
@@ -249,7 +292,9 @@ mod tests {
     async fn missing_path_is_error() {
         let dir = fixture().await;
         let tool = FindTool { cwd: dir.clone() };
-        let err = exec(&tool, json!({"pattern": "*.ts", "path": "missing"})).await.unwrap_err();
+        let err = exec(&tool, json!({"pattern": "*.ts", "path": "missing"}))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("Path not found"));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }

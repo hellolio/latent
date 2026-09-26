@@ -1,0 +1,149 @@
+//! 启动回放(pi renderSessionItems 语义):恢复/续聊时把当前转录渲染进
+//! 转录模型(样式与实时渲染完全一致,同走 TranscriptItem)。
+
+use rpi_agent::AgentMessage;
+use rpi_ai::{ContentBlock, StopReason};
+
+use super::handlers::InteractiveCtx;
+use super::state::{InteractiveState, ToolStatus, TranscriptItem};
+
+/// 回放当前转录(压缩感知的当前分支上下文)并初始化 ctx 估计。
+pub fn replay_history(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
+    let messages = ctx.session.agent().messages();
+    for message in &messages {
+        state.commit_many(replay_message(message));
+    }
+    if let Some(tokens) = messages.iter().rev().find_map(|message| {
+        message
+            .as_assistant()
+            .map(|assistant| super::usage::context_tokens_of(&assistant.usage))
+    }) {
+        state.context_tokens = tokens;
+    }
+    if let Some(manager) = ctx.session_manager {
+        let compactions = manager
+            .branch_entries()
+            .iter()
+            .filter(|entry| matches!(entry, rpi_session::Entry::Compaction { .. }))
+            .count();
+        if compactions > 0 {
+            state.commit(TranscriptItem::Line(ratatui::text::Line::from(
+                ratatui::text::Span::styled(
+                    format!("Session compacted {compactions} times"),
+                    ratatui::style::Style::new().fg(state.theme.dim),
+                ),
+            )));
+        }
+    }
+    state.commit(TranscriptItem::Blank);
+}
+
+/// 单条历史消息 → 转录条目(与实时渲染同一模型)。
+fn replay_message(message: &AgentMessage) -> Vec<TranscriptItem> {
+    match message {
+        AgentMessage::System { .. } => vec![TranscriptItem::Blank],
+        AgentMessage::User { content, .. } => {
+            vec![
+                TranscriptItem::User {
+                    content: content.clone(),
+                },
+                TranscriptItem::Blank,
+            ]
+        }
+        AgentMessage::Assistant(assistant) => {
+            // thinking 与正文合成为可重渲染条目;工具调用/错误随 stop_reason
+            let mut markdown = String::new();
+            let mut items: Vec<TranscriptItem> = Vec::new();
+            for block in &assistant.content {
+                match block {
+                    ContentBlock::Text { text, .. } => {
+                        if !markdown.is_empty() {
+                            markdown.push('\n');
+                        }
+                        markdown.push_str(text);
+                    }
+                    ContentBlock::ToolCall {
+                        name, arguments, ..
+                    } => {
+                        let args = serde_json::to_string(arguments).unwrap_or_default();
+                        items.push(TranscriptItem::ToolCall {
+                            name: name.clone(),
+                            args,
+                            status: ToolStatus::Success,
+                        });
+                    }
+                    ContentBlock::Thinking { thinking, .. } => {
+                        items.push(TranscriptItem::Thinking {
+                            text: thinking.clone(),
+                        });
+                    }
+                    ContentBlock::Image { .. } => {}
+                }
+            }
+            if !markdown.trim().is_empty() {
+                items.push(TranscriptItem::Assistant { markdown });
+            }
+            match assistant.stop_reason {
+                StopReason::Error => items.push(TranscriptItem::Line(error_line_msg(
+                    assistant
+                        .error_message
+                        .as_deref()
+                        .unwrap_or("Unknown error"),
+                ))),
+                StopReason::Aborted => {
+                    items.push(TranscriptItem::Line(error_line_msg("Operation aborted")))
+                }
+                StopReason::Length => items.push(TranscriptItem::Line(error_line_msg(
+                    "Response was truncated before completion.",
+                ))),
+                _ => {}
+            }
+            items.push(TranscriptItem::Blank);
+            items
+        }
+        AgentMessage::ToolResult { is_error, .. } => vec![
+            TranscriptItem::ToolResult {
+                output: message.tool_result_content().unwrap_or_default(),
+                is_error: *is_error,
+            },
+            TranscriptItem::Blank,
+        ],
+        AgentMessage::BashExecution {
+            command,
+            output,
+            exit_code,
+            ..
+        } => vec![
+            TranscriptItem::Bash {
+                command: command.clone(),
+                output: output.clone(),
+                is_error: exit_code.map(|code| code != 0).unwrap_or(false),
+            },
+            TranscriptItem::Blank,
+        ],
+        AgentMessage::CompactionSummary { summary, .. } => vec![TranscriptItem::Line(
+            ratatui::text::Line::from(ratatui::text::Span::styled(
+                format!("── 压缩摘要: {}", first_line(summary)),
+                ratatui::style::Style::new().fg(ratatui::style::Color::DarkGray),
+            )),
+        )],
+        AgentMessage::BranchSummary { summary, .. } => vec![TranscriptItem::Line(
+            ratatui::text::Line::from(ratatui::text::Span::styled(
+                format!("── 分支摘要: {}", first_line(summary)),
+                ratatui::style::Style::new().fg(ratatui::style::Color::DarkGray),
+            )),
+        )],
+        AgentMessage::Custom(_) => vec![TranscriptItem::Blank],
+    }
+}
+
+fn error_line_msg(text: &str) -> ratatui::text::Line<'static> {
+    ratatui::text::Line::from(ratatui::text::Span::styled(
+        format!("Error: {text}"),
+        ratatui::style::Style::new().fg(ratatui::style::Color::Red),
+    ))
+}
+
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or("").to_string()
+}

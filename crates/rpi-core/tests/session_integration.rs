@@ -73,12 +73,18 @@ impl SessionSubscriber for EventLog {
     async fn on_session_event(&self, event: &AgentSessionEvent) {
         match event {
             AgentSessionEvent::Agent(agent_event) => {
-                if let AgentEvent::MessageDelta { delta: rpi_agent::MessageDeltaPayload::Text { delta } } = agent_event {
+                if let AgentEvent::MessageDelta {
+                    delta: rpi_agent::MessageDeltaPayload::Text { delta },
+                } = agent_event
+                {
                     self.record(format!("delta:{delta}"))
                 }
             }
             AgentSessionEvent::AgentSettled => self.record("settled".into()),
-            AgentSessionEvent::QueueUpdate { steering, follow_up } => {
+            AgentSessionEvent::QueueUpdate {
+                steering,
+                follow_up,
+            } => {
                 self.record(format!("queue:{steering}/{follow_up}"));
             }
             AgentSessionEvent::AutoRetryStart { .. } => self.record("retry_start".into()),
@@ -103,7 +109,12 @@ async fn build_session(
     tools: Vec<Arc<dyn Tool>>,
     active: Option<Vec<String>>,
     system_prompt: SystemPromptOptions,
-) -> (rpi_core::AgentSession, Arc<EventLog>, Arc<MemorySink>, Arc<ScriptedProvider>) {
+) -> (
+    rpi_core::AgentSession,
+    Arc<EventLog>,
+    Arc<MemorySink>,
+    Arc<ScriptedProvider>,
+) {
     let m = model();
     let provider = Arc::new(ScriptedProvider::new(&m, turns));
     let sink = Arc::new(MemorySink::default());
@@ -118,7 +129,7 @@ async fn build_session(
         system_prompt,
         limits: rpi_agent::TurnLimits::default(),
         stream_options: Default::default(),
-            subscribers: None,
+        subscribers: None,
         session_sink: Some(sink.clone()),
         seed_messages: Vec::new(),
         compactor: None,
@@ -137,12 +148,18 @@ async fn prompt_streams_through_session_events_and_persists() {
         vec![ScriptedTurn::text(&m, "你好呀")],
         vec![],
         None,
-        SystemPromptOptions { cwd: Some("/tmp/proj".into()), ..Default::default() },
+        SystemPromptOptions {
+            cwd: Some("/tmp/proj".into()),
+            ..Default::default()
+        },
     )
     .await;
 
     let outcome = session.prompt("hello").await.unwrap();
-    assert!(matches!(outcome, rpi_core::PromptOutcome::Started(_)), "非流式 prompt 应返回 Started");
+    assert!(
+        matches!(outcome, rpi_core::PromptOutcome::Started(_)),
+        "非流式 prompt 应返回 Started"
+    );
     assert_eq!(outcome.stop(), rpi_agent::RunStop::EndTurn);
     session.wait_idle().await;
 
@@ -155,7 +172,10 @@ async fn prompt_streams_through_session_events_and_persists() {
     let persisted = sink.0.lock().unwrap();
     assert_eq!(persisted.len(), 2);
     assert!(matches!(persisted[0], AgentMessage::User { .. }));
-    assert_eq!(persisted[1].as_assistant().unwrap().text_content(), "你好呀");
+    assert_eq!(
+        persisted[1].as_assistant().unwrap().text_content(),
+        "你好呀"
+    );
 }
 
 #[tokio::test]
@@ -180,8 +200,14 @@ async fn steer_and_follow_up_emit_queue_updates() {
 #[tokio::test]
 async fn active_tools_filter_and_system_prompt_sections() {
     let m = model();
-    let read = Arc::new(TestTool { name: "read".into(), calls: AtomicU32::new(0) });
-    let bash = Arc::new(TestTool { name: "bash".into(), calls: AtomicU32::new(0) });
+    let read = Arc::new(TestTool {
+        name: "read".into(),
+        calls: AtomicU32::new(0),
+    });
+    let bash = Arc::new(TestTool {
+        name: "bash".into(),
+        calls: AtomicU32::new(0),
+    });
     let (session, _log, sink, _provider) = build_session(
         vec![
             ScriptedTurn::tool_calls(&m, vec![tool_call("t1", "read")]),
@@ -199,14 +225,23 @@ async fn active_tools_filter_and_system_prompt_sections() {
 
     // 工具片段进了系统提示词
     let persisted = sink.0.lock().unwrap();
-    assert!(matches!(persisted[0], AgentMessage::System { .. }), "工具声明 system 消息应持久化");
+    assert!(
+        matches!(persisted[0], AgentMessage::System { .. }),
+        "工具声明 system 消息应持久化"
+    );
 }
 
 #[tokio::test]
 async fn set_active_tools_diffs_system_prompt() {
     let m = model();
-    let read = Arc::new(TestTool { name: "read".into(), calls: AtomicU32::new(0) });
-    let bash = Arc::new(TestTool { name: "bash".into(), calls: AtomicU32::new(0) });
+    let read = Arc::new(TestTool {
+        name: "read".into(),
+        calls: AtomicU32::new(0),
+    });
+    let bash = Arc::new(TestTool {
+        name: "bash".into(),
+        calls: AtomicU32::new(0),
+    });
     let (session, _log, _sink, _provider) = build_session(
         vec![ScriptedTurn::text(&m, "ok")],
         vec![read, bash],
@@ -230,7 +265,10 @@ async fn overflow_recovery_trims_and_retries() {
     let m = model();
     let mut m2 = model();
     m2.context_window = 100; // 小窗口,让溢出判定可触发
-    let read = Arc::new(TestTool { name: "read".into(), calls: AtomicU32::new(0) });
+    let read = Arc::new(TestTool {
+        name: "read".into(),
+        calls: AtomicU32::new(0),
+    });
     // 第一轮带工具调用:循环在工具结果后继续,才会到达 overflow 错误轮
     let provider = Arc::new(ScriptedProvider::new(
         &m2,
@@ -254,7 +292,7 @@ async fn overflow_recovery_trims_and_retries() {
         system_prompt: SystemPromptOptions::default(),
         limits: rpi_agent::TurnLimits::default(),
         stream_options: Default::default(),
-            subscribers: None,
+        subscribers: None,
         session_sink: Some(sink.clone()),
         seed_messages: Vec::new(),
         compactor: None,
@@ -265,7 +303,11 @@ async fn overflow_recovery_trims_and_retries() {
     session.subscribe(log.clone());
 
     let stop = session.prompt("开始").await.unwrap().stop();
-    assert_eq!(stop, rpi_agent::RunStop::EndTurn, "overflow 恢复后应正常结束");
+    assert_eq!(
+        stop,
+        rpi_agent::RunStop::EndTurn,
+        "overflow 恢复后应正常结束"
+    );
 
     let events = log.events();
     assert!(events.iter().any(|e| e == "retry_start"), "{events:?}");
@@ -311,7 +353,10 @@ async fn extension_registered_tool_joins_session() {
     }
 
     let m = model();
-    let provider = Arc::new(ScriptedProvider::new(&m, vec![ScriptedTurn::text(&m, "ok")]));
+    let provider = Arc::new(ScriptedProvider::new(
+        &m,
+        vec![ScriptedTurn::text(&m, "ok")],
+    ));
     let mut extensions = rpi_core::ExtensionRegistry::default();
     extensions.register(Arc::new(Ext));
     let session = create_agent_session(AgentSessionConfig {
@@ -325,7 +370,7 @@ async fn extension_registered_tool_joins_session() {
         system_prompt: SystemPromptOptions::default(),
         limits: rpi_agent::TurnLimits::default(),
         stream_options: Default::default(),
-            subscribers: None,
+        subscribers: None,
         session_sink: None,
         seed_messages: Vec::new(),
         compactor: None,
@@ -363,8 +408,15 @@ async fn prompt_returns_enqueued_while_streaming_and_started_when_idle() {
     }
 
     let second = session.prompt("中途插入").await.unwrap();
-    assert!(matches!(second, rpi_core::PromptOutcome::Enqueued), "流式中应返回 Enqueued: {second:?}");
-    assert_eq!(session.queue_depths(), (1, 0), "入队消息应计入 steering 深度");
+    assert!(
+        matches!(second, rpi_core::PromptOutcome::Enqueued),
+        "流式中应返回 Enqueued: {second:?}"
+    );
+    assert_eq!(
+        session.queue_depths(),
+        (1, 0),
+        "入队消息应计入 steering 深度"
+    );
 
     let first = first.await.unwrap().unwrap();
     assert!(matches!(first, rpi_core::PromptOutcome::Started(_)));
@@ -387,7 +439,10 @@ async fn overflow_recovery_uses_unified_compactor() {
     let m = model();
     let mut m2 = model();
     m2.context_window = 100;
-    let read = Arc::new(TestTool { name: "read".into(), calls: AtomicU32::new(0) });
+    let read = Arc::new(TestTool {
+        name: "read".into(),
+        calls: AtomicU32::new(0),
+    });
     let provider = Arc::new(ScriptedProvider::new(
         &m2,
         vec![
@@ -417,8 +472,16 @@ async fn overflow_recovery_uses_unified_compactor() {
     .unwrap();
 
     let stop = session.prompt("开始").await.unwrap().stop();
-    assert_eq!(stop, rpi_agent::RunStop::EndTurn, "统一 compaction 恢复后应正常结束");
-    assert_eq!(compactor.0.load(std::sync::atomic::Ordering::SeqCst), 1, "compactor 恰好调用一次");
+    assert_eq!(
+        stop,
+        rpi_agent::RunStop::EndTurn,
+        "统一 compaction 恢复后应正常结束"
+    );
+    assert_eq!(
+        compactor.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "compactor 恰好调用一次"
+    );
 
     // 压缩后上下文回填成功:恢复轮回复进了转录
     let messages = session.agent().messages();

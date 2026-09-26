@@ -19,7 +19,9 @@ pub struct LsTool {
 
 /// 工厂。
 pub fn create_ls_tool(cwd: &Path) -> Arc<dyn Tool> {
-    Arc::new(LsTool { cwd: cwd.to_path_buf() })
+    Arc::new(LsTool {
+        cwd: cwd.to_path_buf(),
+    })
 }
 
 fn parse_args(args: &serde_json::Value) -> Result<(Option<String>, usize), String> {
@@ -67,8 +69,10 @@ impl Tool for LsTool {
         _cancel: CancellationToken,
         _updater: &dyn ToolUpdater,
     ) -> Result<ToolOutput, ToolError> {
-        let (path, limit) =
-            parse_args(&call.args).map_err(|message| ToolError::Failed { name: "ls".into(), message })?;
+        let (path, limit) = parse_args(&call.args).map_err(|message| ToolError::Failed {
+            name: "ls".into(),
+            message,
+        })?;
 
         let dir = match &path {
             Some(p) if Path::new(p).is_absolute() => PathBuf::from(p),
@@ -89,7 +93,10 @@ impl Tool for LsTool {
         }
 
         let mut entries: Vec<String> = std::fs::read_dir(&dir)
-            .map_err(|e| ToolError::Failed { name: "ls".into(), message: format!("Cannot read directory: {e}") })?
+            .map_err(|e| ToolError::Failed {
+                name: "ls".into(),
+                message: format!("Cannot read directory: {e}"),
+            })?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
@@ -118,12 +125,18 @@ impl Tool for LsTool {
         let mut notices: Vec<String> = Vec::new();
         let mut details = serde_json::Map::new();
         if entry_limit_reached {
-            notices.push(format!("{limit} entries limit reached. Use limit={} for more", limit * 2));
+            notices.push(format!(
+                "{limit} entries limit reached. Use limit={} for more",
+                limit * 2
+            ));
             details.insert("entryLimitReached".into(), json!(limit));
         }
         if truncation.truncated {
             notices.push(format!("{}KB limit reached", DEFAULT_MAX_BYTES / 1024));
-            details.insert("truncation".into(), serde_json::to_value(&truncation).unwrap_or_default());
+            details.insert(
+                "truncation".into(),
+                serde_json::to_value(&truncation).unwrap_or_default(),
+            );
         }
         if !notices.is_empty() {
             output.push_str(&format!("\n\n[{}]", notices.join(". ")));
@@ -151,8 +164,16 @@ mod tests {
     }
 
     async fn exec(tool: &LsTool, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
-        tool.execute(ToolCall { id: "t".into(), name: "ls".into(), args }, CancellationToken::new(), &Noop)
-            .await
+        tool.execute(
+            ToolCall {
+                id: "t".into(),
+                name: "ls".into(),
+                args,
+            },
+            CancellationToken::new(),
+            &Noop,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -178,7 +199,9 @@ mod tests {
         assert_eq!(output.output, "(empty directory)");
 
         for i in 0..3 {
-            tokio::fs::write(dir.join(format!("f{i}.txt")), "x").await.unwrap();
+            tokio::fs::write(dir.join(format!("f{i}.txt")), "x")
+                .await
+                .unwrap();
         }
         let output = exec(&tool, json!({"limit": 2})).await.unwrap();
         assert!(output.output.contains("2 entries limit reached"));

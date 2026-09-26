@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rpi_agent::{
-    AgentEvent, AgentMessage, LoopConfig, MessageDeltaPayload, PassthroughHooks, SharedPartial,
-    Subscriber, Tool, ToolCall, ToolError, ToolOutput, ToolUpdater, run_agent_loop,
+    run_agent_loop, AgentEvent, AgentMessage, LoopConfig, MessageDeltaPayload, PassthroughHooks,
+    SharedPartial, Subscriber, Tool, ToolCall, ToolError, ToolOutput, ToolUpdater,
 };
 use rpi_ai::{ContentBlock, Model, ScriptedProvider, ScriptedTurn};
 use tokio_util::sync::CancellationToken;
@@ -62,7 +62,10 @@ impl Subscriber for DeltaCollector {
                         return;
                     }
                     MessageDeltaPayload::Thinking { delta } => {
-                        self.events.lock().unwrap().push(format!("thinking:{delta}"));
+                        self.events
+                            .lock()
+                            .unwrap()
+                            .push(format!("thinking:{delta}"));
                         "thinking"
                     }
                     MessageDeltaPayload::ToolCallArgs { delta, .. } => {
@@ -98,7 +101,10 @@ impl Subscriber for DeltaCollector {
             AgentEvent::MessageUpdate { .. } => self.events.lock().unwrap().push("update".into()),
             AgentEvent::MessageEnd { message } => {
                 if let AgentMessage::Assistant(assistant) = &**message {
-                    self.final_messages.lock().unwrap().push((**assistant).clone());
+                    self.final_messages
+                        .lock()
+                        .unwrap()
+                        .push((**assistant).clone());
                 }
                 self.events.lock().unwrap().push("end".into());
             }
@@ -114,7 +120,11 @@ async fn thinking_and_toolcall_args_stream_as_deltas_with_snapshot_port() {
     let turn = ScriptedTurn::new(rpi_ai::assistant_message(
         &m,
         vec![
-            ContentBlock::Thinking { thinking: "思考过程".into(), thinking_signature: None, redacted: None },
+            ContentBlock::Thinking {
+                thinking: "思考过程".into(),
+                thinking_signature: None,
+                redacted: None,
+            },
             ContentBlock::text("回答"),
             ContentBlock::ToolCall {
                 id: "t1".into(),
@@ -129,7 +139,11 @@ async fn thinking_and_toolcall_args_stream_as_deltas_with_snapshot_port() {
     let collector = Arc::new(DeltaCollector::default());
     let _run = run_agent_loop(
         vec![AgentMessage::user("hi")],
-        rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: vec![Arc::new(Echo)] },
+        rpi_agent::AgentContext {
+            system: None,
+            messages: Vec::new(),
+            tools: vec![Arc::new(Echo)],
+        },
         Arc::new(PassthroughHooks),
         LoopConfig::new(m),
         Arc::new(provider),
@@ -142,13 +156,36 @@ async fn thinking_and_toolcall_args_stream_as_deltas_with_snapshot_port() {
 
     let events = collector.events.lock().unwrap();
     // 事件序(首个 assistant turn):start → *_delta → update(终态快照) → end
-    let think_pos = events.iter().position(|e| e.starts_with("thinking:")).expect("thinking delta");
-    let start_pos = events[..think_pos].iter().rposition(|e| e == "start").expect("start before delta");
-    let update_pos = events[think_pos..].iter().position(|e| e == "update").expect("update") + think_pos;
-    let end_pos = events[update_pos..].iter().position(|e| e == "end").expect("end") + update_pos;
-    assert!(start_pos < think_pos && think_pos < update_pos && update_pos < end_pos, "{events:?}");
-    assert!(events.iter().any(|e| e == "thinking:思考过程"), "thinking 增量应逐块转发: {events:?}");
-    assert!(events.iter().any(|e| e == "text:回答"), "text 增量应转发: {events:?}");
+    let think_pos = events
+        .iter()
+        .position(|e| e.starts_with("thinking:"))
+        .expect("thinking delta");
+    let start_pos = events[..think_pos]
+        .iter()
+        .rposition(|e| e == "start")
+        .expect("start before delta");
+    let update_pos = events[think_pos..]
+        .iter()
+        .position(|e| e == "update")
+        .expect("update")
+        + think_pos;
+    let end_pos = events[update_pos..]
+        .iter()
+        .position(|e| e == "end")
+        .expect("end")
+        + update_pos;
+    assert!(
+        start_pos < think_pos && think_pos < update_pos && update_pos < end_pos,
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e == "thinking:思考过程"),
+        "thinking 增量应逐块转发: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e == "text:回答"),
+        "text 增量应转发: {events:?}"
+    );
     assert!(
         events.iter().any(|e| e.starts_with("args:")),
         "toolCall 参数增量应转发: {events:?}"
@@ -157,7 +194,10 @@ async fn thinking_and_toolcall_args_stream_as_deltas_with_snapshot_port() {
     // 快照读口:thinking 快照随 delta 增长(非整份快照事件,读口逐次变大)
     let thinking = collector.thinking_snapshots.lock().unwrap();
     assert!(!thinking.is_empty());
-    assert!(thinking.windows(2).all(|w| w[0].len() <= w[1].len()), "读口应单调增长: {thinking:?}");
+    assert!(
+        thinking.windows(2).all(|w| w[0].len() <= w[1].len()),
+        "读口应单调增长: {thinking:?}"
+    );
     assert_eq!(thinking.last().unwrap(), "思考过程");
 
     // toolcall 参数快照逐次可见
@@ -174,14 +214,22 @@ async fn thinking_and_toolcall_args_stream_as_deltas_with_snapshot_port() {
         .find(|message| message.has_tool_calls())
         .cloned()
         .expect("带 toolcall 的终态消息");
-    assert_eq!(final_message.content.len(), 3, "终态内容应含 thinking+text+toolcall");
+    assert_eq!(
+        final_message.content.len(),
+        3,
+        "终态内容应含 thinking+text+toolcall"
+    );
     match &final_message.content[0] {
         ContentBlock::Thinking { thinking, .. } => assert_eq!(thinking, "思考过程"),
         other => panic!("expected thinking, got {other:?}"),
     }
     assert_eq!(final_message.content[1], ContentBlock::text("回答"));
     match &final_message.content[2] {
-        ContentBlock::ToolCall { id, name, arguments } => {
+        ContentBlock::ToolCall {
+            id,
+            name,
+            arguments,
+        } => {
             assert_eq!(id, "t1");
             assert_eq!(name, "echo");
             assert_eq!(arguments, &serde_json::json!({"x": 1}));
@@ -194,7 +242,8 @@ async fn thinking_and_toolcall_args_stream_as_deltas_with_snapshot_port() {
 #[tokio::test]
 async fn turn_end_event_carries_provider_usage() {
     let m = model();
-    let mut message = rpi_ai::assistant_message(&m, vec![ContentBlock::text("hi")], rpi_ai::StopReason::Stop);
+    let mut message =
+        rpi_ai::assistant_message(&m, vec![ContentBlock::text("hi")], rpi_ai::StopReason::Stop);
     message.usage = rpi_ai::Usage {
         input: 42,
         output: 7,
@@ -203,7 +252,10 @@ async fn turn_end_event_carries_provider_usage() {
         cache_write_1h: None,
         reasoning: Some(2),
         total_tokens: 57,
-        cost: rpi_ai::Cost { total: 0.25, ..Default::default() },
+        cost: rpi_ai::Cost {
+            total: 0.25,
+            ..Default::default()
+        },
     };
     let provider = ScriptedProvider::new(&m, vec![ScriptedTurn::new(message)]);
 
@@ -219,7 +271,11 @@ async fn turn_end_event_carries_provider_usage() {
     let capture = Arc::new(UsageCapture(Mutex::new(None)));
     let _run = run_agent_loop(
         vec![AgentMessage::user("hi")],
-        rpi_agent::AgentContext { system: None, messages: Vec::new(), tools: Vec::new() },
+        rpi_agent::AgentContext {
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        },
         Arc::new(PassthroughHooks),
         LoopConfig::new(m),
         Arc::new(provider),

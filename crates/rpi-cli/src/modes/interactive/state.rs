@@ -1,0 +1,230 @@
+//! interactive 模式的 UI 状态机:编辑器、会话状态、用量、选择列表、
+//! 转录模型(TranscriptItem)。全部与终端 I/O 解耦 —— 渲染在 view.rs
+//! 按 `theme + width + expanded` 从状态推导,handlers.rs 只改状态。
+
+use std::collections::VecDeque;
+use std::time::Instant;
+
+use rpi_tui::{Editor, Key, SelectList, Theme, UiLine};
+
+use super::usage::UsageTracker;
+
+/// 会话运行状态(编辑器边框标题/颜色与 spinner 的依据)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    Idle,
+    Thinking,
+    Tool(String),
+    Aborted,
+    Compacting,
+    /// `!` bash 执行中(标题=命令)
+    Bash(String),
+}
+
+impl Status {
+    pub fn is_busy(&self) -> bool {
+        !matches!(self, Status::Idle)
+    }
+}
+
+/// ctrl+o 可切换展开状态的转录条目(pi renderSessionItems 的对应物)。
+#[derive(Debug, Clone)]
+pub enum TranscriptItem {
+    /// 预渲染行(横幅、用量、错误、通知等一次性内容)
+    Line(UiLine),
+    User {
+        content: String,
+    },
+    /// assistant 定稿正文(markdown 渲染)
+    Assistant {
+        markdown: String,
+    },
+    Thinking {
+        text: String,
+    },
+    /// 工具调用标题行(状态着色)
+    ToolCall {
+        name: String,
+        args: String,
+        status: ToolStatus,
+    },
+    /// 工具输出(默认折叠 COLLAPSED_OUTPUT_ROWS 行,ctrl+o 展开)
+    ToolResult {
+        output: String,
+        is_error: bool,
+    },
+    /// `!` bash 透传记录
+    Bash {
+        command: String,
+        output: String,
+        is_error: bool,
+    },
+    Blank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolStatus {
+    Pending,
+    Success,
+    Error,
+}
+
+impl From<ToolStatus> for rpi_tui::tool_card::ToolStatus {
+    fn from(status: ToolStatus) -> Self {
+        match status {
+            ToolStatus::Pending => rpi_tui::tool_card::ToolStatus::Pending,
+            ToolStatus::Success => rpi_tui::tool_card::ToolStatus::Success,
+            ToolStatus::Error => rpi_tui::tool_card::ToolStatus::Error,
+        }
+    }
+}
+
+pub struct SelectRequest {
+    pub prompt: String,
+    pub list: SelectList,
+    pub kind: SelectKind,
+}
+
+pub enum SelectKind {
+    Confirm(tokio::sync::oneshot::Sender<bool>),
+    Select(tokio::sync::oneshot::Sender<Option<usize>>),
+    /// 内部选择器(/model):Enter 应用选择,无 responder
+    Model {
+        models: Vec<rpi_ai::Model>,
+    },
+    /// 内部选择器(/thinking)
+    Thinking,
+}
+
+pub struct InteractiveState {
+    pub theme: Theme,
+    /// 终端显示宽度(Resize 时刷新;渲染/折行的唯一宽度来源)
+    pub width: usize,
+    pub editor: Editor,
+    pub status: Status,
+    /// spinner 拍数(busy 时每 120ms 自增)
+    pub spin: usize,
+    /// 流式中的 assistant 文本(预览区尾部展示,定稿时整体转 Assistant)
+    pub stream_text: String,
+    /// 流式中的 thinking 累积(预览尾部;首个文本 delta 时提交进转录)
+    pub pending_thinking: Option<String>,
+    pub usage: UsageTracker,
+    /// 活动选择列表;None = 无交互请求
+    pub select: Option<SelectRequest>,
+    /// 并发 UI 请求排队(先到先渲染)
+    pub select_queue: VecDeque<SelectRequest>,
+    pub model_label: String,
+    pub thinking_label: String,
+    pub context_window: u64,
+    pub context_tokens: u64,
+    /// 双击 Ctrl+C 退出:上一次 Ctrl+C 时刻(非流式期间)
+    pub last_ctrl_c: Option<Instant>,
+    /// ctrl+o 全局展开(工具输出 + 启动帮助/资源)
+    pub expanded: bool,
+    /// 全文重绘请求(ctrl+o 切换后由事件循环消费)
+    pub needs_full_redraw: bool,
+    /// 转录模型(redraw_full 重渲染的数据源)
+    pub transcript: Vec<TranscriptItem>,
+    /// 待提交进 scrollback 的行(事件循环每轮 flush 后清空)
+    pub pending: Vec<UiLine>,
+    /// footer:session 名(有的话)
+    pub session_label: Option<String>,
+    /// footer:auto-compact 开关(/compact 后由上层设置)
+    pub auto_compact: bool,
+    /// footer:cwd(已做 ~ 缩写)
+    pub cwd_display: String,
+    /// footer:git 分支(启动时探测)
+    pub git_branch: Option<String>,
+    /// 已加载资源分节(启动区;ctrl+o 重渲染数据源)
+    pub resources: Vec<(String, Vec<String>)>,
+    /// 执行中的工具(ToolExecutionStart → 结果到达时标题随终态着色落盘)
+    pub current_tool: Option<(String, String)>,
+    /// 最近一次工具执行的错误标记
+    pub last_tool_error: bool,
+}
+
+impl InteractiveState {
+    pub fn new(theme: Theme, width: usize) -> Self {
+        InteractiveState {
+            theme,
+            width,
+            editor: Editor::new(),
+            status: Status::Idle,
+            spin: 0,
+            stream_text: String::new(),
+            pending_thinking: None,
+            usage: UsageTracker::default(),
+            select: None,
+            select_queue: VecDeque::new(),
+            model_label: "—".into(),
+            thinking_label: "off".into(),
+            context_window: 0,
+            context_tokens: 0,
+            last_ctrl_c: None,
+            expanded: false,
+            needs_full_redraw: false,
+            transcript: Vec::new(),
+            pending: Vec::new(),
+            session_label: None,
+            auto_compact: false,
+            cwd_display: String::new(),
+            git_branch: None,
+            current_tool: None,
+            last_tool_error: false,
+            resources: Vec::new(),
+        }
+    }
+
+    /// 追加转录条目并渲染进待提交缓冲。
+    pub fn commit(&mut self, item: TranscriptItem) {
+        self.commit_many(vec![item]);
+    }
+
+    /// 追加多条转录条目(单条历史消息可展开成多个条目)。
+    pub fn commit_many(&mut self, items: Vec<TranscriptItem>) {
+        for item in items {
+            let lines = super::view::render_item(&item, &self.theme, self.width, self.expanded);
+            self.transcript.push(item);
+            self.pending.extend(lines);
+        }
+    }
+
+    /// 直接提交一行(进转录,重绘保留)。
+    pub fn commit_line(&mut self, line: UiLine) {
+        self.commit(TranscriptItem::Line(line));
+    }
+
+    /// 启动区行(只进待提交缓冲,不进转录;ctrl+o 时按展开态重新组装)。
+    pub fn commit_startup(&mut self, lines: Vec<UiLine>) {
+        self.pending.extend(lines);
+    }
+
+    /// 提交一行但不进转录(错误提示等无需参与 ctrl+o 重绘的短消息)。
+    pub fn commit_ephemeral(&mut self, line: UiLine) {
+        self.pending.push(line);
+    }
+
+    /// 无活动选择列表时提升队首请求。
+    pub fn promote_next_select(&mut self) {
+        if self.select.is_none() {
+            self.select = self.select_queue.pop_front();
+        }
+    }
+
+    /// 消费历史:Enter 提交后的文本(含多行)。
+    pub fn take_input(&mut self) -> Option<String> {
+        let text = self.editor.text().trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        self.editor.commit_history();
+        self.editor.clear();
+        self.last_ctrl_c = None;
+        Some(text)
+    }
+
+    /// 未消费按键交给编辑器(便于测试复用)。
+    pub fn editor_key(&mut self, key: &Key) {
+        self.editor.handle_key(key);
+    }
+}

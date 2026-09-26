@@ -6,16 +6,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
-use rpi_ai::types::{
-    AssistantMessageEvent, Model, StreamOptions, TranscriptContext,
-};
+use rpi_ai::types::{AssistantMessageEvent, Model, StreamOptions, TranscriptContext};
 use rpi_ai::{create_anthropic_adapter, create_openai_completions_adapter};
 use serde_json::Value;
 
 /// 一次性 HTTP/SSE 服务器:读完整请求(含 JSON body)存入共享槽,再写 SSE 响应。
 async fn spawn_capturing_server(
     chunks: Vec<String>,
-) -> (String, Arc<Mutex<Option<Value>>>, tokio::task::JoinHandle<()>) {
+) -> (
+    String,
+    Arc<Mutex<Option<Value>>>,
+    tokio::task::JoinHandle<()>,
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -41,9 +43,10 @@ async fn spawn_capturing_server(
                 let length = std::str::from_utf8(&request[..header_end])
                     .ok()
                     .and_then(|head| {
-                        head.to_ascii_lowercase()
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().to_string()))
+                        head.to_ascii_lowercase().lines().find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().to_string())
+                        })
                     })
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(0);
@@ -62,7 +65,8 @@ async fn spawn_capturing_server(
                 *captured_for_task.lock().unwrap() = Some(value);
             }
         }
-        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        let head =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
         let _ = socket.write_all(head.as_bytes()).await;
         for chunk in &chunks {
             let _ = socket.write_all(chunk.as_bytes()).await;
@@ -93,7 +97,10 @@ fn anthropic_chunks() -> Vec<String> {
 async fn collect(mut stream: rpi_ai::AssistantMessageEventStream) -> Vec<AssistantMessageEvent> {
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
-        let terminal = matches!(event, AssistantMessageEvent::Done(_) | AssistantMessageEvent::Error(_));
+        let terminal = matches!(
+            event,
+            AssistantMessageEvent::Done(_) | AssistantMessageEvent::Error(_)
+        );
         events.push(event);
         if terminal {
             break;
@@ -111,10 +118,12 @@ async fn on_payload_observes_and_replaces_request_body() {
     let observed_model = Arc::new(Mutex::new(None::<String>));
     let observed_for_cb = observed_model.clone();
     let on_payload: rpi_ai::OnPayload = Arc::new(move |body: &mut Value| {
-        observed_for_cb
-            .lock()
-            .unwrap()
-            .replace(body.get("model").and_then(|v| v.as_str()).unwrap_or_default().to_string());
+        observed_for_cb.lock().unwrap().replace(
+            body.get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        );
         // 替换:改写 model 字段(替换语义验证)
         if let Some(obj) = body.as_object_mut() {
             obj.insert("model".into(), Value::String("rewritten-model".into()));
@@ -130,12 +139,22 @@ async fn on_payload_observes_and_replaces_request_body() {
         .stream(&m, TranscriptContext { messages: vec![] }, opts)
         .await;
     let events = collect(stream).await;
-    assert!(matches!(events.last(), Some(AssistantMessageEvent::Done(_))), "{events:?}");
+    assert!(
+        matches!(events.last(), Some(AssistantMessageEvent::Done(_))),
+        "{events:?}"
+    );
 
     // 回调观察到的是替换前的原始 model
-    assert_eq!(observed_model.lock().unwrap().as_deref(), Some("claude-test"));
+    assert_eq!(
+        observed_model.lock().unwrap().as_deref(),
+        Some("claude-test")
+    );
     // 服务器收到的是替换后的 body
-    let sent = captured.lock().unwrap().clone().expect("server captured body");
+    let sent = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("server captured body");
     assert_eq!(sent["model"], "rewritten-model");
     server.await.unwrap();
 }
@@ -155,10 +174,13 @@ async fn on_response_and_raw_event_observers_fire() {
     });
     let raw_for_cb = raw_types.clone();
     let on_raw: rpi_ai::OnProviderStreamEvent = Arc::new(move |event: &Value| {
-        raw_for_cb
-            .lock()
-            .unwrap()
-            .push(event.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_string());
+        raw_for_cb.lock().unwrap().push(
+            event
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        );
     });
     let opts = StreamOptions {
         api_key: Some("k".into()),
@@ -171,12 +193,18 @@ async fn on_response_and_raw_event_observers_fire() {
         .stream(&m, TranscriptContext { messages: vec![] }, opts)
         .await;
     let events = collect(stream).await;
-    assert!(matches!(events.last(), Some(AssistantMessageEvent::Done(_))));
+    assert!(matches!(
+        events.last(),
+        Some(AssistantMessageEvent::Done(_))
+    ));
 
     assert_eq!(*statuses.lock().unwrap(), vec![200]);
     let types = raw_types.lock().unwrap().clone();
     drop(raw_types);
-    assert!(types.contains(&"message_start".to_string()), "应观察到原始 message_start: {types:?}");
+    assert!(
+        types.contains(&"message_start".to_string()),
+        "应观察到原始 message_start: {types:?}"
+    );
     assert!(types.contains(&"content_block_delta".to_string()));
     assert!(types.contains(&"message_stop".to_string()));
     server.await.unwrap();
@@ -189,7 +217,8 @@ async fn observer_panics_do_not_break_the_stream() {
     let m = anthropic_model(&base_url);
 
     let on_payload: rpi_ai::OnPayload = Arc::new(|_: &mut Value| panic!("payload observer boom"));
-    let on_response: rpi_ai::OnResponse = Arc::new(|_: &rpi_ai::ResponseObservation| panic!("response observer boom"));
+    let on_response: rpi_ai::OnResponse =
+        Arc::new(|_: &rpi_ai::ResponseObservation| panic!("response observer boom"));
     let on_raw: rpi_ai::OnProviderStreamEvent = Arc::new(|_: &Value| panic!("raw observer boom"));
     let opts = StreamOptions {
         api_key: Some("k".into()),
@@ -203,7 +232,10 @@ async fn observer_panics_do_not_break_the_stream() {
         .stream(&m, TranscriptContext { messages: vec![] }, opts)
         .await;
     let events = collect(stream).await;
-    assert!(matches!(events.last(), Some(AssistantMessageEvent::Done(_))), "panic 不得击穿流: {events:?}");
+    assert!(
+        matches!(events.last(), Some(AssistantMessageEvent::Done(_))),
+        "panic 不得击穿流: {events:?}"
+    );
     server.await.unwrap();
 }
 
@@ -233,9 +265,16 @@ async fn openai_adapter_observes_payload() {
         .stream(&m, TranscriptContext { messages: vec![] }, opts)
         .await;
     let events = collect(stream).await;
-    assert!(matches!(events.last(), Some(AssistantMessageEvent::Done(_))), "{events:?}");
+    assert!(
+        matches!(events.last(), Some(AssistantMessageEvent::Done(_))),
+        "{events:?}"
+    );
 
-    let sent = captured.lock().unwrap().clone().expect("server captured body");
+    let sent = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("server captured body");
     assert_eq!(sent["model"], "rewritten-model");
     server.await.unwrap();
 }

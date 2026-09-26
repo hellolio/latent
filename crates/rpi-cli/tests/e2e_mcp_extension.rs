@@ -32,7 +32,10 @@ impl SessionSubscriber for ToolResultCollector {
         let rpi_core::AgentSessionEvent::Agent(agent_event) = event else {
             return;
         };
-        if let AgentEvent::ToolExecutionEnd { tool_name, output, .. } = agent_event {
+        if let AgentEvent::ToolExecutionEnd {
+            tool_name, output, ..
+        } = agent_event
+        {
             self.outputs
                 .lock()
                 .unwrap()

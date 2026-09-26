@@ -6,8 +6,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rpi_agent::{AgentMessage, Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 use rpi_core::{
-    create_agent_session, AgentSessionConfig, CoreError, Extension, ExtensionApi, ExtensionRegistry,
-    NoopUi, SystemPromptOptions,
+    create_agent_session, AgentSessionConfig, CoreError, Extension, ExtensionApi,
+    ExtensionRegistry, NoopUi, SystemPromptOptions,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -47,7 +47,10 @@ impl Extension for FailingExtension {
     }
     async fn init(&self, api: &mut ExtensionApi<'_>) -> Result<(), CoreError> {
         api.register_tool(Arc::new(StubTool(format!("{}__leaked", self.name))));
-        Err(CoreError::Extension { name: self.name.clone(), message: "boom in init".into() })
+        Err(CoreError::Extension {
+            name: self.name.clone(),
+            message: "boom in init".into(),
+        })
     }
 }
 
@@ -97,9 +100,13 @@ async fn failing_extension_is_skipped_with_diagnostic_and_partial_tools_dropped(
     assert!(diagnostics[0].message.contains("boom in init"));
 
     // 工具集:好扩展的工具在,坏扩展的泄漏工具不在
-    session.set_active_tools_by_name(&["good__tool".to_string()]).expect("good 工具应已知");
+    session
+        .set_active_tools_by_name(&["good__tool".to_string()])
+        .expect("good 工具应已知");
     assert!(
-        session.set_active_tools_by_name(&["bad__leaked".to_string()]).is_err(),
+        session
+            .set_active_tools_by_name(&["bad__leaked".to_string()])
+            .is_err(),
         "失败扩展的已注册工具必须整体丢弃"
     );
     let _ = AgentMessage::user("unused");

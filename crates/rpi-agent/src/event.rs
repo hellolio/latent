@@ -34,7 +34,9 @@ pub enum MessageDeltaPayload {
 
 impl MessageDeltaPayload {
     pub fn text(delta: impl Into<String>) -> Self {
-        MessageDeltaPayload::Text { delta: delta.into() }
+        MessageDeltaPayload::Text {
+            delta: delta.into(),
+        }
     }
 }
 

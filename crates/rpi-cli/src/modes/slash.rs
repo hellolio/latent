@@ -11,16 +11,36 @@ pub struct SlashCommand {
 }
 
 pub const COMMANDS: &[SlashCommand] = &[
-    SlashCommand { name: "help", args: "", description: "显示帮助(命令与快捷键)" },
-    SlashCommand { name: "model", args: "[provider/model]", description: "查看/切换模型" },
+    SlashCommand {
+        name: "help",
+        args: "",
+        description: "显示帮助(命令与快捷键)",
+    },
+    SlashCommand {
+        name: "model",
+        args: "[provider/model]",
+        description: "查看/切换模型",
+    },
     SlashCommand {
         name: "thinking",
         args: "[level]",
         description: "查看/设置 thinking 级别(off|minimal|low|medium|high|xhigh|max)",
     },
-    SlashCommand { name: "compact", args: "", description: "压缩上下文(摘要替换历史)" },
-    SlashCommand { name: "session", args: "", description: "显示会话信息与统计" },
-    SlashCommand { name: "quit", args: "", description: "退出 rpi" },
+    SlashCommand {
+        name: "compact",
+        args: "",
+        description: "压缩上下文(摘要替换历史)",
+    },
+    SlashCommand {
+        name: "session",
+        args: "",
+        description: "显示会话信息与统计",
+    },
+    SlashCommand {
+        name: "quit",
+        args: "",
+        description: "退出 rpi",
+    },
 ];
 
 /// 解析出的命令动作;执行需要 session 状态,由 interactive.rs 分派。
@@ -62,9 +82,15 @@ pub fn parse(input: &str) -> SlashInput {
         "help" => SlashInput::Command(SlashAction::Help),
         "quit" => SlashInput::Command(SlashAction::Quit),
         "session" => SlashInput::Command(SlashAction::Session),
-        "model" => SlashInput::Command(SlashAction::Model { arg: arg.map(str::to_string) }),
-        "thinking" => SlashInput::Command(SlashAction::Thinking { arg: arg.map(str::to_string) }),
-        "compact" => SlashInput::Command(SlashAction::Compact { arg: arg.map(str::to_string) }),
+        "model" => SlashInput::Command(SlashAction::Model {
+            arg: arg.map(str::to_string),
+        }),
+        "thinking" => SlashInput::Command(SlashAction::Thinking {
+            arg: arg.map(str::to_string),
+        }),
+        "compact" => SlashInput::Command(SlashAction::Compact {
+            arg: arg.map(str::to_string),
+        }),
         _ => SlashInput::Unknown(format!("/{name}")),
     }
 }
@@ -74,7 +100,9 @@ pub fn parse(input: &str) -> SlashInput {
 pub fn help_lines() -> Vec<String> {
     let mut lines = vec!["命令:".to_string()];
     for command in COMMANDS {
-        let signature = format!("{} {}", command.name, command.args).trim().to_string();
+        let signature = format!("{} {}", command.name, command.args)
+            .trim()
+            .to_string();
         lines.push(format!("  /{:<28} {}", signature, command.description));
     }
     lines.push(String::new());
@@ -91,19 +119,31 @@ mod tests {
     fn parses_known_commands_with_and_without_args() {
         assert_eq!(parse("/help"), SlashInput::Command(SlashAction::Help));
         assert_eq!(parse("/quit"), SlashInput::Command(SlashAction::Quit));
-        assert_eq!(parse("  /session  "), SlashInput::Command(SlashAction::Session));
-        assert_eq!(parse("/compact"), SlashInput::Command(SlashAction::Compact { arg: None }));
+        assert_eq!(
+            parse("  /session  "),
+            SlashInput::Command(SlashAction::Session)
+        );
+        assert_eq!(
+            parse("/compact"),
+            SlashInput::Command(SlashAction::Compact { arg: None })
+        );
         assert_eq!(
             parse("/compact 保留近期消息"),
-            SlashInput::Command(SlashAction::Compact { arg: Some("保留近期消息".into()) })
+            SlashInput::Command(SlashAction::Compact {
+                arg: Some("保留近期消息".into())
+            })
         );
         assert_eq!(
             parse("/model anthropic/claude-opus-4-6"),
-            SlashInput::Command(SlashAction::Model { arg: Some("anthropic/claude-opus-4-6".into()) })
+            SlashInput::Command(SlashAction::Model {
+                arg: Some("anthropic/claude-opus-4-6".into())
+            })
         );
         assert_eq!(
             parse("/thinking high"),
-            SlashInput::Command(SlashAction::Thinking { arg: Some("high".into()) })
+            SlashInput::Command(SlashAction::Thinking {
+                arg: Some("high".into())
+            })
         );
     }
 
@@ -126,7 +166,11 @@ mod tests {
         let lines = help_lines();
         let text = lines.join("\n");
         for command in COMMANDS {
-            assert!(text.contains(&format!("/{}", command.name)), "缺少 /{}", command.name);
+            assert!(
+                text.contains(&format!("/{}", command.name)),
+                "缺少 /{}",
+                command.name
+            );
         }
     }
 }

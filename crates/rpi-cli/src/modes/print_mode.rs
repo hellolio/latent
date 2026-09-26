@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rpi_agent::RunStop;
 use rpi_core::McpServerSpec;
 
-use crate::assembly::{build_session, BuildOptions, SessionRequest, SessionStore, run_session};
+use crate::assembly::{build_session, run_session, BuildOptions, SessionRequest, SessionStore};
 
 /// print 模式入口:装配(NoopUi,headless 无交互)→ prompt → 流式打印。
 pub async fn run_print_mode(

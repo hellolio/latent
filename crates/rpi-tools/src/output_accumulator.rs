@@ -63,7 +63,10 @@ impl OutputAccumulator {
 
     /// 追加原始字节(可按任意块边界切分,含多字节字符中段)。
     pub fn append(&mut self, data: &[u8]) {
-        assert!(!self.finished, "cannot append to a finished output accumulator");
+        assert!(
+            !self.finished,
+            "cannot append to a finished output accumulator"
+        );
         self.total_raw_bytes += data.len();
 
         self.pending_utf8.extend_from_slice(data);
@@ -120,7 +123,8 @@ impl OutputAccumulator {
             }
         };
         let tail = truncate_tail(snapshot_text, self.max_lines, self.max_bytes);
-        let truncated = self.total_lines() > self.max_lines || self.total_decoded_bytes > self.max_bytes;
+        let truncated =
+            self.total_lines() > self.max_lines || self.total_decoded_bytes > self.max_bytes;
         let truncated_by = if !truncated {
             "none"
         } else if self.total_decoded_bytes > self.max_bytes {
@@ -191,8 +195,7 @@ impl OutputAccumulator {
         while start < buffer.len() && (buffer[start] & 0xc0) == 0x80 {
             start += 1;
         }
-        self.tail_starts_at_line_boundary =
-            start == 0 || buffer[start - 1] == b'\n';
+        self.tail_starts_at_line_boundary = start == 0 || buffer[start - 1] == b'\n';
         self.tail_text = self.tail_text[start..].to_string();
         self.tail_bytes = self.tail_text.len();
     }
@@ -281,7 +284,11 @@ mod tests {
         let path = snapshot.full_output_path.expect("超限必须落盘");
         let full = std::fs::read_to_string(&path).unwrap();
         assert_eq!(full.lines().count(), 50);
-        assert!(path.file_name().unwrap().to_string_lossy().starts_with(TEMP_FILE_PREFIX));
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(TEMP_FILE_PREFIX));
         std::fs::remove_file(&path).unwrap();
     }
 
@@ -292,7 +299,11 @@ mod tests {
             acc.append(&vec![b'x'; 1024]);
         }
         acc.finish();
-        assert!(acc.tail().len() <= 1024 * 4 + 4, "尾部缓冲必须有界: {}", acc.tail().len());
+        assert!(
+            acc.tail().len() <= 1024 * 4 + 4,
+            "尾部缓冲必须有界: {}",
+            acc.tail().len()
+        );
         let snapshot = acc.snapshot(true);
         assert!(snapshot.truncation.truncated);
         assert_eq!(snapshot.truncation.truncated_by, "bytes");

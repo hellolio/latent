@@ -8,9 +8,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use rpi_agent::{
-    Tool, ToolCall, ToolError, ToolOutput, ToolUpdater,
-};
+use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
 use crate::truncate::{truncate_head, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
 
@@ -20,30 +18,28 @@ pub struct ReadTool {
 
 /// 工厂:cwd 解析相对路径(pi 的 resolveToCwd)。
 pub fn create_read_tool(cwd: &Path) -> Arc<dyn Tool> {
-    Arc::new(ReadTool { cwd: cwd.to_path_buf() })
+    Arc::new(ReadTool {
+        cwd: cwd.to_path_buf(),
+    })
 }
 
 fn parse_args(args: &serde_json::Value) -> Result<(String, Option<usize>, Option<usize>), String> {
-    let obj = args
-        .as_object()
-        .ok_or("arguments must be an object")?;
+    let obj = args.as_object().ok_or("arguments must be an object")?;
     let path = obj
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("missing required argument `path`")?
         .to_string();
     let offset = match obj.get("offset") {
-        Some(v) if !v.is_null() => Some(
-            v.as_u64()
-                .ok_or("`offset` must be a positive integer")? as usize,
-        ),
+        Some(v) if !v.is_null() => {
+            Some(v.as_u64().ok_or("`offset` must be a positive integer")? as usize)
+        }
         _ => None,
     };
     let limit = match obj.get("limit") {
-        Some(v) if !v.is_null() => Some(
-            v.as_u64()
-                .ok_or("`limit` must be a positive integer")? as usize,
-        ),
+        Some(v) if !v.is_null() => {
+            Some(v.as_u64().ok_or("`limit` must be a positive integer")? as usize)
+        }
         _ => None,
     };
     Ok((path, offset, limit))
@@ -88,8 +84,11 @@ impl Tool for ReadTool {
         _cancel: CancellationToken,
         _updater: &dyn ToolUpdater,
     ) -> Result<ToolOutput, ToolError> {
-        let (path, offset, limit) = parse_args(&call.args)
-            .map_err(|message| ToolError::Failed { name: "read".into(), message })?;
+        let (path, offset, limit) =
+            parse_args(&call.args).map_err(|message| ToolError::Failed {
+                name: "read".into(),
+                message,
+            })?;
 
         let resolved = if Path::new(&path).is_absolute() {
             std::path::PathBuf::from(&path)
@@ -107,10 +106,12 @@ impl Tool for ReadTool {
             });
         }
 
-        let bytes = tokio::fs::read(&resolved).await.map_err(|e| ToolError::Failed {
-            name: "read".into(),
-            message: format!("cannot read `{path}`: {e}"),
-        })?;
+        let bytes = tokio::fs::read(&resolved)
+            .await
+            .map_err(|e| ToolError::Failed {
+                name: "read".into(),
+                message: format!("cannot read `{path}`: {e}"),
+            })?;
         let content = String::from_utf8_lossy(&bytes);
 
         let lines: Vec<&str> = content.lines().collect();
@@ -118,7 +119,10 @@ impl Tool for ReadTool {
 
         // offset 1 起始;越界报错(05 文档)
         let start = offset.unwrap_or(1);
-        if start < 1 || (!lines.is_empty() && start > total_lines) || (lines.is_empty() && start > 1) {
+        if start < 1
+            || (!lines.is_empty() && start > total_lines)
+            || (lines.is_empty() && start > 1)
+        {
             return Err(ToolError::Failed {
                 name: "read".into(),
                 message: format!(
@@ -126,8 +130,14 @@ impl Tool for ReadTool {
                 ),
             });
         }
-        let end = limit.map(|l| (start - 1 + l).min(total_lines)).unwrap_or(total_lines);
-        let slice: String = if lines.is_empty() { String::new() } else { lines[start - 1..end].join("\n") };
+        let end = limit
+            .map(|l| (start - 1 + l).min(total_lines))
+            .unwrap_or(total_lines);
+        let slice: String = if lines.is_empty() {
+            String::new()
+        } else {
+            lines[start - 1..end].join("\n")
+        };
 
         let truncation = truncate_head(&slice, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
         let mut output = truncation.content.clone();
@@ -166,7 +176,6 @@ impl Tool for ReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     struct Noop;
 
@@ -177,7 +186,11 @@ mod tests {
 
     async fn exec(tool: &ReadTool, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
         tool.execute(
-            ToolCall { id: "t".into(), name: "read".into(), args },
+            ToolCall {
+                id: "t".into(),
+                name: "read".into(),
+                args,
+            },
             CancellationToken::new(),
             &Noop,
         )
@@ -189,29 +202,53 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rpi-read-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let path = dir.join("sample.txt");
-        let content = (1..=3000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let content = (1..=3000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         tokio::fs::write(&path, &content).await.unwrap();
 
         let tool = ReadTool { cwd: dir.clone() };
         // 全量读:截断 + 续读提示
-        let output = exec(&tool, serde_json::json!({"path": "sample.txt"})).await.unwrap();
+        let output = exec(&tool, serde_json::json!({"path": "sample.txt"}))
+            .await
+            .unwrap();
         assert!(output.output.contains("Use offset="), "应带续读提示");
         // offset 翻页
-        let output = exec(&tool, serde_json::json!({"path": "sample.txt", "offset": 2001})).await.unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"path": "sample.txt", "offset": 2001}),
+        )
+        .await
+        .unwrap();
         assert!(output.output.starts_with("line 2001"));
         // limit 提前结束 + 剩余行提示
-        let output = exec(&tool, serde_json::json!({"path": "sample.txt", "offset": 1, "limit": 5})).await.unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"path": "sample.txt", "offset": 1, "limit": 5}),
+        )
+        .await
+        .unwrap();
         assert!(output.output.contains("5 of 3000 lines shown"));
         // offset 越界报错
-        let err = exec(&tool, serde_json::json!({"path": "sample.txt", "offset": 99999})).await.unwrap_err();
+        let err = exec(
+            &tool,
+            serde_json::json!({"path": "sample.txt", "offset": 99999}),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("out of range"));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
     #[tokio::test]
     async fn missing_file_is_error() {
-        let tool = ReadTool { cwd: std::env::temp_dir() };
-        let err = exec(&tool, serde_json::json!({"path": "definitely-missing.txt"})).await.unwrap_err();
+        let tool = ReadTool {
+            cwd: std::env::temp_dir(),
+        };
+        let err = exec(&tool, serde_json::json!({"path": "definitely-missing.txt"}))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("cannot read"));
     }
 }

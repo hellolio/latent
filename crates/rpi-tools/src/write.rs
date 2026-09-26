@@ -15,7 +15,9 @@ pub struct WriteTool {
 
 /// 工厂。
 pub fn create_write_tool(cwd: &Path) -> Arc<dyn Tool> {
-    Arc::new(WriteTool { cwd: cwd.to_path_buf() })
+    Arc::new(WriteTool {
+        cwd: cwd.to_path_buf(),
+    })
 }
 
 #[async_trait]
@@ -41,11 +43,17 @@ impl Tool for WriteTool {
     }
 
     fn prompt_snippet(&self) -> Option<String> {
-        Some("write(path, content): creates a new file or completely rewrites an existing one".into())
+        Some(
+            "write(path, content): creates a new file or completely rewrites an existing one"
+                .into(),
+        )
     }
 
     fn prompt_guidelines(&self) -> Vec<String> {
-        vec!["Use write only for new files or complete rewrites; prefer edit for partial changes.".into()]
+        vec![
+            "Use write only for new files or complete rewrites; prefer edit for partial changes."
+                .into(),
+        ]
     }
 
     async fn execute(
@@ -61,7 +69,10 @@ impl Tool for WriteTool {
         let path = obj
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or(ToolError::Failed { name: "write".into(), message: "missing required argument `path`".into() })?
+            .ok_or(ToolError::Failed {
+                name: "write".into(),
+                message: "missing required argument `path`".into(),
+            })?
             .to_string();
         let content = obj
             .get("content")
@@ -78,15 +89,19 @@ impl Tool for WriteTool {
             self.cwd.join(&path)
         };
         if let Some(parent) = resolved.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| ToolError::Failed {
-                name: "write".into(),
-                message: format!("cannot create directory for `{path}`: {e}"),
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ToolError::Failed {
+                    name: "write".into(),
+                    message: format!("cannot create directory for `{path}`: {e}"),
+                })?;
         }
-        tokio::fs::write(&resolved, &content).await.map_err(|e| ToolError::Failed {
-            name: "write".into(),
-            message: format!("cannot write `{path}`: {e}"),
-        })?;
+        tokio::fs::write(&resolved, &content)
+            .await
+            .map_err(|e| ToolError::Failed {
+                name: "write".into(),
+                message: format!("cannot write `{path}`: {e}"),
+            })?;
         let bytes = content.len();
         let lines = content.lines().count();
         Ok(ToolOutput {
@@ -100,7 +115,6 @@ impl Tool for WriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     struct Noop;
     #[async_trait]
@@ -125,7 +139,9 @@ mod tests {
             .await
             .unwrap();
         assert!(output.output.contains("Wrote"));
-        let content = tokio::fs::read_to_string(dir.join("nested/dir/file.txt")).await.unwrap();
+        let content = tokio::fs::read_to_string(dir.join("nested/dir/file.txt"))
+            .await
+            .unwrap();
         assert_eq!(content, "hello\nworld");
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }

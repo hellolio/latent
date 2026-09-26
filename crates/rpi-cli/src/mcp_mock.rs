@@ -6,17 +6,16 @@
 //! 注册工具 `echo`(执行时经 elicitation 请求宿主确认)。
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-    CustomRequest, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationSchema,
-    Implementation,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CustomRequest,
+    ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationSchema, Implementation,
     JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
 use serde_json::{json, Value};
 
-use rpi_core::extensions::{EventPolicy, ExtensionRegistration};
 use rmcp::model::CustomResult;
+use rpi_core::extensions::{EventPolicy, ExtensionRegistration};
 
 /// mock 扩展名(E2E 里作为连接名,工具桥接为 `e2e__echo`)。
 pub const MOCK_EXTENSION_NAME: &str = "e2e";
@@ -26,9 +25,15 @@ pub fn mock_registration() -> ExtensionRegistration {
     let mut events = std::collections::HashMap::new();
     events.insert(
         "tool_call".to_string(),
-        EventPolicy { timeout_ms: 3_000, fail_closed: true },
+        EventPolicy {
+            timeout_ms: 3_000,
+            fail_closed: true,
+        },
     );
-    ExtensionRegistration { events, high_frequency: Vec::new() }
+    ExtensionRegistration {
+        events,
+        high_frequency: Vec::new(),
+    }
 }
 
 /// mock 扩展的 ServerHandler:行为固定,专供端到端验收。
@@ -39,7 +44,10 @@ fn tool_call_payload(payload: &Value) -> Option<(&str, &str, &Value)> {
     let object = payload.as_object()?;
     let name = object.get("name")?.as_str()?;
     let args = object.get("args")?;
-    let id = object.get("toolCallId").and_then(Value::as_str).unwrap_or("");
+    let id = object
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     Some((id, name, args))
 }
 
@@ -61,7 +69,11 @@ impl ServerHandler for MockExtension {
         }))
         .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
         Ok(ListToolsResult {
-            tools: vec![Tool::new("echo", "原样回显 text 参数(执行前向宿主请求确认)", schema)],
+            tools: vec![Tool::new(
+                "echo",
+                "原样回显 text 参数(执行前向宿主请求确认)",
+                schema,
+            )],
             ..Default::default()
         })
     }
@@ -94,7 +106,9 @@ impl ServerHandler for MockExtension {
                 .build()
                 .expect("mock schema is valid"),
         };
-        let ElicitResult { action, content, .. } = context
+        let ElicitResult {
+            action, content, ..
+        } = context
             .peer
             .create_elicitation(elicitation)
             .await
@@ -109,9 +123,9 @@ impl ServerHandler for MockExtension {
             .and_then(|content| content.get("value"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        Ok(CallToolResponse::Complete(CallToolResult::success(vec![ContentBlock::text(
-            format!("echo: {text} (confirmed={confirmed})"),
-        )])))
+        Ok(CallToolResponse::Complete(CallToolResult::success(vec![
+            ContentBlock::text(format!("echo: {text} (confirmed={confirmed})")),
+        ])))
     }
 
     async fn on_custom_request(
@@ -122,15 +136,18 @@ impl ServerHandler for MockExtension {
         match request.method.as_str() {
             // 能力注册:返回订阅事件表(07 §8.3)
             "rpi/register" => {
-                let registration =
-                    serde_json::to_value(mock_registration()).map_err(|error| {
-                        McpError::internal_error(error.to_string(), None)
-                    })?;
+                let registration = serde_json::to_value(mock_registration())
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
                 Ok(CustomResult::new(json!({ "rpiResult": registration })))
             }
             // 决策埋点:拦截含 dangerous 的 bash 命令(fail-closed 扩展)
             "rpi/event" => {
-                let payload = request.params.unwrap_or(Value::Null).get("payload").cloned().unwrap_or(Value::Null);
+                let payload = request
+                    .params
+                    .unwrap_or(Value::Null)
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 let Some((_, name, args)) = tool_call_payload(&payload) else {
                     return Ok(CustomResult::new(json!({})));
                 };
@@ -163,9 +180,6 @@ pub async fn run_mock_server() -> Result<(), String> {
         .serve((stdin(), stdout()))
         .await
         .map_err(|error| error.to_string())?;
-    service
-        .waiting()
-        .await
-        .map_err(|error| error.to_string())?;
+    service.waiting().await.map_err(|error| error.to_string())?;
     Ok(())
 }

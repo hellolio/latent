@@ -164,8 +164,16 @@ pub fn create_injection_endpoints() -> (InjectionSender, InjectionReceiver) {
     let (follow_up_tx, follow_up_rx) = mpsc::unbounded_channel();
     let depth = Arc::new(InjectionDepth::default());
     (
-        InjectionSender { steering: steering_tx, follow_up: follow_up_tx, depth: depth.clone() },
-        InjectionReceiver { steering: steering_rx, follow_up: follow_up_rx, depth },
+        InjectionSender {
+            steering: steering_tx,
+            follow_up: follow_up_tx,
+            depth: depth.clone(),
+        },
+        InjectionReceiver {
+            steering: steering_rx,
+            follow_up: follow_up_rx,
+            depth,
+        },
     )
 }
 
@@ -291,11 +299,19 @@ pub struct LoopOutput {
 /// 单个工具调用的结算结果(03 文档 §10.4):批结果 Vec 长度恒等于 toolCall 数。
 #[derive(Debug, Clone)]
 pub enum ToolOutcome {
-    Completed { call: ToolCall, output: ToolOutput, is_error: bool },
+    Completed {
+        call: ToolCall,
+        output: ToolOutput,
+        is_error: bool,
+    },
     /// abort/超时:以错误 tool result 收尾,保证转录配对
     Cancelled { call: ToolCall },
     /// beforeToolCall 拦截
-    Blocked { call: ToolCall, reason: String, terminate: bool },
+    Blocked {
+        call: ToolCall,
+        reason: String,
+        terminate: bool,
+    },
 }
 
 impl ToolOutcome {
@@ -382,13 +398,25 @@ struct LoopState {
 
 impl LoopState {
     fn budget_stop(&self) -> Option<RunStop> {
-        if self.limits.max_turns.is_some_and(|max| self.turn_count >= max) {
+        if self
+            .limits
+            .max_turns
+            .is_some_and(|max| self.turn_count >= max)
+        {
             return Some(RunStop::BudgetExhausted(BudgetKind::MaxTurns));
         }
-        if self.limits.max_tool_calls.is_some_and(|max| self.tool_call_count >= max) {
+        if self
+            .limits
+            .max_tool_calls
+            .is_some_and(|max| self.tool_call_count >= max)
+        {
             return Some(RunStop::BudgetExhausted(BudgetKind::MaxToolCalls));
         }
-        if self.limits.max_total_tokens.is_some_and(|max| self.total_tokens >= max) {
+        if self
+            .limits
+            .max_total_tokens
+            .is_some_and(|max| self.total_tokens >= max)
+        {
             return Some(RunStop::BudgetExhausted(BudgetKind::MaxTotalTokens));
         }
         if self
@@ -533,12 +561,20 @@ pub async fn run_agent_loop(
     };
 
     // agent_end 是 run 的最后事件(此前全部 listener 已串行完成,结算语义成立)
-    sink.on_event(&AgentEvent::AgentEnd { messages: state.new_messages.clone() }).await;
+    sink.on_event(&AgentEvent::AgentEnd {
+        messages: state.new_messages.clone(),
+    })
+    .await;
     // 硬退出/预算路径:已取出未消费的注入消息交还宿主重新入队(不静默丢失)
     let requeued_steering = std::mem::take(&mut state.deferred_steering);
     let requeued_follow_up = std::mem::take(&mut state.follow_up_batch);
     (
-        LoopOutput { messages: state.new_messages, stop, requeued_steering, requeued_follow_up },
+        LoopOutput {
+            messages: state.new_messages,
+            stop,
+            requeued_steering,
+            requeued_follow_up,
+        },
         state.receiver,
     )
 }
@@ -564,7 +600,12 @@ async fn step_awaiting_request(state: &mut LoopState, wake: Option<Box<Wake>>) -
                 new_messages: state.new_messages.clone(),
             })
             .await;
-        if let Some(TurnUpdate { messages, model: m, thinking_level: t }) = update {
+        if let Some(TurnUpdate {
+            messages,
+            model: m,
+            thinking_level: t,
+        }) = update
+        {
             if let Some(messages) = messages {
                 prepared = messages;
             }
@@ -588,7 +629,11 @@ async fn step_awaiting_request(state: &mut LoopState, wake: Option<Box<Wake>>) -
     }
 
     // prepareRequest(每次请求前,含第一次)
-    if let Some(update) = state.hooks.prepare_request(&state.model, state.thinking).await {
+    if let Some(update) = state
+        .hooks
+        .prepare_request(&state.model, state.thinking)
+        .await
+    {
         if let Some(m) = update.model {
             state.model = m;
         }
@@ -617,7 +662,9 @@ async fn step_streaming(state: &mut LoopState) -> Phase {
         &mut state.deferred_steering,
     )
     .await;
-    state.total_tokens = state.total_tokens.saturating_add(message.usage.total_tokens);
+    state.total_tokens = state
+        .total_tokens
+        .saturating_add(message.usage.total_tokens);
     state.turn_count += 1;
     if message.stop_reason == StopReason::Length && message.has_tool_calls() {
         state.truncation_turns += 1;
@@ -641,30 +688,48 @@ async fn step_streaming(state: &mut LoopState) -> Phase {
                 tool_results: Vec::new(),
             })
             .await;
-        state.current.push(AgentMessage::Assistant(Box::new(message.clone())));
-        state.new_messages.push(AgentMessage::Assistant(Box::new(message.clone())));
+        state
+            .current
+            .push(AgentMessage::Assistant(Box::new(message.clone())));
+        state
+            .new_messages
+            .push(AgentMessage::Assistant(Box::new(message.clone())));
         return Phase::Done(match message.stop_reason {
             StopReason::Aborted => RunStop::Aborted,
             _ => RunStop::Error(
-                message.error_message.clone().unwrap_or_else(|| "provider error".into()),
+                message
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "provider error".into()),
             ),
         });
     }
 
-    state.current.push(AgentMessage::Assistant(Box::new(message.clone())));
-    state.new_messages.push(AgentMessage::Assistant(Box::new(message.clone())));
+    state
+        .current
+        .push(AgentMessage::Assistant(Box::new(message.clone())));
+    state
+        .new_messages
+        .push(AgentMessage::Assistant(Box::new(message.clone())));
     state.active_message = Some(message);
     Phase::ExecutingTools
 }
 
 /// ExecutingTools:截断防御或工具批执行;批执行中 abort → aborted 硬退出。
 async fn step_executing_tools(state: &mut LoopState) -> Phase {
-    let message = state.active_message.clone().expect("active message set by Streaming");
+    let message = state
+        .active_message
+        .clone()
+        .expect("active message set by Streaming");
     let calls: Vec<ToolCall> = message
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::ToolCall { id, name, arguments } => Some(ToolCall {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+            } => Some(ToolCall {
                 id: id.clone(),
                 name: name.clone(),
                 args: arguments.clone(),
@@ -676,7 +741,10 @@ async fn step_executing_tools(state: &mut LoopState) -> Phase {
     // 无工具调用:terminate=true 使 has_more_tool_calls=false,内层自然停止
     // (pi :266-268 的 hasMoreToolCalls=false 语义)
     let batch = if calls.is_empty() {
-        ToolBatch { messages: Vec::new(), terminate: true }
+        ToolBatch {
+            messages: Vec::new(),
+            terminate: true,
+        }
     } else {
         state.tool_call_count += calls.len() as u32;
         if message.stop_reason == StopReason::Length {
@@ -720,8 +788,14 @@ async fn step_executing_tools(state: &mut LoopState) -> Phase {
 
 /// Settling:finishTurn → turn_end → 预算/决策 → 下一个 Phase(wake 显式化)。
 async fn step_settling(state: &mut LoopState) -> Phase {
-    let message = state.active_message.clone().expect("active message set by Streaming");
-    let batch = state.tool_batch.take().expect("tool batch set by ExecutingTools");
+    let message = state
+        .active_message
+        .clone()
+        .expect("active message set by Streaming");
+    let batch = state
+        .tool_batch
+        .take()
+        .expect("tool batch set by ExecutingTools");
     let has_more_tool_calls = !batch.terminate;
 
     state.last_turn = Some((message.clone(), batch.messages.clone()));
@@ -763,18 +837,29 @@ async fn step_settling(state: &mut LoopState) -> Phase {
     if !follow_ups.is_empty() {
         state.follow_up_batch = follow_ups;
         let first = state.follow_up_batch.remove(0);
-        return Phase::AwaitingRequest { wake: Some(Box::new(Wake::FollowUp(first))) };
+        return Phase::AwaitingRequest {
+            wake: Some(Box::new(Wake::FollowUp(first))),
+        };
     }
     if decision == Some(TurnDecision::Continue) {
         // 无自然请求时,用"仅上下文"的一轮兑现 continue(显式 wake,非补丁)
-        return Phase::AwaitingRequest { wake: Some(Box::new(Wake::ExplicitContinue)) };
+        return Phase::AwaitingRequest {
+            wake: Some(Box::new(Wake::ExplicitContinue)),
+        };
     }
     Phase::Done(RunStop::EndTurn)
 }
 
 async fn emit_message_events(sink: &Arc<dyn Subscriber>, message: &AgentMessage) {
-    sink.on_event(&AgentEvent::MessageStart { message: Box::new(message.clone()), partial: None }).await;
-    sink.on_event(&AgentEvent::MessageEnd { message: Box::new(message.clone()) }).await;
+    sink.on_event(&AgentEvent::MessageStart {
+        message: Box::new(message.clone()),
+        partial: None,
+    })
+    .await;
+    sink.on_event(&AgentEvent::MessageEnd {
+        message: Box::new(message.clone()),
+    })
+    .await;
 }
 
 /// 流式处理(03 文档 §4):折叠转录 → 请求 → 事件转发 → 终态消息。
@@ -852,50 +937,73 @@ async fn stream_assistant_response(
             AssistantMessageEvent::Start => {
                 started = true;
                 sink.on_event(&AgentEvent::MessageStart {
-                    message: Box::new(AgentMessage::Assistant(Box::new(AssistantMessage::pending(model)))),
+                    message: Box::new(AgentMessage::Assistant(Box::new(
+                        AssistantMessage::pending(model),
+                    ))),
                     partial: Some(shared_partial.clone()),
                 })
                 .await;
             }
             AssistantMessageEvent::TextDelta { ref delta, .. } => {
                 {
-                    let mut partial = shared_partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut partial = shared_partial
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     apply_event_to_partial(&mut partial, &mut toolcall_json, &event);
                 }
                 sink.on_event(&AgentEvent::MessageDelta {
-                    delta: MessageDeltaPayload::Text { delta: delta.clone() },
+                    delta: MessageDeltaPayload::Text {
+                        delta: delta.clone(),
+                    },
                 })
                 .await;
             }
             AssistantMessageEvent::ThinkingDelta { ref delta, .. } => {
                 {
-                    let mut partial = shared_partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut partial = shared_partial
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     apply_event_to_partial(&mut partial, &mut toolcall_json, &event);
                 }
                 sink.on_event(&AgentEvent::MessageDelta {
-                    delta: MessageDeltaPayload::Thinking { delta: delta.clone() },
+                    delta: MessageDeltaPayload::Thinking {
+                        delta: delta.clone(),
+                    },
                 })
                 .await;
             }
-            AssistantMessageEvent::ToolCallDelta { content_index, ref delta } => {
+            AssistantMessageEvent::ToolCallDelta {
+                content_index,
+                ref delta,
+            } => {
                 {
-                    let mut partial = shared_partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut partial = shared_partial
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     apply_event_to_partial(&mut partial, &mut toolcall_json, &event);
                 }
                 sink.on_event(&AgentEvent::MessageDelta {
-                    delta: MessageDeltaPayload::ToolCallArgs { content_index, delta: delta.clone() },
+                    delta: MessageDeltaPayload::ToolCallArgs {
+                        content_index,
+                        delta: delta.clone(),
+                    },
                 })
                 .await;
             }
             AssistantMessageEvent::Done(message) | AssistantMessageEvent::Error(message) => {
                 if !started {
                     sink.on_event(&AgentEvent::MessageStart {
-                        message: Box::new(AgentMessage::Assistant(Box::new(AssistantMessage::pending(model)))),
+                        message: Box::new(AgentMessage::Assistant(Box::new(
+                            AssistantMessage::pending(model),
+                        ))),
                         partial: Some(shared_partial.clone()),
                     })
                     .await;
                 }
-                sink.on_event(&AgentEvent::MessageUpdate { message: message.clone() }).await;
+                sink.on_event(&AgentEvent::MessageUpdate {
+                    message: message.clone(),
+                })
+                .await;
                 sink.on_event(&AgentEvent::MessageEnd {
                     message: Box::new(AgentMessage::Assistant(message.clone())),
                 })
@@ -910,7 +1018,9 @@ async fn stream_assistant_response(
             | AssistantMessageEvent::ThinkingEnd { .. }
             | AssistantMessageEvent::ToolCallStart { .. }
             | AssistantMessageEvent::ToolCallEnd { .. } => {
-                let mut partial = shared_partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut partial = shared_partial
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 apply_event_to_partial(&mut partial, &mut toolcall_json, &event);
             }
         }
@@ -920,14 +1030,20 @@ async fn stream_assistant_response(
         Some(message) => message,
         // 流意外正常退出(契约要求终态事件;兜底防御)
         None => {
-            let message = AssistantMessage::error(model, "stream ended without a terminal event", false);
+            let message =
+                AssistantMessage::error(model, "stream ended without a terminal event", false);
             sink.on_event(&AgentEvent::MessageStart {
-                message: Box::new(AgentMessage::Assistant(Box::new(AssistantMessage::pending(model)))),
+                message: Box::new(AgentMessage::Assistant(Box::new(
+                    AssistantMessage::pending(model),
+                ))),
                 partial: Some(shared_partial.clone()),
             })
             .await;
             // 与终态路径事件序一致:update(快照) 先于 end
-            sink.on_event(&AgentEvent::MessageUpdate { message: Box::new(message.clone()) }).await;
+            sink.on_event(&AgentEvent::MessageUpdate {
+                message: Box::new(message.clone()),
+            })
+            .await;
             sink.on_event(&AgentEvent::MessageEnd {
                 message: Box::new(AgentMessage::Assistant(Box::new(message.clone()))),
             })
@@ -948,14 +1064,24 @@ fn apply_event_to_partial(
 ) {
     match event {
         AssistantMessageEvent::TextStart { content_index } => {
-            ensure_block(partial, *content_index, || ContentBlock::text(String::new()));
+            ensure_block(
+                partial,
+                *content_index,
+                || ContentBlock::text(String::new()),
+            );
         }
-        AssistantMessageEvent::TextDelta { content_index, delta } => {
+        AssistantMessageEvent::TextDelta {
+            content_index,
+            delta,
+        } => {
             if let Some(ContentBlock::Text { text, .. }) = partial.content.get_mut(*content_index) {
                 text.push_str(delta);
             }
         }
-        AssistantMessageEvent::TextEnd { content_index, content } => {
+        AssistantMessageEvent::TextEnd {
+            content_index,
+            content,
+        } => {
             if let Some(ContentBlock::Text { text, .. }) = partial.content.get_mut(*content_index) {
                 *text = content.clone();
             }
@@ -967,13 +1093,23 @@ fn apply_event_to_partial(
                 redacted: None,
             });
         }
-        AssistantMessageEvent::ThinkingDelta { content_index, delta } => {
-            if let Some(ContentBlock::Thinking { thinking, .. }) = partial.content.get_mut(*content_index) {
+        AssistantMessageEvent::ThinkingDelta {
+            content_index,
+            delta,
+        } => {
+            if let Some(ContentBlock::Thinking { thinking, .. }) =
+                partial.content.get_mut(*content_index)
+            {
                 thinking.push_str(delta);
             }
         }
-        AssistantMessageEvent::ThinkingEnd { content_index, content } => {
-            if let Some(ContentBlock::Thinking { thinking, .. }) = partial.content.get_mut(*content_index) {
+        AssistantMessageEvent::ThinkingEnd {
+            content_index,
+            content,
+        } => {
+            if let Some(ContentBlock::Thinking { thinking, .. }) =
+                partial.content.get_mut(*content_index)
+            {
                 *thinking = content.clone();
             }
         }
@@ -985,15 +1121,23 @@ fn apply_event_to_partial(
             });
             toolcall_json.entry(*content_index).or_default().clear();
         }
-        AssistantMessageEvent::ToolCallDelta { content_index, delta } => {
+        AssistantMessageEvent::ToolCallDelta {
+            content_index,
+            delta,
+        } => {
             let raw = toolcall_json.entry(*content_index).or_default();
             raw.push_str(delta);
-            if let Some(ContentBlock::ToolCall { arguments, .. }) = partial.content.get_mut(*content_index) {
+            if let Some(ContentBlock::ToolCall { arguments, .. }) =
+                partial.content.get_mut(*content_index)
+            {
                 *arguments = serde_json::from_str(raw)
                     .unwrap_or_else(|_| serde_json::Value::String(raw.clone()));
             }
         }
-        AssistantMessageEvent::ToolCallEnd { content_index, tool_call } => {
+        AssistantMessageEvent::ToolCallEnd {
+            content_index,
+            tool_call,
+        } => {
             if partial.content.len() > *content_index {
                 partial.content[*content_index] = tool_call.clone();
             } else {
@@ -1047,7 +1191,10 @@ async fn fail_tool_calls_from_truncated(
         new_messages.push(result.clone());
         messages.push(result);
     }
-    ToolBatch { messages, terminate: false }
+    ToolBatch {
+        messages,
+        terminate: false,
+    }
 }
 
 /// 工具执行(03 文档 §5):模式选择 → 串行/并行 → 结果消息。
@@ -1073,11 +1220,9 @@ async fn execute_tool_calls(
     let (outcomes, messages) = if sequential {
         // 串行:逐工具 start → prepare → execute → finalize → end → message_start/end 交错(pi §5.2)
         let outcomes =
-            execute_batch_sequential(calls, tools, hooks, sink, cancel, transcript, new_messages).await;
-        let messages: Vec<AgentMessage> = outcomes
-            .iter()
-            .map(outcome_to_message)
-            .collect();
+            execute_batch_sequential(calls, tools, hooks, sink, cancel, transcript, new_messages)
+                .await;
+        let messages: Vec<AgentMessage> = outcomes.iter().map(outcome_to_message).collect();
         (outcomes, messages)
     } else {
         // 并行:end 事件已按完成序发出;结果消息按源序补发(不变量 I4)
@@ -1094,7 +1239,10 @@ async fn execute_tool_calls(
     };
     // 提前终止:批非空且每个结果 terminate(03 文档 §5.5)
     let terminate = !outcomes.is_empty() && outcomes.iter().all(ToolOutcome::terminate);
-    ToolBatch { messages, terminate }
+    ToolBatch {
+        messages,
+        terminate,
+    }
 }
 
 /// 串行批:逐个 start → prepare → execute → finalize → end。
@@ -1130,7 +1278,14 @@ async fn execute_batch_sequential(
         let outcome = match prepare_call(call, tools, hooks).await {
             Prepared::Immediate(outcome) => outcome,
             Prepared::Ready(tool, effective) => {
-                execute_and_finalize(&effective, tool, hooks.clone(), sink.clone(), cancel.clone()).await
+                execute_and_finalize(
+                    &effective,
+                    tool,
+                    hooks.clone(),
+                    sink.clone(),
+                    cancel.clone(),
+                )
+                .await
             }
         };
         emit_tool_end_for_outcome(sink, &outcome).await;
@@ -1225,7 +1380,11 @@ enum Prepared {
 
 /// prepare 阶段(03 文档 §5.4.1):按名找工具 → 参数校验 → beforeToolCall。
 /// immediate 失败/拦截直接落定;成功返回待执行工具 + 生效参数(改参后重新校验)。
-async fn prepare_call(call: &ToolCall, tools: &[Arc<dyn Tool>], hooks: &Arc<dyn LoopHooks>) -> Prepared {
+async fn prepare_call(
+    call: &ToolCall,
+    tools: &[Arc<dyn Tool>],
+    hooks: &Arc<dyn LoopHooks>,
+) -> Prepared {
     let Some(tool) = tools.iter().find(|tool| tool.name() == call.name) else {
         return Prepared::Immediate(ToolOutcome::Completed {
             call: call.clone(),
@@ -1309,17 +1468,21 @@ async fn execute_and_finalize(
     };
 
     let mut is_error = false;
-    if let Some(ToolPatch { output: patched_output, details, is_error: patched_is_error, terminate }) =
-        hooks
-            .after_tool_call(ToolResultCtx {
-                tool_call_id: call.id.clone(),
-                name: call.name.clone(),
-                output: output.output.clone(),
-                details: output.details.clone(),
-                is_error,
-                terminate: output.terminate,
-            })
-            .await
+    if let Some(ToolPatch {
+        output: patched_output,
+        details,
+        is_error: patched_is_error,
+        terminate,
+    }) = hooks
+        .after_tool_call(ToolResultCtx {
+            tool_call_id: call.id.clone(),
+            name: call.name.clone(),
+            output: output.output.clone(),
+            details: output.details.clone(),
+            is_error,
+            terminate: output.terminate,
+        })
+        .await
     {
         if let Some(text) = patched_output {
             output.output = text;
@@ -1335,13 +1498,19 @@ async fn execute_and_finalize(
         }
     }
 
-    ToolOutcome::Completed { call: call.clone(), output, is_error }
+    ToolOutcome::Completed {
+        call: call.clone(),
+        output,
+        is_error,
+    }
 }
 
 fn outcome_to_message(outcome: &ToolOutcome) -> AgentMessage {
     let call = outcome.call();
     match outcome {
-        ToolOutcome::Completed { output, is_error, .. } => AgentMessage::ToolResult {
+        ToolOutcome::Completed {
+            output, is_error, ..
+        } => AgentMessage::ToolResult {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
             content: vec![ContentBlock::text(output.output.clone())],
@@ -1374,7 +1543,9 @@ async fn emit_tool_end(sink: &Arc<dyn Subscriber>, call: &ToolCall, output: &str
 async fn emit_tool_end_for_outcome(sink: &Arc<dyn Subscriber>, outcome: &ToolOutcome) {
     let call = outcome.call();
     let (output, is_error) = match outcome {
-        ToolOutcome::Completed { output, is_error, .. } => (output.output.clone(), *is_error),
+        ToolOutcome::Completed {
+            output, is_error, ..
+        } => (output.output.clone(), *is_error),
         ToolOutcome::Cancelled { .. } => ("Operation aborted".to_string(), true),
         ToolOutcome::Blocked { reason, .. } => (reason.clone(), true),
     };
@@ -1385,7 +1556,10 @@ async fn emit_tool_end_for_outcome(sink: &Arc<dyn Subscriber>, outcome: &ToolOut
 /// type/required/嵌套 properties 子集。schema 未声明(Value::Null / boolean true)
 /// 不校验;schema 本身非法(compile 失败)fail-closed 返回 Err。错误语义不变:
 /// Err(String) 由 prepare_call 转错误 ToolOutcome,不 panic、不改 Tool trait。
-pub fn validate_arguments(schema: &serde_json::Value, args: &serde_json::Value) -> Result<(), String> {
+pub fn validate_arguments(
+    schema: &serde_json::Value,
+    args: &serde_json::Value,
+) -> Result<(), String> {
     // 工具未声明 schema(或恒真 schema):无约束,不校验(既有测试钉住)
     if schema.is_null() || schema == &serde_json::Value::Bool(true) {
         return Ok(());
@@ -1414,12 +1588,16 @@ mod tests {
             }
         });
         assert!(validate_arguments(&schema, &serde_json::json!({"path": "a.txt"})).is_ok());
-        assert!(validate_arguments(&schema, &serde_json::json!({"path": "a", "offset": 3})).is_ok());
+        assert!(
+            validate_arguments(&schema, &serde_json::json!({"path": "a", "offset": 3})).is_ok()
+        );
         // 缺 required
         assert!(validate_arguments(&schema, &serde_json::json!({})).is_err());
         // 类型错误
         assert!(validate_arguments(&schema, &serde_json::json!({"path": 1})).is_err());
-        assert!(validate_arguments(&schema, &serde_json::json!({"path": "a", "offset": "x"})).is_err());
+        assert!(
+            validate_arguments(&schema, &serde_json::json!({"path": "a", "offset": "x"})).is_err()
+        );
         // 非 object 顶层
         assert!(validate_arguments(&schema, &serde_json::json!("boom")).is_err());
         // 无 schema 不校验
@@ -1437,8 +1615,7 @@ mod tests {
         assert!(validate_arguments(&minimum_schema, &serde_json::json!(1)).is_ok());
         assert!(validate_arguments(&minimum_schema, &serde_json::json!(0)).is_err());
 
-        let array_schema =
-            serde_json::json!({"type": "array", "items": {"type": "string"}});
+        let array_schema = serde_json::json!({"type": "array", "items": {"type": "string"}});
         assert!(validate_arguments(&array_schema, &serde_json::json!(["x"])).is_ok());
         assert!(validate_arguments(&array_schema, &serde_json::json!(["x", 1])).is_err());
     }
@@ -1460,12 +1637,23 @@ mod tests {
             serde_json::json!({"type": "object", "required": ["path", "content"], "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}),
         ];
         for schema in &schemas {
-            assert!(validate_arguments(schema, &serde_json::json!({})).is_err(), "缺 required 应拦截: {schema}");
+            assert!(
+                validate_arguments(schema, &serde_json::json!({})).is_err(),
+                "缺 required 应拦截: {schema}"
+            );
         }
         // 合法参数照常通过
         assert!(validate_arguments(&schemas[0], &serde_json::json!({"command": "ls"})).is_ok());
-        assert!(validate_arguments(&schemas[1], &serde_json::json!({"path": "a", "edits": [{"oldText": "x", "newText": "y"}]})).is_ok());
-        assert!(validate_arguments(&schemas[2], &serde_json::json!({"path": "a", "content": "b"})).is_ok());
+        assert!(validate_arguments(
+            &schemas[1],
+            &serde_json::json!({"path": "a", "edits": [{"oldText": "x", "newText": "y"}]})
+        )
+        .is_ok());
+        assert!(validate_arguments(
+            &schemas[2],
+            &serde_json::json!({"path": "a", "content": "b"})
+        )
+        .is_ok());
     }
 
     #[test]

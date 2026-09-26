@@ -29,7 +29,14 @@ pub struct SessionHeader {
 
 impl SessionHeader {
     pub fn new(id: String, cwd: String, parent_session: Option<String>) -> Self {
-        SessionHeader { kind: "session".into(), version: CURRENT_SESSION_VERSION, id, timestamp: rpi_agent::now_ms(), cwd, parent_session }
+        SessionHeader {
+            kind: "session".into(),
+            version: CURRENT_SESSION_VERSION,
+            id,
+            timestamp: rpi_agent::now_ms(),
+            cwd,
+            parent_session,
+        }
     }
 }
 
@@ -357,7 +364,9 @@ mod tests {
                 id: "a9".into(),
                 parent_id: Some("a8".into()),
                 target_id: "a1".into(),
-                replacement: Some(ContextReplacement { content: "edited".into() }),
+                replacement: Some(ContextReplacement {
+                    content: "edited".into(),
+                }),
                 timestamp: 9,
             },
             Entry::Label {
@@ -379,14 +388,32 @@ mod tests {
             let back: Entry = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(&back, entry);
             assert_eq!(value["id"], entry.id());
-            assert_eq!(value["parentId"], serde_json::to_value(entry.parent_id()).unwrap());
+            assert_eq!(
+                value["parentId"],
+                serde_json::to_value(entry.parent_id()).unwrap()
+            );
         }
         // 判别符抽查
-        assert_eq!(serde_json::to_value(&entries[0]).unwrap()["type"], "message");
-        assert_eq!(serde_json::to_value(&entries[4]).unwrap()["type"], "compaction");
-        assert_eq!(serde_json::to_value(&entries[5]).unwrap()["type"], "branch_summary");
-        assert_eq!(serde_json::to_value(&entries[8]).unwrap()["type"], "context_edit");
-        assert_eq!(serde_json::to_value(&entries[10]).unwrap()["type"], "session_info");
+        assert_eq!(
+            serde_json::to_value(&entries[0]).unwrap()["type"],
+            "message"
+        );
+        assert_eq!(
+            serde_json::to_value(&entries[4]).unwrap()["type"],
+            "compaction"
+        );
+        assert_eq!(
+            serde_json::to_value(&entries[5]).unwrap()["type"],
+            "branch_summary"
+        );
+        assert_eq!(
+            serde_json::to_value(&entries[8]).unwrap()["type"],
+            "context_edit"
+        );
+        assert_eq!(
+            serde_json::to_value(&entries[10]).unwrap()["type"],
+            "session_info"
+        );
     }
 
     #[test]

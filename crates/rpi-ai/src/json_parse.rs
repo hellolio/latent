@@ -128,7 +128,9 @@ pub fn parse_json_with_repair(json: &str) -> Result<Value, serde_json::Error> {
 
 /// 尽力解析流式累积的(可能不完整的)JSON;任何失败都返回空对象。
 pub fn parse_streaming_json(partial: Option<&str>) -> Value {
-    let Some(text) = partial else { return Value::Object(Default::default()) };
+    let Some(text) = partial else {
+        return Value::Object(Default::default());
+    };
     if text.trim().is_empty() {
         return Value::Object(Default::default());
     }
@@ -171,14 +173,23 @@ mod tests {
     fn streaming_parse_handles_partial_values() {
         assert_eq!(parse_streaming_json(Some("")), json!({}));
         assert_eq!(parse_streaming_json(Some("{\"a\": 1}")), json!({"a": 1}));
-        assert_eq!(parse_streaming_json(Some("{\"a\": \"he")), json!({"a": "he"}));
-        assert_eq!(parse_streaming_json(Some("{\"a\": [1, 2")), json!({"a": [1, 2]}));
+        assert_eq!(
+            parse_streaming_json(Some("{\"a\": \"he")),
+            json!({"a": "he"})
+        );
+        assert_eq!(
+            parse_streaming_json(Some("{\"a\": [1, 2")),
+            json!({"a": [1, 2]})
+        );
         assert_eq!(parse_streaming_json(Some("{\"a\": {\"b\": tr")), json!({}));
     }
 
     #[test]
     fn utf8_and_escapes_survive_completion() {
         // 字符串内的 \" 不应误判字符串边界
-        assert_eq!(parse_streaming_json(Some("{\"a\": \"x\\\"")), json!({"a": "x\""}));
+        assert_eq!(
+            parse_streaming_json(Some("{\"a\": \"x\\\"")),
+            json!({"a": "x\""})
+        );
     }
 }
