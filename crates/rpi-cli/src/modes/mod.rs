@@ -6,6 +6,7 @@ pub mod interactive;
 pub mod json;
 pub mod print_mode;
 pub mod rpc;
+pub mod slash;
 
 use rpi_agent::AgentEvent;
 use rpi_core::AgentSessionEvent;

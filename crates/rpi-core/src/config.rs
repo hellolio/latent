@@ -141,8 +141,13 @@ fn merge_model(base: &mut ModelConfig, over: ModelConfig) {
 }
 
 /// 读单个 models.json;解析失败返回诊断(调用方打 stderr,不阻断)。
+/// 文件不存在是常态(未自定义 provider),不算错误、静默跳过。
 fn parse_models_file(path: &Path) -> Result<ModelsFile, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ModelsFile::default()),
+        Err(e) => return Err(e.to_string()),
+    };
     serde_json::from_str::<ModelsFile>(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 

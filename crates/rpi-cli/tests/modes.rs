@@ -488,11 +488,12 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         let manager = built.session_manager.clone().unwrap();
         assert_eq!(manager.session_id(), session_id, "resume 不换 session id");
         let messages = session_messages(&manager.entries());
-        // resume 会追加新的 system baseline(append-only:重建系统提示词也是 entry)
-        assert_eq!(messages.len(), 6, "两段 system baseline + 两轮对话");
-        assert!(matches!(&messages[3], rpi_agent::AgentMessage::System { .. }));
-        assert!(matches!(&messages[4], rpi_agent::AgentMessage::User { .. }));
-        assert!(matches!(&messages[5], rpi_agent::AgentMessage::Assistant(_)));
+        // resume 后续聊接在同一树上:工具集相对既有 baseline 无变化时,
+        // declare_tool_changes(不变量 I6)不重复注入 system baseline
+        assert_eq!(messages.len(), 5, "一段 system baseline + 两轮对话");
+        assert!(matches!(&messages[0], rpi_agent::AgentMessage::System { .. }));
+        assert!(matches!(&messages[3], rpi_agent::AgentMessage::User { .. }));
+        assert!(matches!(&messages[4], rpi_agent::AgentMessage::Assistant(_)));
         let _ = leaf_before;
     }
 

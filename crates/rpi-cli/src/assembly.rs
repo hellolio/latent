@@ -159,8 +159,8 @@ fn thinking_level_name(level: rpi_ai::ThinkingLevel) -> &'static str {
     }
 }
 
-/// session 投影设置态 → ThinkingLevel("off" = None)。
-fn parse_thinking_level(name: &str) -> Option<rpi_ai::ThinkingLevel> {
+/// session 投影设置态 → ThinkingLevel("off" = None)。`/thinking` 命令复用。
+pub fn parse_thinking_level(name: &str) -> Option<rpi_ai::ThinkingLevel> {
     match name {
         "minimal" => Some(rpi_ai::ThinkingLevel::Minimal),
         "low" => Some(rpi_ai::ThinkingLevel::Low),

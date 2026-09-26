@@ -72,20 +72,31 @@ pub fn create_default_provider(provider_id: &str) -> Option<Arc<dyn Provider>> {
     create_provider(api)
 }
 
+/// 内置 provider 表(id, api, baseUrl):`default_provider_endpoint` 与
+/// `/model` 选择器的候选清单共用,新增 provider 只改这里。
+pub const BUILTIN_PROVIDERS: &[(&str, &str, &str)] = &[
+    ("anthropic", "anthropic-messages", "https://api.anthropic.com"),
+    ("openai", "openai-completions", "https://api.openai.com/v1"),
+    ("deepseek", "openai-completions", "https://api.deepseek.com"),
+    ("groq", "openai-completions", "https://api.groq.com/openai/v1"),
+    ("xai", "openai-completions", "https://api.x.ai/v1"),
+    ("openrouter", "openai-completions", "https://openrouter.ai/api/v1"),
+    ("zai", "openai-completions", "https://api.z.ai/api/paas/v4"),
+    ("mistral", "openai-completions", "https://api.mistral.ai/v1"),
+    ("moonshotai", "openai-completions", "https://api.moonshot.ai/v1"),
+    ("together", "openai-completions", "https://api.together.xyz/v1"),
+    ("fireworks", "openai-completions", "https://api.fireworks.ai/inference/v1"),
+];
+
+/// 内置 provider id 清单(顺序与 BUILTIN_PROVIDERS 一致)。
+pub fn builtin_providers() -> impl Iterator<Item = &'static str> {
+    BUILTIN_PROVIDERS.iter().map(|(id, _, _)| *id)
+}
+
 /// 已知 provider 的默认 (api, baseUrl)。M1 覆盖两大协议的官方端点。
 pub fn default_provider_endpoint(provider_id: &str) -> Option<(&'static str, &'static str)> {
-    match provider_id {
-        "anthropic" => Some(("anthropic-messages", "https://api.anthropic.com")),
-        "openai" => Some(("openai-completions", "https://api.openai.com/v1")),
-        "deepseek" => Some(("openai-completions", "https://api.deepseek.com")),
-        "groq" => Some(("openai-completions", "https://api.groq.com/openai/v1")),
-        "xai" => Some(("openai-completions", "https://api.x.ai/v1")),
-        "openrouter" => Some(("openai-completions", "https://openrouter.ai/api/v1")),
-        "zai" => Some(("openai-completions", "https://api.z.ai/api/paas/v4")),
-        "mistral" => Some(("openai-completions", "https://api.mistral.ai/v1")),
-        "moonshotai" => Some(("openai-completions", "https://api.moonshot.ai/v1")),
-        "together" => Some(("openai-completions", "https://api.together.xyz/v1")),
-        "fireworks" => Some(("openai-completions", "https://api.fireworks.ai/inference/v1")),
-        _ => None,
-    }
+    BUILTIN_PROVIDERS
+        .iter()
+        .find(|(id, _, _)| *id == provider_id)
+        .map(|(_, api, url)| (*api, *url))
 }

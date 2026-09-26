@@ -48,6 +48,27 @@ impl ModelResolver {
         self.extra_models.push(model);
     }
 
+    /// `/model` 选择器的候选清单:models.json 注册的自定义模型在前,其后是
+    /// 各内置 provider 的默认模型。自定义模型与所在 provider 的内置默认
+    /// 模型**并列**(如 models.json 覆盖 openai 代理模型时,openai 官方默认
+    /// 模型仍可选);全部候选均可用 `resolve` 解析。
+    pub fn available_models(&self) -> Vec<Model> {
+        let mut models: Vec<Model> = self.extra_models.clone();
+        for provider in rpi_ai::builtin_providers() {
+            if let Some(model_id) = default_model_for(provider) {
+                if let Ok(model) = self.resolve(&format!("{provider}/{model_id}")) {
+                    if !models
+                        .iter()
+                        .any(|m| m.provider == model.provider && m.id == model.id)
+                    {
+                        models.push(model);
+                    }
+                }
+            }
+        }
+        models
+    }
+
     /// 记录 provider 级 override(models.json):覆盖内置端点 URL / 为自定义
     /// provider 提供 api+baseUrl / 为该 provider 的所有模型携带凭据与 headers。
     pub fn set_provider_override(
@@ -169,5 +190,46 @@ mod tests {
         resolver.set_provider_override("anthropic", None, "anthropic-messages", None, None);
         let model = resolver.resolve("anthropic/claude-sonnet-4-5").unwrap();
         assert_eq!(model.base_url, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn available_models_lists_custom_then_builtin_defaults() {
+        let mut resolver = create_model_resolver();
+        let mut custom = Model::minimal("my-model", "openai-completions", "custom");
+        custom.base_url = "http://localhost:8080/v1".into();
+        resolver.register_model(custom);
+
+        let models = resolver.available_models();
+        assert_eq!(models.first().unwrap().id, "my-model", "自定义模型在前");
+        // 自定义 provider 不应挤掉内置默认表;每个候选都可解析
+        let specs: Vec<String> =
+            models.iter().map(|m| format!("{}/{}", m.provider, m.id)).collect();
+        assert!(specs.contains(&"anthropic/claude-sonnet-4-5".to_string()), "{specs:?}");
+        assert!(specs.contains(&"zai/glm-4.7".to_string()), "{specs:?}");
+        // 无重复候选(精确 provider+id 去重,自定义模型与内置默认并列)
+        let mut sorted = specs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(specs.len(), sorted.len(), "{specs:?}");
+        for spec in &specs {
+            assert!(resolver.resolve(spec).is_ok(), "{spec} 应可解析");
+        }
+    }
+
+    #[test]
+    fn available_models_keeps_builtin_default_alongside_custom_override() {
+        // models.json 给内置 provider 注册代理模型:官方默认模型仍应在列
+        let mut resolver = create_model_resolver();
+        let mut proxy = Model::minimal("my-proxy-model", "openai-completions", "openai");
+        proxy.base_url = "http://localhost:8080/v1".into();
+        resolver.register_model(proxy);
+
+        let specs: Vec<String> = resolver
+            .available_models()
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.id))
+            .collect();
+        assert!(specs.contains(&"openai/my-proxy-model".to_string()), "{specs:?}");
+        assert!(specs.contains(&"openai/gpt-4.1-mini".to_string()), "{specs:?}");
     }
 }

@@ -1345,7 +1345,9 @@ fn outcome_to_message(outcome: &ToolOutcome) -> AgentMessage {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
             content: vec![ContentBlock::text(output.output.clone())],
-            details: Some(output.details.clone()),
+            // details 无内容时用 None(JSONL null 往返读回 None,保证
+            // 内存转录与 session projection 一致)
+            details: (!output.details.is_null()).then(|| output.details.clone()),
             usage: None,
             is_error: *is_error,
             timestamp: now_ms(),

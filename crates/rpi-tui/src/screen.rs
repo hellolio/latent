@@ -135,17 +135,26 @@ impl Tui for MainScreenTui {
         let mut payload = String::new();
         // 1. 光标移到视口顶,清掉视口(其内容已在调用方的模型里定稿)
         self.home_viewport_and_clear(&mut payload);
-        // 2. 追加进 scrollback:每行后换行;超出终端行数时终端自然滚动,
-        //    视口仍然重画在底部 —— 不变量由"视口高度 ≤ 终端行数"保证
-        for line in wrapped {
-            payload.push_str(&line);
+        // 2. 追加进 scrollback:committed 行与视口行**全部顺序输出**,行间
+        //    `\r\n`。写到底行后的 `\r\n` 让终端自然滚 1 行,恰好把 committed
+        //    行顶入 scrollback、视口保持贴底(pi tui-main-screen 的滚动模型:
+        //    滚动量由写入行数决定,不做相对光标定位 —— 相对定位在物理光标
+        //    与模型错位一次后,后续 clear-to-end 会把已落盘内容逐步吃掉)。
+        for line in &wrapped {
+            payload.push_str(line);
             payload.push_str("\r\n");
         }
-        // 3. 整体重画视口(行差分失效:基准行可能已被滚出屏幕)
-        let prev = self.viewport_prev.clone();
-        for (row, line) in prev.iter().enumerate() {
-            self.write_viewport_row(&mut payload, row, line, None);
+        let last = self.viewport_height - 1;
+        for (row, line) in self.viewport_prev.iter().enumerate() {
+            payload.push_str(line);
+            if row != last {
+                payload.push_str("\r\n");
+            }
         }
+        // 最后一行无 \r\n:光标停在视口末行行尾(与模型一致)
+        self.cursor_row = last;
+        self.cursor_col =
+            crate::width::display_width(self.viewport_prev.last().expect("视口至少 1 行"));
         self.write_synced(&payload);
     }
 
@@ -346,6 +355,33 @@ mod tests {
         }
         let out = output(&buffer);
         assert!(out.contains("abcde\r\nfghij\r\n"));
+    }
+
+    #[test]
+    fn commit_writes_lines_and_viewport_sequentially_without_cursor_moves() {
+        // 回归:commit 后视口重写必须**顺序输出**(靠底行 \r\n 自然滚动,
+        // 末行无 \r\n),不能用相对光标定位 —— 物理光标与模型错位一次后,
+        // 后续 clear-to-end 会把已落盘内容逐步吃掉(pyte 实测整屏清空)。
+        let buffer = SharedBuffer::default();
+        {
+            let mut tui = MainScreenTui::new(Box::new(buffer.clone()), 2, 80);
+            tui.render_viewport(&["status".into(), "> hi".into()], 4);
+            tui.commit_lines(&["hello".into()]);
+            tui.finish();
+        }
+        let out = output(&buffer);
+        // commit 段:hello → \r\n → 视口两行顺序重写(status、> hi),末行后
+        // 紧跟同步结束序列(无 \r\n、无光标移动)
+        assert!(
+            out.contains("hello\r\nstatus\r\n> hi\x1b[?2026l"),
+            "commit 段应顺序输出: {out:?}"
+        );
+        // committed 与视口重写之间不得出现相对光标移动(CSI A/B)
+        let commit_start = out.find("hello").unwrap();
+        let commit_end = out.rfind("\x1b[?2026l").unwrap();
+        let commit_slice = &out[commit_start..commit_end];
+        assert!(!commit_slice.contains("\x1b[A"), "{commit_slice:?}");
+        assert!(!commit_slice.contains("\x1b[B"), "{commit_slice:?}");
     }
 
     #[test]

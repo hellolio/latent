@@ -56,10 +56,12 @@ cat prompt.txt | rpi                   # prompt 可经 stdin 管道输入
 rpi --mode interactive                 # 需要终端
 ```
 
-- 差分渲染 TUI:编辑器、消息流、状态栏;
+- 差分渲染 TUI:编辑器、消息流、footer 状态栏(当前模型 · thinking 级别 · context% · 会话累计用量;context 超 70%/90% 变色);
 - **流式可见思考过程与工具参数逐块增长**(delta 为主 + partial 快照读口);
-- 每回合结束显示用量行(输入/输出/缓存读/缓存写 token + 费用),状态栏维护会话累计;
-- `Enter` 发送;run 进行中输入自动转为 **steering**(当前 turn 结束后注入);`Ctrl+C` 中断当前 run(空闲时退出),`Ctrl+D` 退出。
+- 每回合结束显示用量行(输入/输出/缓存读/缓存写 token + 费用);错误/中止回合红字上屏(`Error: …` / `Operation aborted`),自动重试最终失败同样可见;
+- 启动/续聊时回放当前转录:user 反色块、assistant 正文、工具调用与结果、压缩摘要(`--continue` 恢复历史可见);
+- 斜杠命令:`/help` `/model [provider/model]` `/thinking [level]` `/compact` `/session` `/quit`;未识别的 `/xxx` 本地警告(不发给模型);
+- `Enter` 发送;run 进行中输入自动转为 **steering**(当前 turn 结束后注入);`Ctrl+C` 中断当前 run(空闲时 500ms 内双击退出),`Ctrl+D` 退出。
 
 ### json(事件 JSONL)
 

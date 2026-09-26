@@ -26,8 +26,8 @@ pub use mock::{
 };
 pub use overflow::{is_context_overflow, is_recoverable_length};
 pub use provider::{
-    create_default_provider, create_mock_provider, create_provider, default_provider_endpoint,
-    AssistantMessageEventStream, Provider, ProviderRegistry,
+    builtin_providers, create_default_provider, create_mock_provider, create_provider,
+    default_provider_endpoint, AssistantMessageEventStream, Provider, ProviderRegistry,
 };
 pub use retry::{
     create_retrying_provider, is_retryable_assistant_error, retry_assistant_call, retry_delay_ms,

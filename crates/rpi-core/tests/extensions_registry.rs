@@ -82,8 +82,10 @@ async fn failing_extension_is_skipped_with_diagnostic_and_partial_tools_dropped(
         system_prompt: SystemPromptOptions::default(),
         limits: rpi_agent::TurnLimits::default(),
         stream_options: Default::default(),
-            subscribers: None,
+        subscribers: None,
         session_sink: None,
+        compactor: None,
+        seed_messages: Vec::new(),
     })
     .await
     .expect("init 失败不应阻断 session 创建(07 §8.5)");
