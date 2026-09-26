@@ -17,7 +17,7 @@ use std::io::{self, Stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::cursor::MoveTo;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::style::Print;
@@ -62,55 +62,24 @@ fn with_reader_paused<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Inline 视口终端应用。
-pub struct TuiApp {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+///
+/// backend 可替换:生产用 `CrosstermBackend<Stdout>`(默认类型参数),测试用
+/// `TestBackend`(`TuiApp::with_test_backend`)在内存 buffer 上断言屏幕内容。
+pub struct TuiApp<B: Backend = CrosstermBackend<Stdout>> {
+    terminal: Terminal<B>,
     /// 当前视口行数
     height: u16,
     /// 最近一次已知的屏幕尺寸(重建视口时用)
     rows: u16,
     cols: u16,
     finished: bool,
+    /// 屏幕尺寸查询(生产 = crossterm ioctl;TestBackend = 固定值)。
+    query_size: Box<dyn Fn() -> io::Result<(u16, u16)>>,
+    /// 是否恢复真实终端(Drop 兜底用;TestBackend 上跳过 raw mode/光标操作)。
+    restores_terminal: bool,
 }
 
-impl TuiApp {
-    /// 打开终端:raw mode + 光标锚定到底部 + Inline 视口。
-    pub fn open(viewport_height: u16) -> io::Result<Self> {
-        let dbg = std::env::var_os("RPI_TUI_DEBUG").is_some();
-        let mark = |stage: &str| {
-            if dbg {
-                eprintln!("[tui] {stage}");
-            }
-        };
-        mark("raw-mode enter");
-        enable_raw_mode()?;
-        mark("size query");
-        let mut out = io::stdout();
-        let (cols, rows) = size().unwrap_or((80, 24));
-        // 锚定不变量:视口占据屏幕底部,构造渲染器前先把光标滚到底
-        // (shell 提示符后启动时光标可能在屏幕中部,不锚定则首帧错位)
-        if rows > 1 {
-            mark("anchor newlines");
-            execute!(out, Print("\r\n".repeat((rows - 1) as usize)))?;
-            out.flush()?;
-        }
-        mark("terminal construct (cursor query)");
-        let terminal = Terminal::with_options(
-            CrosstermBackend::new(out),
-            TerminalOptions {
-                viewport: Viewport::Inline(viewport_height.max(1)),
-            },
-        )
-        .map_err(io::Error::other)?;
-        mark("terminal ok");
-        Ok(TuiApp {
-            terminal,
-            height: viewport_height.max(1),
-            rows,
-            cols,
-            finished: false,
-        })
-    }
-
+impl<B: Backend> TuiApp<B> {
     /// 终端显示宽度(列数)。
     pub fn width(&self) -> usize {
         self.cols as usize
@@ -148,7 +117,7 @@ impl TuiApp {
                     buf.set_line(0, i as u16, line, area.width);
                 }
             })
-            .map_err(io::Error::other)
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 
     /// 重绘底部视口;`lines` 不足 `height` 补空行,超出截断。
@@ -188,7 +157,66 @@ impl TuiApp {
                 }
             })
             .map(|_| ())
-            .map_err(io::Error::other)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    /// 终端尺寸同步(查询函数无 tty 时由具体实现决定;尺寸变化时的 ratatui
+    /// resize 含光标查询,须暂停读取线程)。
+    fn sync_size(&mut self) -> io::Result<()> {
+        let (cols, rows) = (self.query_size)()?;
+        if cols != self.cols || rows != self.rows {
+            let (c, r) = (cols, rows);
+            with_reader_paused(|| {
+                self.terminal
+                    .resize(Rect::new(0, 0, c, r))
+                    .map_err(|e| io::Error::other(e.to_string()))
+            })?;
+            self.cols = cols;
+            self.rows = rows;
+        }
+        Ok(())
+    }
+}
+
+impl TuiApp<CrosstermBackend<Stdout>> {
+    /// 打开终端:raw mode + 光标锚定到底部 + Inline 视口。
+    pub fn open(viewport_height: u16) -> io::Result<Self> {
+        let dbg = std::env::var_os("RPI_TUI_DEBUG").is_some();
+        let mark = |stage: &str| {
+            if dbg {
+                eprintln!("[tui] {stage}");
+            }
+        };
+        mark("raw-mode enter");
+        enable_raw_mode()?;
+        mark("size query");
+        let mut out = io::stdout();
+        let (cols, rows) = size().unwrap_or((80, 24));
+        // 锚定不变量:视口占据屏幕底部,构造渲染器前先把光标滚到底
+        // (shell 提示符后启动时光标可能在屏幕中部,不锚定则首帧错位)
+        if rows > 1 {
+            mark("anchor newlines");
+            execute!(out, Print("\r\n".repeat((rows - 1) as usize)))?;
+            out.flush()?;
+        }
+        mark("terminal construct (cursor query)");
+        let terminal = Terminal::with_options(
+            CrosstermBackend::new(out),
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport_height.max(1)),
+            },
+        )
+        .map_err(|e| io::Error::other(e.to_string()))?;
+        mark("terminal ok");
+        Ok(TuiApp {
+            terminal,
+            height: viewport_height.max(1),
+            rows,
+            cols,
+            finished: false,
+            query_size: Box::new(size),
+            restores_terminal: true,
+        })
     }
 
     /// 调整视口高度(编辑器增长、选择列表打开等)。
@@ -204,7 +232,7 @@ impl TuiApp {
             let extra = height - old;
             self.terminal
                 .insert_before(extra, |_buf| {})
-                .map_err(io::Error::other)?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
         }
         with_reader_paused(|| self.rebuild_terminal(height))
     }
@@ -231,19 +259,6 @@ impl TuiApp {
         self.draw_viewport(viewport, cursor)
     }
 
-    /// 终端尺寸同步(ioctl 查询无 tty 应答,安全;尺寸变化时的 ratatui
-    /// resize 含光标查询,须暂停读取线程)。
-    fn sync_size(&mut self) -> io::Result<()> {
-        let (cols, rows) = size()?;
-        if cols != self.cols || rows != self.rows {
-            let (c, r) = (cols, rows);
-            with_reader_paused(|| self.terminal.resize(Rect::new(0, 0, c, r)))?;
-            self.cols = cols;
-            self.rows = rows;
-        }
-        Ok(())
-    }
-
     /// 清掉当前视口区并按新高度重建 Terminal(光标锚定到新视口顶行)。
     fn rebuild_terminal(&mut self, height: u16) -> io::Result<()> {
         {
@@ -259,7 +274,7 @@ impl TuiApp {
                 viewport: Viewport::Inline(height),
             },
         )
-        .map_err(io::Error::other)?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
         self.height = height;
         Ok(())
     }
@@ -280,15 +295,17 @@ impl TuiApp {
     }
 }
 
-impl Drop for TuiApp {
+impl<B: Backend> Drop for TuiApp<B> {
     fn drop(&mut self) {
         // panic/提前返回路径兜底恢复终端(finish 幂等,Drop 只在未收尾时干活)
         if !self.finished {
-            let _ = disable_raw_mode();
-            let mut out = io::stdout();
-            let _ = execute!(out, MoveTo(0, self.rows.saturating_sub(self.height)));
-            let _ = execute!(out, Clear(ClearType::FromCursorDown));
-            let _ = out.flush();
+            if self.restores_terminal {
+                let _ = disable_raw_mode();
+                let mut out = io::stdout();
+                let _ = execute!(out, MoveTo(0, self.rows.saturating_sub(self.height)));
+                let _ = execute!(out, Clear(ClearType::FromCursorDown));
+                let _ = out.flush();
+            }
             self.finished = true;
         }
     }
@@ -296,8 +313,111 @@ impl Drop for TuiApp {
 
 #[cfg(test)]
 mod tests {
-    // 终端 I/O 逻辑(Inline 视口/重建/收尾)依赖真终端;结构性不变量
-    // (折行/截断/右对齐)由 text::、各组件的单测覆盖。
+    //! L2 屏幕级测试:TestBackend 上断言 commit_lines/draw_viewport 的最终
+    //! 屏幕效果(折行、截断、光标),不需要真终端。
+
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::CellWidth;
+    use ratatui::text::Line;
+
+    use super::TuiApp;
+
+    /// 构造绑定 TestBackend 的 TuiApp(跳过 raw mode/光标锚定等真实终端操作)。
+    fn test_app(cols: u16, rows: u16, viewport_height: u16) -> TuiApp<TestBackend> {
+        let backend = TestBackend::new(cols, rows);
+        let terminal = ratatui::Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Inline(viewport_height.max(1)),
+            },
+        )
+        .unwrap();
+        TuiApp {
+            terminal,
+            height: viewport_height.max(1),
+            rows,
+            cols,
+            finished: false,
+            query_size: Box::new(move || Ok((cols, rows))),
+            restores_terminal: false,
+        }
+    }
+
+    /// 把 TestBackend 当前 buffer 渲染成等宽文本行(便于断言)。
+    fn screen_lines(app: &TuiApp<TestBackend>) -> Vec<String> {
+        let buffer = app.terminal.backend().buffer();
+        let width = buffer.area.width as usize;
+        buffer
+            .content
+            .chunks(width)
+            .map(|cells| {
+                let mut line = String::new();
+                let mut skip = 0u16;
+                for cell in cells {
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    skip = cell.cell_width().saturating_sub(1);
+                    line.push_str(cell.symbol());
+                }
+                line
+            })
+            .collect()
+    }
+
+    fn screen_text(app: &TuiApp<TestBackend>) -> String {
+        screen_lines(app).join("\n")
+    }
+
     #[test]
-    fn placeholder() {}
+    fn committed_lines_land_above_viewport() {
+        let mut app = test_app(40, 10, 3);
+        app.commit_lines(&[Line::raw("第一行定稿"), Line::raw("第二行定稿")])
+            .unwrap();
+        app.draw_viewport(&[Line::raw("❯ 编辑器")], Some((4, 0)))
+            .unwrap();
+        // TestBackend 未做真实终端的光标锚定,视口位置不固定;
+        // 断言相对结构:commit 行按序落在视口上方。
+        let lines = screen_lines(&app);
+        let find = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.trim_end().starts_with(needle))
+                .unwrap_or_else(|| panic!("{needle} 应上屏: {lines:#?}"))
+        };
+        let (first, second, viewport) = (find("第一行定稿"), find("第二行定稿"), find("❯ 编辑器"));
+        assert!(first < second && second < viewport, "顺序: {lines:#?}");
+        // 视口共 3 行:首行是内容,其余为补空
+        for line in &lines[viewport + 1..viewport + 3] {
+            assert!(line.trim().is_empty(), "视口其余行应为空: {lines:#?}");
+        }
+        // 光标在视口首行、列 4
+        assert!(app.terminal.backend().cursor_visible());
+        assert_eq!(
+            app.terminal.backend().cursor_position(),
+            ratatui::layout::Position { x: 4, y: viewport as u16 }
+        );
+    }
+
+    #[test]
+    fn commit_wraps_lines_to_terminal_width() {
+        let mut app = test_app(10, 8, 2);
+        // 20 个半角字符在 10 列宽终端上折成两行
+        app.commit_lines(&[Line::raw("abcdefghij0123456789")]).unwrap();
+        app.draw_viewport(&[Line::raw("")], None).unwrap();
+        let lines = screen_lines(&app);
+        assert_eq!(lines[0], "abcdefghij");
+        assert_eq!(lines[1], "0123456789");
+    }
+
+    #[test]
+    fn draw_viewport_truncates_overlong_lines() {
+        let mut app = test_app(6, 6, 2);
+        app.draw_viewport(&[Line::raw("很长很长很长的一行")], None)
+            .unwrap();
+        let lines = screen_lines(&app);
+        // 视口首行被截断到 6 列(3 个 CJK 字符)
+        assert_eq!(lines[0], "很长很", "全屏: {:#?}", screen_lines(&app));
+    }
 }

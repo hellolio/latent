@@ -1,0 +1,10 @@
+[
+  {
+    "tool_calls": [
+      { "name": "read", "arguments": { "path": "note.txt" } }
+    ]
+  },
+  {
+    "text": "我已经读取了文件,内容确认完毕。"
+  }
+]

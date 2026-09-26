@@ -20,6 +20,7 @@
 | [08-modes-tui.md](08-modes-tui.md) | 四种运行模式、RPC 协议、TUI、周边包 | `packages/coding-agent/src/modes`、`packages/tui` 等 |
 | [09-wiring-and-rust.md](09-wiring-and-rust.md) | **模块接线机制(依赖倒置点、调用链、状态所有权)与 Rust 实现映射** | 全仓 |
 | [10-implementation-policy.md](10-implementation-policy.md) | **总体实现方针:crate 拆分规则、模块契约(工厂+trait+类型)、六接缝纪律、开发流程** | 全仓 |
+| [12-testing-standard.md](12-testing-standard.md) | **测试标准:L0-L3 分层(L3 为 pexpect 真终端 + 本地 mock LLM 的 E2E)、改动→必补测试映射** | `tests/e2e`、`crates/rpi-tui` |
 
 ## 建议阅读顺序
 
