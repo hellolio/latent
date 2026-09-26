@@ -1,0 +1,21 @@
+[package]
+name = "rpi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 依赖只有 rpi-ai/rpi-agent:rpi-session/rpi-tools/rpi-tui 是可选组件,
+# 由装配方(rpi-cli)经 trait 注入 —— 移除任一可选 crate,本 crate 照常编译
+# (docs/10-implementation-policy.md §1 可拆卸判据)。
+[dependencies]
+rpi-ai.workspace = true
+rpi-agent.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+rmcp.workspace = true

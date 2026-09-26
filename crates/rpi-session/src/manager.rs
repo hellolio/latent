@@ -1,0 +1,446 @@
+//! SessionManager(06 文档 §1):append-only JSONL 会话树。同一文件内分叉 =
+//! 移动 leaf 指针继续追加,零拷贝;压缩/上下文修改都是追加 entry,从不改写历史。
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use rpi_agent::{AgentMessage, Usage};
+
+use crate::entry::{
+    generate_id, ContextReplacement, Entry, SessionHeader, SessionTreeNode,
+};
+use crate::projection::{build_context_entries, build_session_projection, ModelRef, SessionProjection};
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("missing session header (first line must be a session header)")]
+    MissingHeader,
+    #[error("entry `{0}` not found")]
+    UnknownEntry(String),
+}
+
+struct State {
+    entries: Vec<Entry>,
+    by_id: HashMap<String, usize>,
+    leaf_id: Option<String>,
+}
+
+/// 会话管理器:JSONL 文件的唯一权威所有者(09 A4)。
+pub struct SessionManager {
+    path: Option<PathBuf>,
+    header: SessionHeader,
+    state: Mutex<State>,
+    /// 加载时跳过的损坏行数(边界:JSONL 损坏行不致命)
+    corrupt_lines: usize,
+}
+
+/// 工厂:传入路径即持久化会话(存在则加载续聊),`None` 为纯内存会话。
+pub fn create_session(path: Option<impl AsRef<Path>>) -> Result<Box<SessionManager>, SessionError> {
+    let cwd = std::env::current_dir().unwrap_or_default().display().to_string();
+    create_session_with(path, &cwd, None)
+}
+
+/// 工厂(带 cwd 与 parentSession):pi 的 NewSessionOptions。
+pub fn create_session_with(
+    path: Option<impl AsRef<Path>>,
+    cwd: &str,
+    parent_session: Option<&str>,
+) -> Result<Box<SessionManager>, SessionError> {
+    let path = path.map(|p| p.as_ref().to_path_buf());
+    let mut fresh_file = false;
+    if let Some(path) = &path {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        fresh_file = !path.exists();
+    }
+    let (header, entries, corrupt_lines) = match &path {
+        Some(path) if path.exists() => load_file(path)?,
+        _ => (SessionHeader::new(new_session_id(), cwd.to_string(), parent_session.map(str::to_string)), Vec::new(), 0),
+    };
+    // 新文件先落 header 首行(06 文档 §1.1)
+    if fresh_file {
+        if let Some(path) = &path {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            writeln!(file, "{}", serde_json::to_string(&header)?)?;
+        }
+    }
+
+    let by_id: HashMap<String, usize> =
+        entries.iter().enumerate().map(|(i, entry)| (entry.id().to_string(), i)).collect();
+    let leaf_id = entries.last().map(|entry| entry.id().to_string());
+
+    let manager = SessionManager {
+        path,
+        header,
+        state: Mutex::new(State { entries, by_id, leaf_id }),
+        corrupt_lines,
+    };
+    Ok(Box::new(manager))
+}
+
+fn new_session_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+/// 加载既有 JSONL:首行 header,其后每行一个 entry;损坏行跳过并计数。
+fn load_file(path: &Path) -> Result<(SessionHeader, Vec<Entry>, usize), SessionError> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut header: Option<SessionHeader> = None;
+    let mut entries = Vec::new();
+    let mut corrupt = 0usize;
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if header.is_none() {
+            let parsed: SessionHeader = serde_json::from_str(trimmed)?;
+            if parsed.kind != "session" {
+                return Err(SessionError::MissingHeader);
+            }
+            header = Some(parsed);
+            continue;
+        }
+        match serde_json::from_str::<Entry>(trimmed) {
+            Ok(entry) => entries.push(entry),
+            Err(_) => corrupt += 1,
+        }
+    }
+    header.map(|header| (header, entries, corrupt)).ok_or(SessionError::MissingHeader)
+}
+
+impl SessionManager {
+    pub fn header(&self) -> &SessionHeader {
+        &self.header
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.header.id
+    }
+
+    pub fn cwd(&self) -> &str {
+        &self.header.cwd
+    }
+
+    pub fn file_path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// 加载时跳过的损坏行数(0 = 干净)。
+    pub fn corrupt_lines(&self) -> usize {
+        self.corrupt_lines
+    }
+
+    /// 全部 entry(文件顺序的防御性拷贝)。
+    pub fn entries(&self) -> Vec<Entry> {
+        self.state.lock().unwrap().entries.clone()
+    }
+
+    pub fn get_entry(&self, id: &str) -> Option<Entry> {
+        let state = self.state.lock().unwrap();
+        state.by_id.get(id).map(|&i| state.entries[i].clone())
+    }
+
+    pub fn get_leaf_id(&self) -> Option<String> {
+        self.state.lock().unwrap().leaf_id.clone()
+    }
+
+    pub fn session_name(&self) -> Option<String> {
+        // 最新一条 session_info entry 生效
+        self.state
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Entry::SessionInfo { name, .. } => name.clone(),
+                _ => None,
+            })
+    }
+
+    /// 内部追加:分配 id/parentId,落索引,append-only 写文件。
+    fn append_entry(&self, mut entry: Entry) -> Result<String, SessionError> {
+        let mut state = self.state.lock().unwrap();
+        let id = generate_id(&|id| state.by_id.contains_key(id));
+        entry.set_parent(state.leaf_id.clone());
+        match &mut entry {
+            Entry::Message { id: entry_id, timestamp, .. }
+            | Entry::ThinkingLevelChange { id: entry_id, timestamp, .. }
+            | Entry::ModelChange { id: entry_id, timestamp, .. }
+            | Entry::Usage { id: entry_id, timestamp, .. }
+            | Entry::Compaction { id: entry_id, timestamp, .. }
+            | Entry::BranchSummary { id: entry_id, timestamp, .. }
+            | Entry::Custom { id: entry_id, timestamp, .. }
+            | Entry::CustomMessage { id: entry_id, timestamp, .. }
+            | Entry::ContextEdit { id: entry_id, timestamp, .. }
+            | Entry::Label { id: entry_id, timestamp, .. }
+            | Entry::SessionInfo { id: entry_id, timestamp, .. } => {
+                *entry_id = id.clone();
+                if *timestamp == 0 {
+                    *timestamp = rpi_agent::now_ms();
+                }
+            }
+        }
+        if let Some(path) = &self.path {
+            let json = serde_json::to_string(&entry)?;
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            // 单次 write_all:避免 write_fmt 拆分系统调用产生半行
+            let mut line = json.into_bytes();
+            line.push(b'\n');
+            file.write_all(&line)?;
+        }
+        let position = state.entries.len();
+        state.by_id.insert(id.clone(), position);
+        state.entries.push(entry);
+        state.leaf_id = Some(id.clone());
+        Ok(id)
+    }
+
+    pub fn append_message(&self, message: AgentMessage) -> Result<String, SessionError> {
+        self.append_entry(Entry::Message { id: String::new(), parent_id: None, message, timestamp: 0 })
+    }
+
+    pub fn append_thinking_level_change(&self, thinking_level: impl Into<String>) -> Result<String, SessionError> {
+        self.append_entry(Entry::ThinkingLevelChange {
+            id: String::new(),
+            parent_id: None,
+            thinking_level: thinking_level.into(),
+            timestamp: 0,
+        })
+    }
+
+    pub fn append_model_change(&self, provider: impl Into<String>, model_id: impl Into<String>) -> Result<String, SessionError> {
+        self.append_entry(Entry::ModelChange {
+            id: String::new(),
+            parent_id: None,
+            provider: provider.into(),
+            model_id: model_id.into(),
+            timestamp: 0,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_usage(
+        &self,
+        kind: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        usage: Usage,
+        note: Option<String>,
+    ) -> Result<String, SessionError> {
+        self.append_entry(Entry::Usage {
+            id: String::new(),
+            parent_id: None,
+            kind: kind.into(),
+            provider: provider.into(),
+            model: model.into(),
+            usage,
+            note,
+            timestamp: 0,
+        })
+    }
+
+    /// 追加压缩 entry(06 文档 §3.4):summary + firstKeptEntryId + tokensBefore,
+    /// 可选 systemMessage 快照;原 entry 保留在树中。
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_compaction(
+        &self,
+        summary: impl Into<String>,
+        first_kept_entry_id: impl Into<String>,
+        tokens_before: u64,
+        details: Option<serde_json::Value>,
+        usage: Option<Usage>,
+        from_hook: bool,
+        system_message: Option<AgentMessage>,
+    ) -> Result<String, SessionError> {
+        self.append_entry(Entry::Compaction {
+            id: String::new(),
+            parent_id: None,
+            summary: summary.into(),
+            first_kept_entry_id: first_kept_entry_id.into(),
+            tokens_before,
+            details,
+            usage,
+            from_hook: from_hook.then_some(true),
+            system_message,
+            timestamp: 0,
+        })
+    }
+
+    pub fn append_branch_summary(
+        &self,
+        from_id: impl Into<String>,
+        summary: impl Into<String>,
+        from_hook: bool,
+    ) -> Result<String, SessionError> {
+        self.append_entry(Entry::BranchSummary {
+            id: String::new(),
+            parent_id: None,
+            from_id: from_id.into(),
+            summary: summary.into(),
+            details: None,
+            usage: None,
+            from_hook: from_hook.then_some(true),
+            timestamp: 0,
+        })
+    }
+
+    pub fn append_custom(
+        &self,
+        custom_type: impl Into<String>,
+        data: Option<serde_json::Value>,
+    ) -> Result<String, SessionError> {
+        self.append_entry(Entry::Custom {
+            id: String::new(),
+            parent_id: None,
+            custom_type: custom_type.into(),
+            data,
+            timestamp: 0,
+        })
+    }
+
+    pub fn append_custom_message(
+        &self,
+        custom_type: impl Into<String>,
+        content: impl Into<String>,
+        details: Option<serde_json::Value>,
+        display: bool,
+    ) -> Result<String, SessionError> {
+        self.append_entry(Entry::CustomMessage {
+            id: String::new(),
+            parent_id: None,
+            custom_type: custom_type.into(),
+            content: content.into(),
+            details,
+            display,
+            timestamp: 0,
+        })
+    }
+
+    /// append-only 上下文修改(06 文档 §1.2):replacement=None 剔除 target。
+    pub fn append_context_edit(
+        &self,
+        target_id: impl Into<String>,
+        replacement: Option<ContextReplacement>,
+    ) -> Result<String, SessionError> {
+        self.append_entry(Entry::ContextEdit {
+            id: String::new(),
+            parent_id: None,
+            target_id: target_id.into(),
+            replacement,
+            timestamp: 0,
+        })
+    }
+
+    pub fn append_label(&self, target_id: impl Into<String>, label: Option<String>) -> Result<String, SessionError> {
+        self.append_entry(Entry::Label {
+            id: String::new(),
+            parent_id: None,
+            target_id: target_id.into(),
+            label,
+            timestamp: 0,
+        })
+    }
+
+    pub fn append_session_info(&self, name: Option<String>) -> Result<String, SessionError> {
+        self.append_entry(Entry::SessionInfo { id: String::new(), parent_id: None, name, timestamp: 0 })
+    }
+
+    /// 分支(06 文档 §1.3):把 leaf 指针移到树中较早节点继续追加 —— 同一文件
+    /// 内分叉,零拷贝。
+    pub fn branch(&self, branch_from_id: &str) -> Result<(), SessionError> {
+        let mut state = self.state.lock().unwrap();
+        if !state.by_id.contains_key(branch_from_id) {
+            return Err(SessionError::UnknownEntry(branch_from_id.to_string()));
+        }
+        state.leaf_id = Some(branch_from_id.to_string());
+        Ok(())
+    }
+
+    /// 活动分支(leaf→root 路径)的 entry 拷贝。
+    pub fn branch_entries(&self) -> Vec<Entry> {
+        let leaf = self.state.lock().unwrap().leaf_id.clone();
+        crate::projection::build_session_path(&self.state.lock().unwrap().entries, leaf.as_deref())
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// 投影(①②③ 全流程)。
+    pub fn projection(&self) -> SessionProjection {
+        let leaf = self.state.lock().unwrap().leaf_id.clone();
+        build_session_projection(&self.state.lock().unwrap().entries, leaf.as_deref())
+    }
+
+    /// 压缩感知的上下文 entry(①②)。
+    pub fn context_entries(&self) -> Vec<Entry> {
+        let leaf = self.state.lock().unwrap().leaf_id.clone();
+        build_context_entries(&self.state.lock().unwrap().entries, leaf.as_deref())
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// 模型引用(设置态投影)。
+    pub fn model_ref(&self) -> Option<ModelRef> {
+        self.projection().model
+    }
+
+    /// getTree():防御性拷贝的树(含 resolved label)。
+    pub fn get_tree(&self) -> Vec<SessionTreeNode> {
+        let state = self.state.lock().unwrap();
+        // label 解析:label entry 按 targetId 生效(后写覆盖)
+        let mut labels: HashMap<String, (String, i64)> = HashMap::new();
+        for entry in &state.entries {
+            if let Entry::Label { target_id, label: Some(label), timestamp, .. } = entry {
+                labels.insert(target_id.clone(), (label.clone(), *timestamp));
+            }
+        }
+        let labeled = |entry: &Entry| {
+            labels
+                .get(entry.id())
+                .map(|(label, ts)| (Some(label.clone()), Some(*ts)))
+                .unwrap_or((None, None))
+        };
+
+        // 逆序两阶段构建:children 先于 parent 定型,parent 槽位保持可访问;
+        // parent 不在文件中(损坏行被跳过等)时按根处理,不 panic
+        let index: HashMap<&str, usize> =
+            state.entries.iter().enumerate().map(|(i, entry)| (entry.id(), i)).collect();
+        let mut nodes: Vec<Option<SessionTreeNode>> = state
+            .entries
+            .iter()
+            .map(|entry| {
+                let (label, label_timestamp) = labeled(entry);
+                Some(SessionTreeNode { entry: entry.clone(), children: Vec::new(), label, label_timestamp })
+            })
+            .collect();
+        let mut roots: Vec<SessionTreeNode> = Vec::new();
+        for i in (0..state.entries.len()).rev() {
+            let mut node = nodes[i].take().expect("each entry yields one node");
+            node.children.reverse(); // 逆序挂接恢复文件顺序
+            match state.entries[i].parent_id().and_then(|pid| index.get(pid).copied()) {
+                Some(parent) => match nodes[parent].as_mut() {
+                    Some(parent_node) => parent_node.children.push(node),
+                    // 损坏数据:parentId 指向文件中更靠后的 entry(槽位已被消费)→ 按根处理
+                    None => roots.push(node),
+                },
+                None => roots.push(node),
+            }
+        }
+        roots.reverse();
+        roots
+    }
+}

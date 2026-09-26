@@ -1,0 +1,22 @@
+[package]
+name = "rpi-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rpi"
+path = "src/main.rs"
+
+[dependencies]
+rpi-ai.workspace = true
+rpi-agent.workspace = true
+rpi-core.workspace = true
+rpi-session.workspace = true
+rpi-tools.workspace = true
+rpi-tui.workspace = true
+async-trait.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std"] }

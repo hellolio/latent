@@ -1,0 +1,20 @@
+[package]
+name = "rpi-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rpi-agent.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+regex.workspace = true
+ignore.workspace = true
+
+[features]
+default = ["process"]
+process = ["tokio/process"]

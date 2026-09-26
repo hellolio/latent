@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rpi-ai",
+    "crates/rpi-agent",
+    "crates/rpi-session",
+    "crates/rpi-tools",
+    "crates/rpi-core",
+    "crates/rpi-tui",
+    "crates/rpi-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# 内部 crate —— 依赖方向见 docs/10-implementation-policy.md §1,禁止反向/同层依赖
+rpi-ai = { path = "crates/rpi-ai" }
+rpi-agent = { path = "crates/rpi-agent" }
+rpi-session = { path = "crates/rpi-session" }
+rpi-tools = { path = "crates/rpi-tools" }
+rpi-core = { path = "crates/rpi-core" }
+rpi-tui = { path = "crates/rpi-tui" }
+
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "process"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v7", "serde"] }
+
+# rpi-ai 真实适配器所需(M1):HTTP/SSE、错误文案正则分类、流式事件构造
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+regex = "1"
+async-stream = "0.3"
+bytes = "1"
+
+# rpi-tools 所需(M4):gitignore 感知的目录遍历(grep/find 后端,05 文档)
+ignore = "0.4"
+
+# rpi-core 扩展机制(M5,07 §8):进程外 MCP 扩展,rmcp 钉死精确版本
+# (07 §8.7 风险条款:新 spec 支持为 beta → pin 精确版本 + in-memory 测试锁行为)
+rmcp = { version = "=3.4.1", features = ["client", "server", "elicitation", "transport-async-rw", "transport-child-process"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
