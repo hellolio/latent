@@ -206,6 +206,8 @@ pub fn session_entry_to_context_messages(entry: &Entry) -> Vec<AgentMessage> {
             });
             messages
         }
+        // context_ref 是提交上下文的外部快照引用(审计用),显式不进模型上下文
+        Entry::ContextRef { .. } => Vec::new(),
         _ => Vec::new(),
     }
 }

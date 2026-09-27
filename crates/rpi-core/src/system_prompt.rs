@@ -240,6 +240,20 @@ mod tests {
         assert!(matches!(state, SystemPromptState::Forced(_)));
     }
 
+    /// 外置提示词语义(cli system-prompt.md):custom_prompt 只换身份句,
+    /// cwd/tools 等动态节保留自动注入。
+    #[test]
+    fn custom_prompt_replaces_preamble_keeps_dynamic_sections() {
+        let mut opts = options();
+        opts.custom_prompt = Some("You are my custom agent.".into());
+        let text = build_system_prompt_state(&opts).unwrap().to_text();
+        assert!(text.starts_with("You are my custom agent."), "{text}");
+        assert!(!text.contains("You are rpi"));
+        assert!(text.contains("<tools>\nAvailable tools:"), "{text}");
+        assert!(text.contains("<cwd>\nWorking directory: /tmp/proj"), "{text}");
+        assert!(text.contains("<rules>"), "{text}");
+    }
+
     #[test]
     fn diff_produces_replace_and_delete() {
         let mut old: SystemPromptSections = BTreeMap::new();

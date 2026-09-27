@@ -49,10 +49,41 @@ struct SettingsFile {
     /// T10:shell 命令统一前缀(settings 提供,如 `commandPrefix: "timeout 300"`)
     #[serde(rename = "commandPrefix", alias = "command_prefix", default)]
     command_prefix: Option<String>,
+    /// 上下文快照开关(`contextSnapshot`):true = 每次模型请求落 context_ref
+    /// 快照;未配置 = 关闭(不产生快照)
+    #[serde(rename = "contextSnapshot", alias = "context_snapshot", default)]
+    context_snapshot: Option<bool>,
+    /// 激活工具集(`tools`):名字列表,如 `["bash"]`;未配置 = 全部激活;
+    /// **空数组 `[]` = 显式不激活任何工具**
+    #[serde(rename = "tools", alias = "active_tools", default)]
+    tools: Option<Vec<String>>,
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// 纯函数面(可测):按 项目 → 全局 顺序读 `.rpi/settings.json`,
+/// 解析失败的文件跳过。
+fn read_settings_files(cwd: Option<&Path>, home: Option<&Path>) -> Vec<SettingsFile> {
+    let mut paths = Vec::new();
+    if let Some(cwd) = cwd {
+        paths.push(cwd.join(".rpi/settings.json"));
+    }
+    if let Some(home) = home {
+        paths.push(home.join(".rpi/settings.json"));
+    }
+    let mut settings = Vec::new();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match serde_json::from_str::<SettingsFile>(&text) {
+            Ok(parsed) => settings.push(parsed),
+            Err(_) => continue,
+        }
+    }
+    settings
 }
 
 /// T10:读取 shell 命令前缀,项目 settings 优先于全局 settings。
@@ -65,27 +96,101 @@ pub fn load_shell_command_prefix() -> Option<String> {
 /// 纯函数面(可测):按 项目 → 全局 顺序读 `.rpi/settings.json` 的 commandPrefix,
 /// 空白值跳过,首个非空生效。
 fn shell_command_prefix_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<String> {
+    for settings in read_settings_files(cwd, home) {
+        if let Some(prefix) = settings.command_prefix {
+            if !prefix.trim().is_empty() {
+                return Some(prefix);
+            }
+        }
+    }
+    None
+}
+
+/// 上下文快照开关(`contextSnapshot`):项目 settings 优先于全局;
+/// 未配置 = false(默认关,不产生快照)。
+pub fn load_context_snapshot_enabled() -> bool {
+    let cwd = std::env::current_dir().ok();
+    let home = dirs_home();
+    context_snapshot_enabled_from(cwd.as_deref(), home.as_deref()).unwrap_or(false)
+}
+
+/// 纯函数面(可测):首个配置了 contextSnapshot 的 settings 生效。
+fn context_snapshot_enabled_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<bool> {
+    read_settings_files(cwd, home)
+        .into_iter()
+        .find_map(|settings| settings.context_snapshot)
+}
+
+/// 激活工具集(settings `tools`):项目 settings 优先于全局,首个配置生效;
+/// 条目去首尾空白、丢空项。**键未配置 = None(全部激活);键配置了(即使清空后
+/// 为空)= Some(空)= 显式不激活任何工具**。
+pub fn load_active_tool_names() -> Option<Vec<String>> {
+    let cwd = std::env::current_dir().ok();
+    let home = dirs_home();
+    active_tool_names_from(cwd.as_deref(), home.as_deref())
+}
+
+/// 纯函数面(可测)。
+fn active_tool_names_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<Vec<String>> {
+    let configured = read_settings_files(cwd, home)
+        .into_iter()
+        .find_map(|settings| settings.tools)?;
+    Some(
+        configured
+            .into_iter()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect(),
+    )
+}
+
+/// 校验并解析激活工具集:配置的名字必须存在于候选工具(含扩展工具)中,
+/// 否则报错列出可用名单;返回按配置顺序的名字列表。
+fn resolve_active_tools(
+    configured: &[String],
+    tools: &[Arc<dyn rpi_agent::Tool>],
+) -> Result<Vec<String>, String> {
+    let known: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+    for name in configured {
+        if !known.contains(&name.as_str()) {
+            return Err(format!(
+                "settings `tools` 配置了未知工具 `{name}`(可用: {})",
+                known.join(", ")
+            ));
+        }
+    }
+    Ok(configured.to_vec())
+}
+
+/// 系统提示词外置文件(用户可编辑):项目 `.rpi/system-prompt.md` → 全局
+/// `~/.rpi/system-prompt.md`,首个存在且非空的文件生效。内容**替换身份句
+/// (preamble)**,其余 section(`<cwd>`、`<tools>`、`<rules>`)仍自动注入;
+/// 未配置 = 用内置默认身份句。仅在程序启动/新建会话(装配期)读取一次,
+/// 会话中途修改文件不生效。
+pub fn load_system_prompt_override() -> Option<String> {
+    let cwd = std::env::current_dir().ok();
+    let home = dirs_home();
+    system_prompt_override_from(cwd.as_deref(), home.as_deref())
+}
+
+/// 纯函数面(可测):按 项目 → 全局 找 system-prompt.md,空白文件视为未配置。
+fn system_prompt_override_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<String> {
     let mut paths = Vec::new();
     if let Some(cwd) = cwd {
-        paths.push(cwd.join(".rpi/settings.json"));
+        paths.push(cwd.join(".rpi/system-prompt.md"));
     }
     if let Some(home) = home {
-        paths.push(home.join(".rpi/settings.json"));
+        paths.push(home.join(".rpi/system-prompt.md"));
     }
     for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        match serde_json::from_str::<SettingsFile>(&text) {
-            Ok(settings) => {
-                if let Some(prefix) = settings.command_prefix {
-                    if !prefix.trim().is_empty() {
-                        return Some(prefix);
-                    }
-                }
-            }
-            Err(_) => continue,
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
         }
+        return Some(trimmed.to_string());
     }
     None
 }
@@ -118,6 +223,15 @@ pub struct BuildOptions {
     pub spawn_hook: Option<Arc<dyn rpi_tools::ShellSpawnHook>>,
     /// 会话存储策略(CLI 默认文件持久化,`--continue` 续聊)
     pub session_store: SessionStore,
+    /// 上下文快照开关(context_ref):None = 关;Some(true/false) = 显式指定。
+    /// CLI 入口(main)负责把 settings 的 `contextSnapshot` 解析成此字段 ——
+    /// build_session 不直接读用户 settings,测试不依赖本机配置。
+    pub context_snapshot: Option<bool>,
+    /// 激活工具集覆盖:None = 全部激活;Some(list) = 显式指定(空列表 = 不激活
+    /// 任何工具),名字须存在于候选工具。CLI 入口(main)负责把 settings 的
+    /// `tools` 键解析成此字段 —— build_session 不直接读用户 settings,测试
+    /// 不依赖本机配置。
+    pub active_tools: Option<Vec<String>>,
 }
 
 /// T9:PI_* 会话环境快照闭包。装配期建共享 cell(`Weak<AgentSession>`),
@@ -178,6 +292,25 @@ pub fn parse_thinking_level(name: &str) -> Option<rpi_ai::ThinkingLevel> {
     }
 }
 
+/// 从用户 settings 解析出的会话运行期开关。装配层(`build_session`)不直接读
+/// 用户 settings —— CLI 入口(main)解析一次后显式传入,测试/嵌入方自行构造,
+/// 行为不依赖本机配置文件。
+#[derive(Debug, Clone, Default)]
+pub struct SessionSettings {
+    /// settings `contextSnapshot`(默认关)
+    pub context_snapshot: bool,
+    /// settings `tools`:None = 全部激活;Some(空) = 不激活任何工具
+    pub active_tools: Option<Vec<String>>,
+}
+
+/// CLI 入口用:按 项目 → 全局 顺序解析 settings 的运行期开关。
+pub fn load_session_settings() -> SessionSettings {
+    SessionSettings {
+        context_snapshot: load_context_snapshot_enabled(),
+        active_tools: load_active_tool_names(),
+    }
+}
+
 /// 共享装配:扩展连接失败不阻断(诊断打 stderr,07 §8.5)。
 pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -188,6 +321,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         extension_specs,
         spawn_hook,
         session_store,
+        context_snapshot,
+        active_tools,
     } = options;
 
     // 扩展:settings → spawn → 总线;连接失败 = 诊断 + 跳过(绝不击穿宿主)
@@ -213,9 +348,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             bus.clone(),
         ))
     };
-
     // 会话树管理器先于工具装配创建:T9 的 PI_* 环境闭包需要读 session id/file。
-    // 默认文件持久化(`~/.rpi/sessions/<session-id>.jsonl`),Memory 仅测试用
+    // 默认文件持久化(`~/.rpi/sessions/<项目前缀>__<session-id>.jsonl`),Memory 仅测试用
     let session_manager: Arc<rpi_session::SessionManager> = match &session_store {
         SessionStore::Memory => rpi_session::create_session(None::<String>)
             .map_err(|e| e.to_string())?
@@ -228,6 +362,22 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         SessionStore::Resume { file } => rpi_session::create_session(Some(file))
             .map_err(|e| e.to_string())?
             .into(),
+    };
+    // 上下文快照(context_ref):调用方显式开启(main 从 settings `contextSnapshot`
+    // 解析)才装配 —— 经 `StreamOptions.on_payload` 观测**发送前的原始请求体**
+    // (第一手),原样落盘到 session 旁 .ctx 目录 + context_ref entry。默认关,
+    // 不装配 = 零开销。内存会话即使开启也在 manager 内部跳过
+    let stream_options = if context_snapshot.unwrap_or(false) {
+        let manager = session_manager.clone();
+        let mut stream_options = rpi_ai::StreamOptions::default();
+        stream_options.on_payload = Some(Arc::new(move |body: &mut serde_json::Value| {
+            if let Err(error) = manager.append_context_snapshot(body) {
+                eprintln!("[rpi] context snapshot append failed: {error}");
+            }
+        }));
+        stream_options
+    } else {
+        rpi_ai::StreamOptions::default()
     };
 
     // transcript 统一:resume 时从 Session projection 回填初始转录(source of
@@ -274,6 +424,12 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         provider: provider.clone(),
         settings: rpi_session::CompactionSettings::default(),
     });
+    // 激活工具集:调用方显式传入(main 从 settings `tools` 解析),未传 = 全部;
+    // 配置了未知工具名直接报错(配置错误要显式暴露)
+    let active_tool_names = match active_tools {
+        None => None,
+        Some(names) => Some(resolve_active_tools(&names, &tools)?),
+    };
     let session = Arc::new(
         create_agent_session(AgentSessionConfig {
             provider,
@@ -282,13 +438,17 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             ui,
             extensions: rpi_core::ExtensionRegistry::default(),
             tools,
-            active_tool_names: None,
+            active_tool_names,
             system_prompt: SystemPromptOptions {
                 cwd: Some(cwd.display().to_string()),
+                // 用户外置提示词(.rpi/system-prompt.md,项目→全局):配置了才
+                // 加载,替换身份句(preamble);<cwd>/<tools>/<rules> 仍自动注入。
+                // 装配期读一次,会话中途修改不生效
+                custom_prompt: load_system_prompt_override(),
                 ..Default::default()
             },
             limits: rpi_agent::TurnLimits::default(),
-            stream_options: Default::default(),
+            stream_options,
             session_sink: Some(Arc::new(SessionManagerSink(session_manager.clone()))),
             seed_messages,
             compactor: Some(compactor),
@@ -337,6 +497,8 @@ pub struct SessionRequest {
     pub extension_specs: Vec<McpServerSpec>,
     pub extra_subscriber: Option<SessionSharedSubscriber>,
     pub session_store: SessionStore,
+    /// 运行期开关(main 从 settings 解析;测试用 Default)
+    pub settings: SessionSettings,
 }
 
 pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
@@ -347,6 +509,8 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         extension_specs: request.extension_specs,
         spawn_hook: None,
         session_store: request.session_store,
+        context_snapshot: Some(request.settings.context_snapshot),
+        active_tools: request.settings.active_tools,
     })
     .await?;
 
@@ -370,7 +534,6 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
 /// 拆卸 rpi-session 时删除本结构体即可,core 与其余 crate 不受影响。
 /// transcript 统一:消息 / usage / 模型与思考级别变更全部落盘。
 struct SessionManagerSink(Arc<rpi_session::SessionManager>);
-
 #[async_trait]
 impl SessionSink for SessionManagerSink {
     async fn append(&self, message: &rpi_agent::AgentMessage) -> Result<(), String> {
@@ -586,11 +749,97 @@ mod tests {
             std::fs::create_dir_all(self.0.join(".rpi")).unwrap();
             std::fs::write(self.0.join(".rpi/settings.json"), text).unwrap();
         }
+        fn write_file(&self, relative: &str, text: &str) {
+            let path = self.0.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
     }
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    // ---- contextSnapshot 开关(默认关) ----
+
+    #[test]
+    fn context_snapshot_unset_yields_none_and_configured_wins() {
+        let project = TempDir::new("ctx_unset");
+        assert_eq!(
+            context_snapshot_enabled_from(Some(&project.0), None),
+            None,
+            "未配置 = None(默认关)"
+        );
+        project.write_settings(r#"{"contextSnapshot": true}"#);
+        assert_eq!(context_snapshot_enabled_from(Some(&project.0), None), Some(true));
+        project.write_settings(r#"{"contextSnapshot": false}"#);
+        assert_eq!(
+            context_snapshot_enabled_from(Some(&project.0), None),
+            Some(false),
+            "显式 false 也生效"
+        );
+    }
+
+    #[test]
+    fn context_snapshot_project_wins_over_global_and_bad_json_skipped() {
+        let project = TempDir::new("ctx_prio");
+        let global = TempDir::new("ctx_prio_global");
+        global.write_settings(r#"{"contextSnapshot": true}"#);
+        assert_eq!(
+            context_snapshot_enabled_from(Some(&project.0), Some(&global.0)),
+            Some(true),
+            "项目未配置时回退全局"
+        );
+        project.write_settings("{not json");
+        assert_eq!(
+            context_snapshot_enabled_from(Some(&project.0), Some(&global.0)),
+            Some(true),
+            "项目坏 JSON 跳过,继续看全局"
+        );
+        project.write_settings(r#"{"contextSnapshot": false}"#);
+        assert_eq!(
+            context_snapshot_enabled_from(Some(&project.0), Some(&global.0)),
+            Some(false),
+            "项目显式 false 优先于全局 true"
+        );
+    }
+
+    // ---- 系统提示词外置文件(.rpi/system-prompt.md) ----
+
+    #[test]
+    fn system_prompt_override_unset_yields_none() {
+        let project = TempDir::new("sp_unset");
+        assert_eq!(
+            system_prompt_override_from(Some(&project.0), None),
+            None,
+            "未配置 = None(用内置默认提示词)"
+        );
+    }
+
+    #[test]
+    fn system_prompt_override_project_wins_global_fallback_blank_skipped() {
+        let project = TempDir::new("sp_prio");
+        let global = TempDir::new("sp_prio_global");
+        global.write_file(".rpi/system-prompt.md", "global prompt");
+        assert_eq!(
+            system_prompt_override_from(Some(&project.0), Some(&global.0)),
+            Some("global prompt".into()),
+            "项目无文件时回退全局"
+        );
+        // 空白文件 = 未配置,继续看全局
+        project.write_file(".rpi/system-prompt.md", "   \n\t");
+        assert_eq!(
+            system_prompt_override_from(Some(&project.0), Some(&global.0)),
+            Some("global prompt".into()),
+            "项目空白文件跳过"
+        );
+        project.write_file(".rpi/system-prompt.md", "project prompt\n");
+        assert_eq!(
+            system_prompt_override_from(Some(&project.0), Some(&global.0)),
+            Some("project prompt".into()),
+            "项目文件优先且去除首尾空白"
+        );
     }
 
     #[test]
@@ -632,6 +881,90 @@ mod tests {
     fn missing_settings_yields_none() {
         let project = TempDir::new("none");
         assert_eq!(shell_command_prefix_from(Some(&project.0), None), None);
+    }
+
+    // ---- 激活工具集(settings `tools`) ----
+
+    #[test]
+    fn active_tools_unset_yields_none_and_project_wins() {
+        let project = TempDir::new("tools_unset");
+        assert_eq!(
+            active_tool_names_from(Some(&project.0), None),
+            None,
+            "键未配置 = None(全部激活)"
+        );
+        // 配置了但清空后为空 = 显式不激活任何工具
+        project.write_settings(r#"{"tools": []}"#);
+        assert_eq!(
+            active_tool_names_from(Some(&project.0), None),
+            Some(Vec::<String>::new()),
+            "空数组 = 不激活任何工具"
+        );
+        project.write_settings(r#"{"tools": ["", "  "]}"#);
+        assert_eq!(
+            active_tool_names_from(Some(&project.0), None),
+            Some(Vec::<String>::new()),
+            "全空白条目 = 显式不激活"
+        );
+        project.write_settings(r#"{"tools": [" bash "]}"#);
+        assert_eq!(
+            active_tool_names_from(Some(&project.0), None),
+            Some(vec!["bash".to_string()]),
+            "条目去首尾空白"
+        );
+    }
+
+    #[test]
+    fn active_tools_project_wins_over_global() {
+        let project = TempDir::new("tools_prio");
+        let global = TempDir::new("tools_prio_global");
+        global.write_settings(r#"{"tools": ["read", "write"]}"#);
+        assert_eq!(
+            active_tool_names_from(Some(&project.0), Some(&global.0)),
+            Some(vec!["read".to_string(), "write".to_string()]),
+            "项目未配置时回退全局"
+        );
+        project.write_settings(r#"{"tools": ["bash"]}"#);
+        assert_eq!(
+            active_tool_names_from(Some(&project.0), Some(&global.0)),
+            Some(vec!["bash".to_string()]),
+            "项目配置优先于全局"
+        );
+    }
+
+    #[test]
+    fn resolve_active_tools_validates_names() {
+        struct DummyTool(&'static str);
+        #[async_trait]
+        impl rpi_agent::Tool for DummyTool {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _call: rpi_agent::ToolCall,
+                _cancel: tokio_util::sync::CancellationToken,
+                _updater: &dyn rpi_agent::ToolUpdater,
+            ) -> Result<rpi_agent::ToolOutput, rpi_agent::ToolError> {
+                unimplemented!()
+            }
+        }
+        let tools: Vec<Arc<dyn rpi_agent::Tool>> = vec![
+            Arc::new(DummyTool("read")),
+            Arc::new(DummyTool("bash")),
+            Arc::new(DummyTool("edit")),
+            Arc::new(DummyTool("write")),
+        ];
+        assert_eq!(
+            resolve_active_tools(&["bash".to_string()], &tools).unwrap(),
+            vec!["bash".to_string()]
+        );
+        let error = resolve_active_tools(&["bask".to_string()], &tools).unwrap_err();
+        assert!(error.contains("未知工具 `bask`"), "{error}");
+        assert!(error.contains("read, bash, edit, write"), "{error}");
     }
 
     // ---- transcript 统一:sink 扩展 entry + 统一 compaction ----

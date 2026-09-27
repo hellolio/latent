@@ -24,7 +24,7 @@ pub use entry::{
 };
 pub use manager::{
     create_session, create_session_in_dir, create_session_with, find_latest_session_file,
-    SessionError, SessionManager,
+    project_prefix, SessionError, SessionManager,
 };
 pub use projection::{
     build_context_entries, build_session_context, build_session_path, build_session_projection,
@@ -115,5 +115,109 @@ mod tests {
         assert_eq!(session.corrupt_lines(), 2, "损坏行跳过并计数");
         assert_eq!(session.entries().len(), 1);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    // ---- 分项目管理:文件名项目前缀 ----
+
+    #[test]
+    fn project_prefix_encodes_cwd_for_filenames() {
+        assert_eq!(
+            project_prefix("/Users/kin/Documents/10source/rpi"),
+            "Users-kin-Documents-10source-rpi"
+        );
+        // 非法字符 → _,首尾 - 去除
+        assert_eq!(project_prefix("/a b:c/"), "a_b_c");
+        // 根路径回退
+        assert_eq!(project_prefix("/"), "session");
+        // 中文等非 ASCII 保留
+        assert_eq!(project_prefix("/home/项目"), "home-项目");
+        // 超长截断(按 char 边界)
+        let deep = format!("/{}", "x".repeat(300));
+        assert_eq!(project_prefix(&deep).chars().count(), 100);
+    }
+
+    #[test]
+    fn create_session_in_dir_uses_project_prefix_filename() {
+        let dir = std::env::temp_dir().join(format!(
+            "rpi-session-prefix-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let cwd = "/Users/kin/Documents/10source/rpi";
+        let session = create_session_in_dir(&dir, cwd, None).unwrap();
+        let file_name = session
+            .file_path()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            file_name.starts_with("Users-kin-Documents-10source-rpi__"),
+            "文件名应以项目前缀开头: {file_name}"
+        );
+        assert!(file_name.ends_with(".jsonl"));
+        // header.cwd 仍是完整路径(--continue 匹配依据)
+        assert_eq!(session.cwd(), cwd);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- 上下文快照:context_ref entry + .ctx 目录 ----
+
+    #[test]
+    fn context_snapshot_writes_file_and_entry_and_stays_out_of_context() {
+        let path = std::env::temp_dir().join(format!(
+            "rpi-session-ctxref-{}__.jsonl",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let session = create_session(Some(&path)).unwrap();
+        session.append_message(AgentMessage::user("问题")).unwrap();
+
+        // 原始请求体(on_payload 观测的第一手数据)
+        let body = serde_json::json!({
+            "model": "glm-5.3-flash",
+            "messages": [{"role": "system", "content": "You are hart"}, {"role": "user", "content": "问题"}],
+        });
+        let entry_id = session
+            .append_context_snapshot(&body)
+            .unwrap()
+            .expect("文件会话应记录快照");
+
+        // entry 已落盘,path 指向旁路 .ctx 目录下的快照文件
+        let entry = session.get_entry(&entry_id).unwrap();
+        let snapshot_path = match &entry {
+            Entry::ContextRef { path, .. } => path.clone(),
+            other => panic!("应为 context_ref entry: {other:?}"),
+        };
+        let snapshot_path = std::path::Path::new(&snapshot_path);
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            snapshot_path.parent().unwrap(),
+            path.parent().unwrap().join(format!("{stem}.ctx")),
+            "快照在 session 文件旁 <stem>.ctx/ 目录"
+        );
+        // 第一手:文件内容与请求体原样一致
+        let content = std::fs::read_to_string(snapshot_path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(value, body, "快照应原样保存请求体");
+
+        // 核心回归:context_ref 不进模型上下文(重建结果与没有它时一致)
+        let messages = session.projection().messages;
+        assert_eq!(messages.len(), 1, "仅 user 消息进入上下文");
+        assert!(matches!(messages[0], AgentMessage::User { .. }));
+        // serde roundtrip
+        let parsed: Entry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(parsed, entry);
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir_all(snapshot_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn context_snapshot_skipped_for_memory_sessions() {
+        let session = create_session(None::<String>).unwrap();
+        let body = serde_json::json!({"messages": []});
+        let result = session.append_context_snapshot(&body).unwrap();
+        assert!(result.is_none(), "内存会话无文件,跳过快照");
+        assert!(session.entries().is_empty());
     }
 }

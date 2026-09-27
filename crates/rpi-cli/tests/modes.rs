@@ -23,6 +23,8 @@ async fn build_with(provider: Arc<ScriptedProvider>) -> rpi_cli::assembly::Built
         extension_specs: Vec::new(),
         spawn_hook: None,
         session_store: rpi_cli::assembly::SessionStore::Memory,
+        context_snapshot: None,
+        active_tools: None,
     })
     .await
     .expect("build_session")
@@ -397,6 +399,7 @@ async fn print_mode_runs_one_prompt_to_completion() {
         "hello".into(),
         Vec::new(),
         rpi_cli::assembly::SessionStore::Memory,
+        Default::default(),
     )
     .await
     .expect("print run");
@@ -461,6 +464,25 @@ async fn build_with_store(
     provider: Arc<ScriptedProvider>,
     store: rpi_cli::assembly::SessionStore,
 ) -> rpi_cli::assembly::BuiltSession {
+    build_with_snapshot(provider, store, Some(false)).await
+}
+
+/// `context_snapshot`:Some = 显式指定快照开关(None = 按 settings,测试环境
+/// 不可控,故测试一律显式传入)。`active_tools`:Some = 显式激活工具集。
+async fn build_with_snapshot(
+    provider: Arc<ScriptedProvider>,
+    store: rpi_cli::assembly::SessionStore,
+    context_snapshot: Option<bool>,
+) -> rpi_cli::assembly::BuiltSession {
+    build_with_tools(provider, store, context_snapshot, None).await
+}
+
+async fn build_with_tools(
+    provider: Arc<ScriptedProvider>,
+    store: rpi_cli::assembly::SessionStore,
+    context_snapshot: Option<bool>,
+    active_tools: Option<Vec<String>>,
+) -> rpi_cli::assembly::BuiltSession {
     build_session(BuildOptions {
         provider,
         model: test_model(),
@@ -468,6 +490,8 @@ async fn build_with_store(
         extension_specs: Vec::new(),
         spawn_hook: None,
         session_store: store,
+        context_snapshot,
+        active_tools,
     })
     .await
     .expect("build_session")
@@ -488,7 +512,7 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
     let dir = std::env::temp_dir().join(format!("rpi_sessions_it_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
-    let session_id = {
+    let (session_id, file) = {
         let provider = scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]);
         let built = build_with_store(
             provider,
@@ -499,20 +523,24 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         let session_id = manager.session_id().to_string();
         built.session.prompt("你好").await.expect("prompt");
         built.session.wait_idle().await;
-        // 文件名即 session id,header + user/assistant 已落盘
-        let file = dir.join(format!("{session_id}.jsonl"));
+        // 文件名 = `<项目前缀>__<session-id>.jsonl`,header + user/assistant 已落盘
+        let file = manager.file_path().unwrap().to_path_buf();
+        let file_name = file.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            file_name.ends_with(&format!("__{session_id}.jsonl")),
+            "文件名应带项目前缀: {file_name}"
+        );
         assert!(file.exists(), "session 文件应落盘: {}", file.display());
         let content = std::fs::read_to_string(&file).unwrap();
         let header: rpi_session::SessionHeader =
             serde_json::from_str(content.lines().next().unwrap()).unwrap();
         assert_eq!(header.kind, "session");
         assert_eq!(header.id, session_id);
-        session_id
+        (session_id, file)
     };
 
     // 重启:从 JSONL 恢复(entries 与运行时一致),续聊接在同一树上
     {
-        let file = dir.join(format!("{session_id}.jsonl"));
         let resumed = rpi_session::create_session(Some(&file)).unwrap();
         let messages = session_messages(&resumed.entries());
         assert!(
@@ -560,6 +588,202 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// 上下文快照(分项目会话管理):显式开启时,每次向模型提交请求落一条
+/// context_ref entry + `.ctx/` 快照文件;快照不进模型上下文(投影重建与没有它
+/// 时一致)。
+#[tokio::test]
+async fn context_snapshot_recorded_per_request_and_excluded_from_projection() {
+    let dir = std::env::temp_dir().join(format!(
+        "rpi_ctx_snapshot_it_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let built = build_with_snapshot(
+        scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]),
+        rpi_cli::assembly::SessionStore::New { dir: dir.clone() },
+        Some(true),
+    )
+    .await;
+    let manager = built.session_manager.clone().expect("file-backed manager");
+    built.session.prompt("你好").await.expect("prompt");
+    built.session.wait_idle().await;
+
+    // jsonl 中恰有一条 context_ref;快照文件在旁路 .ctx 目录且内容完整
+    let session_file = manager.file_path().unwrap().to_path_buf();
+    let stem = session_file
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let entries = manager.entries();
+    let refs: Vec<_> = entries
+        .iter()
+        .filter(|e| matches!(e, rpi_session::Entry::ContextRef { .. }))
+        .collect();
+    assert_eq!(refs.len(), 1, "一次 prompt = 一次请求 = 一条 context_ref");
+    let snapshot_path = match refs[0] {
+        rpi_session::Entry::ContextRef { path, .. } => std::path::PathBuf::from(path),
+        other => panic!("unreachable: {other:?}"),
+    };
+    assert_eq!(
+        snapshot_path.parent().unwrap(),
+        dir.join(format!("{stem}.ctx")),
+        "快照目录与 session 文件同名 + .ctx"
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&snapshot_path).unwrap())
+            .expect("快照为合法 JSON");
+    let snapshot_messages = snapshot["messages"].as_array().expect("messages 数组");
+    assert!(
+        snapshot_messages.len() >= 2,
+        "完整提交上下文:折叠 system + user,实际 {} 条",
+        snapshot_messages.len()
+    );
+    let jsonl = std::fs::read_to_string(&session_file).unwrap();
+    assert!(jsonl.contains("\"type\":\"context_ref\""), "entry 已落盘");
+
+    // 投影排除:重建上下文只有 system baseline + user + assistant
+    let context = rpi_session::build_session_context(
+        &manager.branch_entries(),
+        manager.get_leaf_id().as_deref(),
+    );
+    assert_eq!(context.messages.len(), 3, "context_ref 不进上下文");
+    assert!(matches!(
+        &context.messages[0],
+        rpi_agent::AgentMessage::System { .. }
+    ));
+    assert!(matches!(&context.messages[1], rpi_agent::AgentMessage::User { .. }));
+    assert!(matches!(
+        &context.messages[2],
+        rpi_agent::AgentMessage::Assistant(_)
+    ));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// 快照开关默认关:settings 未配置(或 BuildOptions 显式 Some(false))时,
+/// 不产生 context_ref entry,也不建 `.ctx` 目录。
+#[tokio::test]
+async fn context_snapshot_disabled_by_default_writes_nothing() {
+    let dir = std::env::temp_dir().join(format!(
+        "rpi_ctx_snapshot_off_it_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let built = build_with_snapshot(
+        scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]),
+        rpi_cli::assembly::SessionStore::New { dir: dir.clone() },
+        Some(false),
+    )
+    .await;
+    let manager = built.session_manager.clone().expect("file-backed manager");
+    built.session.prompt("你好").await.expect("prompt");
+    built.session.wait_idle().await;
+
+    let entries = manager.entries();
+    assert!(
+        !entries
+            .iter()
+            .any(|e| matches!(e, rpi_session::Entry::ContextRef { .. })),
+        "默认关:不应有 context_ref entry"
+    );
+    let session_file = manager.file_path().unwrap().to_path_buf();
+    let stem = session_file
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        !dir.join(format!("{stem}.ctx")).exists(),
+        "默认关:不应创建 .ctx 目录"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// 工具集收窄(settings `tools` / BuildOptions.active_tools):只激活 bash 时,
+/// Agent 只装 bash,未知工具名装配报错。
+#[tokio::test]
+async fn active_tools_narrows_installed_set() {
+    // 只激活 bash:tool_count = 1,且 bash 调用照常执行
+    let m = test_model();
+    let first = rpi_ai::assistant_message(
+        &m,
+        vec![ContentBlock::ToolCall {
+            id: "call-b1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "echo only-bash" }),
+        }],
+        rpi_ai::StopReason::ToolUse,
+    );
+    let built = build_with_tools(
+        scripted_provider(vec![ScriptedTurn::new(first), ScriptedTurn::text(&m, "done")]),
+        rpi_cli::assembly::SessionStore::Memory,
+        Some(false),
+        Some(vec!["bash".to_string()]),
+    )
+    .await;
+    assert_eq!(
+        built.session.agent().state_snapshot().tool_count,
+        1,
+        "只激活 bash"
+    );
+    built.session.prompt("跑一下命令").await.expect("prompt");
+    built.session.wait_idle().await;
+    let messages = built.session.agent().messages();
+    assert!(messages.iter().any(|msg| {
+        matches!(msg, rpi_agent::AgentMessage::ToolResult { tool_name, is_error: false, .. }
+            if tool_name == "bash")
+    }));
+
+    // 未知工具名:装配失败并给出可用名单
+    let error = match build_session(BuildOptions {
+        provider: scripted_provider(vec![]),
+        model: test_model(),
+        ui: Arc::new(rpi_core::NoopUi),
+        extension_specs: Vec::new(),
+        spawn_hook: None,
+        session_store: rpi_cli::assembly::SessionStore::Memory,
+        context_snapshot: None,
+        active_tools: Some(vec!["bask".to_string()]),
+    })
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("未知工具名应装配失败"),
+    };
+    assert!(error.contains("未知工具 `bask`"), "{error}");
+}
+
+/// 空工具集(tools: []):不激活任何工具 → 不装工具、系统提示词无 <tools> 节、
+/// 转录中也没有工具声明(空 content 的 system)消息。
+#[tokio::test]
+async fn empty_active_tools_installs_nothing_and_declares_nothing() {
+    let built = build_with_tools(
+        scripted_provider(vec![ScriptedTurn::text(&test_model(), "好的")]),
+        rpi_cli::assembly::SessionStore::Memory,
+        Some(false),
+        Some(Vec::new()),
+    )
+    .await;
+    assert_eq!(
+        built.session.agent().state_snapshot().tool_count,
+        0,
+        "空列表 = 不激活任何工具"
+    );
+    built.session.prompt("你好").await.expect("prompt");
+    built.session.wait_idle().await;
+    let messages = built.session.agent().messages();
+    assert!(
+        !messages
+            .iter()
+            .any(|msg| matches!(msg, rpi_agent::AgentMessage::System { tools_added, .. } if !tools_added.is_empty())),
+        "不应有工具声明消息"
+    );
+}
+
 /// transcript 统一(文档验收 Test 1–3):完整 run(user → assistant(tool call)
 /// → tool result → assistant)结束后,仅从 JSONL 重建的 context 必须与 Agent
 /// 内存 context 一致,且 usage entry 已落盘。
@@ -591,10 +815,13 @@ async fn jsonl_rebuild_matches_agent_context_after_tool_run() {
     built.session.wait_idle().await;
 
     let agent_context = built.session.agent().messages();
-    let file = dir.join(format!(
-        "{}.jsonl",
-        built.session_manager.as_ref().unwrap().session_id()
-    ));
+    let file = built
+        .session_manager
+        .as_ref()
+        .unwrap()
+        .file_path()
+        .unwrap()
+        .to_path_buf();
     drop(built);
 
     // Test 2:只从 session 文件恢复(不依赖 Agent 内存 Vec)

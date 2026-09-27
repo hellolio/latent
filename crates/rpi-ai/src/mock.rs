@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
+use crate::adapters::observe_payload;
 use crate::provider::{AssistantMessageEventStream, Provider};
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, ContentBlock, Model, StopReason, StreamOptions,
@@ -33,14 +34,24 @@ impl MockProvider {
     }
 }
 
+/// 模拟 adapter 契约:发送前把请求体交给 on_payload(供测试观测第一手 body)。
+fn observe_mock_payload(model: &Model, ctx: &TranscriptContext, opts: &StreamOptions) {
+    let mut body = serde_json::json!({
+        "model": model.id,
+        "messages": ctx.messages,
+    });
+    observe_payload(&opts.on_payload, &mut body);
+}
+
 #[async_trait]
 impl Provider for MockProvider {
     async fn stream(
         &self,
         model: &Model,
-        _ctx: TranscriptContext,
-        _opts: StreamOptions,
+        ctx: TranscriptContext,
+        opts: StreamOptions,
     ) -> AssistantMessageEventStream {
+        observe_mock_payload(model, &ctx, &opts);
         let model = model.clone();
         let reply = self.reply.clone();
         Box::pin(async_stream::stream! {
@@ -141,10 +152,11 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     async fn stream(
         &self,
-        _model: &Model,
-        _ctx: TranscriptContext,
+        model: &Model,
+        ctx: TranscriptContext,
         opts: StreamOptions,
     ) -> AssistantMessageEventStream {
+        observe_mock_payload(model, &ctx, &opts);
         let turn = self.turns.lock().unwrap().pop_front();
         let model = self.model.clone();
         let cancel = opts.cancel;

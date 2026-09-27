@@ -30,6 +30,8 @@ async fn built_memory_session() -> crate::assembly::BuiltSession {
         extension_specs: vec![],
         spawn_hook: None,
         session_store: crate::assembly::SessionStore::Memory,
+        context_snapshot: None,
+        active_tools: None,
     })
     .await
     .unwrap()
@@ -646,6 +648,8 @@ async fn replay_renders_thinking_blocks() {
         extension_specs: vec![],
         spawn_hook: None,
         session_store: crate::assembly::SessionStore::Memory,
+        context_snapshot: None,
+        active_tools: None,
     })
     .await
     .unwrap();
@@ -687,6 +691,8 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
         extension_specs: vec![],
         spawn_hook: None,
         session_store: crate::assembly::SessionStore::Memory,
+        context_snapshot: None,
+        active_tools: None,
     })
     .await
     .unwrap();

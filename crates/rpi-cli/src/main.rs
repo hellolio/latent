@@ -140,6 +140,8 @@ async fn run(args: &[String]) -> Result<(), String> {
             let (provider, model) = resolve_provider_and_model(provider, model)?;
             let extension_specs = load_mcp_server_specs();
             let session_store = resolve_session_store(cont)?;
+            // settings 运行期开关在入口解析一次,装配层不读用户配置文件
+            let settings = rpi_cli::assembly::load_session_settings();
             match mode {
                 Mode::Print => {
                     let prompt = require_prompt(prompt).await?;
@@ -149,6 +151,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                         prompt,
                         extension_specs,
                         session_store,
+                        settings,
                     )
                     .await?;
                     println!("== 完成(stop: {stop:?})==");
@@ -164,6 +167,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                         Arc::new(modes::json::JsonUi { out: out.clone() }),
                         extension_specs,
                         session_store,
+                        settings,
                     )
                     .await?;
                     modes::json::run_json_mode(built, prompt, out).await?;
@@ -180,6 +184,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                         ui,
                         extension_specs,
                         session_store,
+                        settings,
                     )
                     .await?;
                     modes::rpc::run_rpc_mode(built, tokio::io::stdin(), writer).await
@@ -193,6 +198,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                         Arc::new(ui.clone()),
                         extension_specs,
                         session_store,
+                        settings,
                     )
                     .await?;
                     modes::interactive::run_interactive_mode(built, ui, ui_rx, theme).await

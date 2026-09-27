@@ -6,7 +6,9 @@ use std::sync::Arc;
 use rpi_agent::RunStop;
 use rpi_core::McpServerSpec;
 
-use crate::assembly::{build_session, run_session, BuildOptions, SessionRequest, SessionStore};
+use crate::assembly::{
+    build_session, run_session, BuildOptions, SessionRequest, SessionSettings, SessionStore,
+};
 
 /// print 模式入口:装配(NoopUi,headless 无交互)→ prompt → 流式打印。
 pub async fn run_print_mode(
@@ -15,6 +17,7 @@ pub async fn run_print_mode(
     prompt: String,
     extension_specs: Vec<McpServerSpec>,
     session_store: SessionStore,
+    settings: SessionSettings,
 ) -> Result<RunStop, String> {
     run_session(SessionRequest {
         provider,
@@ -23,6 +26,7 @@ pub async fn run_print_mode(
         extension_specs,
         extra_subscriber: None,
         session_store,
+        settings,
     })
     .await
 }
@@ -34,6 +38,7 @@ pub async fn build_bare_session(
     ui: Arc<dyn rpi_core::ExtensionUi>,
     extension_specs: Vec<McpServerSpec>,
     session_store: SessionStore,
+    settings: SessionSettings,
 ) -> Result<crate::assembly::BuiltSession, String> {
     build_session(BuildOptions {
         provider,
@@ -42,6 +47,8 @@ pub async fn build_bare_session(
         extension_specs,
         spawn_hook: None,
         session_store,
+        context_snapshot: Some(settings.context_snapshot),
+        active_tools: settings.active_tools,
     })
     .await
 }

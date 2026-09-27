@@ -115,6 +115,24 @@ shouldCompact(contextTokens, contextWindow, settings) =                       //
 
 阅读顺序:`session-manager.ts` 前 600 行(类型+三算法)→ `compaction.ts`(设置/估算/切点/摘要四段)→ `compaction/utils.ts` → `branch-summarization.ts`。
 
+## 6. rpi 实现差异:分项目管理与上下文快照
+
+pi 按 cwd 分目录存放;rpi 采用**扁平目录 + 文件名项目前缀**(`crates/rpi-session/src/manager.rs` `project_prefix`):
+
+- 文件名:`~/.rpi/sessions/<项目前缀>__<session-id>.jsonl`;前缀编码规则:路径分隔符 `/` `\` → `-`,空白与文件名非法字符(`: * ? " < > |` 及控制字符)→ `_`,其余字符(含非 ASCII)保留,去除首尾 `-`,超长按 char 边界截断(100 字符),空结果回退 `session`;
+- `--continue` 不依赖文件名:`find_latest_session_file` 仍按 header `cwd` 精确匹配,对有/无前缀的新旧文件都成立;旧版二进制读新文件时,前缀文件名照常可打开(文件名不参与解析);
+- header `cwd` 字段始终保存完整未编码路径。
+
+rpi 扩展 entry:`context_ref`(第 12 种;`CURRENT_SESSION_VERSION = 4`)—— 每次向模型提交请求的上下文快照引用:
+
+- **开关(settings `contextSnapshot`,默认关)**:项目 `.rpi/settings.json` 优先于全局 `~/.rpi/settings.json`,首个配置生效;未配置 = 关闭,不产生快照、不建 `.ctx` 目录。settings 解析在 CLI 入口(main)一次完成、经 `SessionSettings`/`BuildOptions.context_snapshot` 显式传入,装配层不读用户配置文件。
+- 字段:`{id, parentId, path, timestamp}`;`path` 指向快照文件(绝对路径);
+- 快照文件:session 文件旁 `<file-stem>.ctx/<uuid>.json`,内容 = **发送前的原始 HTTP 请求体**(`StreamOptions.on_payload` 观测的第一手数据,原样落盘:provider 特定格式,含 model/messages/tools 等字段);
+- 产生时机:每次真实 wire 请求一条 —— **provider 内部重试的每次尝试也各记一条**(每次都是真实提交);compaction 摘要请求不经 agent 的 stream_options,不产生快照;纯内存会话跳过;
+- **不进模型上下文**:`session_entry_to_context_messages` 显式排除,投影/恢复/压缩管线不受影响;旧版二进制读新文件把该行按损坏行静默跳过(不致命)。
+
+rpi 还支持**系统提示词外置**(用户可编辑):约定文件 项目 `.rpi/system-prompt.md` → 全局 `~/.rpi/system-prompt.md`,首个存在且非空(空白视为未配置)的生效;内容经 `SystemPromptOptions.custom_prompt` **替换身份句(preamble)**,`<cwd>`/`<tools>`/`<rules>` 等动态节仍自动注入(工具集变化照常 diff 更新)。仅在程序启动/新建会话(装配期)读取一次,会话中途修改文件不生效。
+
 ## 踩坑记录
 
 - **2026-09-25 `estimate_projected_context_tokens` 与 pi 的边界语义相反**:现象是正常会话(从未压缩/编辑)永远不走真实 usage、系统性高估。原因:pi 中无 context_edit/compaction 时 `latestInvalidatingEntryIndex = -1`,`usageEntryIndex > -1` 恒真;Rust 版把 `rposition` 返回 `None` 当作"无失效 entry 可比",跳过了信任分支。解法:`(Some(_), None) => true` 显式表达 -1。(关联文件:`crates/rpi-session/src/compaction.rs`)

@@ -110,8 +110,35 @@ fn new_session_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// 工厂:在目录下创建 `<session-id>.jsonl` 会话文件(目录不存在则创建),
-/// 文件名即 session id(pi 风格的 sessions 目录布局)。
+/// 文件名可用的项目前缀上限(字节截断按 char 边界;uuid + 分隔符 + 扩展名约占 50)
+const PROJECT_PREFIX_MAX_CHARS: usize = 100;
+
+/// 会话文件名的项目前缀:完整 cwd 编码为文件名安全字符串(分项目管理)。
+/// 路径分隔符 `/` `\` → `-`,空白与文件名非法字符(: * ? " < > | 及控制字符)
+/// → `_`,其余字符(含中文等非 ASCII)保留;去除首尾 `-`,超长按 char 边界
+/// 截断;结果为空(如 cwd = "/")时回退 "session"。
+pub fn project_prefix(cwd: &str) -> String {
+    let mut prefix: String = cwd
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' => '-',
+            ' ' | '\t' | '\n' | '\r' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        })
+        .collect();
+    prefix = prefix.trim_matches('-').to_string();
+    if prefix.chars().count() > PROJECT_PREFIX_MAX_CHARS {
+        prefix = prefix.chars().take(PROJECT_PREFIX_MAX_CHARS).collect();
+    }
+    if prefix.is_empty() {
+        prefix = "session".to_string();
+    }
+    prefix
+}
+
+/// 工厂:在目录下创建 `<项目前缀>__<session-id>.jsonl` 会话文件(目录不存在则
+/// 创建),前缀由 cwd 编码(`project_prefix`)实现分项目管理,id 即 session id。
 pub fn create_session_in_dir(
     dir: impl AsRef<Path>,
     cwd: &str,
@@ -120,7 +147,7 @@ pub fn create_session_in_dir(
     let dir = dir.as_ref();
     std::fs::create_dir_all(dir)?;
     let id = new_session_id();
-    let path = dir.join(format!("{id}.jsonl"));
+    let path = dir.join(format!("{}__{id}.jsonl", project_prefix(cwd)));
     // 先落首行 header(保证文件名与 session id 一致),再按既有文件打开
     let header = SessionHeader::new(id, cwd.to_string(), parent_session.map(str::to_string));
     {
@@ -308,6 +335,11 @@ impl SessionManager {
                 ..
             }
             | Entry::SessionInfo {
+                id: entry_id,
+                timestamp,
+                ..
+            }
+            | Entry::ContextRef {
                 id: entry_id,
                 timestamp,
                 ..
@@ -506,6 +538,50 @@ impl SessionManager {
             name,
             timestamp: 0,
         })
+    }
+
+    /// 记录一次向模型提交的请求(上下文审计):`snapshot` 是 **发送前的原始
+    /// 请求体**(provider on_payload 观测的第一手数据),原样写入 session 文件
+    /// 旁的 `<file-stem>.ctx/<uuid>.json`,并在会话树追加 `context_ref` entry
+    /// (path 指向快照文件)。快照 entry **不进**模型上下文(projection 显式
+    /// 排除),恢复/压缩等既有管线不受影响。纯内存会话(无文件)跳过,返回 None。
+    pub fn append_context_snapshot(
+        &self,
+        snapshot: &serde_json::Value,
+    ) -> Result<Option<String>, SessionError> {
+        let Some(session_path) = self.path.clone() else {
+            return Ok(None);
+        };
+        // 快照目录:session 文件旁 `<file-stem>.ctx/`(find_latest_session_file
+        // 只扫描 *.jsonl,该目录不会被误读)
+        let stem = session_path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "session".to_string());
+        let ctx_dir = session_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{stem}.ctx"));
+        std::fs::create_dir_all(&ctx_dir)?;
+        let snapshot_file = ctx_dir.join(format!("{}.json", uuid::Uuid::now_v7().simple()));
+        {
+            use std::io::Write;
+            // 原样落盘(第一手),单次 write_all,与 append_entry 同样的半行防护
+            let json = serde_json::to_vec_pretty(snapshot)?;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&snapshot_file)?;
+            file.write_all(&json)?;
+        }
+        let entry_id = self.append_entry(Entry::ContextRef {
+            id: String::new(),
+            parent_id: None,
+            path: snapshot_file.display().to_string(),
+            timestamp: 0,
+        })?;
+        Ok(Some(entry_id))
     }
 
     /// 分支(06 文档 §1.3):把 leaf 指针移到树中较早节点继续追加 —— 同一文件

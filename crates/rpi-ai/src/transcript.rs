@@ -25,13 +25,21 @@ pub fn create_initial_system_message(
 }
 
 /// 把 `Context.system_prompt` 与 `Context.tools` 折叠成首条 system 消息。
+/// 转录已以 system 消息(工具声明)开头时,提示词正文**就地填充**该消息,
+/// 不再前置新消息 —— 否则同一批工具声明会随两条 system 消息重复上线
+/// (adapter 的 tools 参数由转录声明重放得出,声明以转录为准,不变量 I6)。
 pub fn normalize_context(context: Context) -> TranscriptContext {
-    let initial = create_initial_system_message(context.system_prompt.as_deref(), &context.tools);
-    let mut messages = Vec::with_capacity(context.messages.len() + 1);
-    if let Some(initial) = initial {
-        messages.push(initial);
+    let prompt = context.system_prompt.filter(|p| !p.is_empty());
+    let mut messages = context.messages;
+    if matches!(messages.first(), Some(Message::System { .. })) {
+        if let (Some(text), Some(Message::System { content, .. })) = (prompt, messages.first_mut())
+        {
+            *content = text;
+        }
+    } else if let Some(initial) = create_initial_system_message(prompt.as_deref(), &context.tools)
+    {
+        messages.insert(0, initial);
     }
-    messages.extend(context.messages);
     TranscriptContext { messages }
 }
 
@@ -240,6 +248,44 @@ mod tests {
         // 空输入保持空转录
         let empty = normalize_context(Context::default());
         assert!(empty.messages.is_empty());
+    }
+
+    /// 转录以工具声明 system 消息开头时,提示词就地填充该消息,不再前置新
+    /// system(否则同一批声明重复上线)。
+    #[test]
+    fn normalize_fills_leading_declaration_instead_of_prepending() {
+        let declaration = Message::System {
+            content: String::new(),
+            sections: Default::default(),
+            tools_added: vec![tool("bash")],
+            tools_removed: Vec::new(),
+            timestamp: 42,
+        };
+        let ctx = normalize_context(Context {
+            system_prompt: Some("base prompt".into()),
+            messages: vec![declaration, Message::user_text("hi")],
+            tools: vec![tool("bash")],
+        });
+        assert_eq!(ctx.messages.len(), 2, "不新增 system 消息");
+        match &ctx.messages[0] {
+            Message::System {
+                content,
+                tools_added,
+                timestamp,
+                ..
+            } => {
+                assert_eq!(content, "base prompt", "正文填充进声明消息");
+                assert_eq!(tools_added.len(), 1, "声明保持转录原样");
+                assert_eq!(*timestamp, 42);
+            }
+            other => panic!("expected system message, got {other:?}"),
+        }
+        // 声明重放:工具集仍正确
+        let names: Vec<String> = get_current_tools(&ctx.messages)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["bash"]);
     }
 
     #[test]
