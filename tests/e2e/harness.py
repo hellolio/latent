@@ -92,13 +92,17 @@ class RpiApp:
         timeout: float = 15.0,
         rpi_bin: str | None = None,
         extra_args: list | None = None,
+        home: str | None = None,
     ):
         self.mock = MockLLM(turns).start()
         self.timeout = timeout
         self._closed = False
 
-        # 隔离 HOME:models.json 指向 mock 服务;session 也写进临时目录
-        self.home = tempfile.mkdtemp(prefix="rpi_e2e_home_")
+        # 隔离 HOME:models.json 指向 mock 服务;session 也写进临时目录。
+        # 显式传 home 时复用(--continue 跨进程测试);models.json 必须每次
+        # 重写:mock 端口随机,旧文件指向的是上一个(已停止)的 mock
+        self._owns_home = home is None
+        self.home = home or tempfile.mkdtemp(prefix="rpi_e2e_home_")
         os.makedirs(os.path.join(self.home, ".rpi"), exist_ok=True)
         models = {
             "providers": {
@@ -115,6 +119,7 @@ class RpiApp:
         with open(os.path.join(self.home, ".rpi", "models.json"), "w", encoding="utf-8") as f:
             json.dump(models, f, ensure_ascii=False)
 
+        self._owns_workdir = workdir is None
         self.workdir = workdir or tempfile.mkdtemp(prefix="rpi_e2e_cwd_")
 
         env = os.environ.copy()
@@ -294,5 +299,8 @@ class RpiApp:
             self.child.terminate(force=True)
         self.child.close()
         self.mock.stop()
-        for path in (self.home, self.workdir):
-            shutil.rmtree(path, ignore_errors=True)
+        if self._owns_home:
+            shutil.rmtree(self.home, ignore_errors=True)
+        if self._owns_workdir:
+            shutil.rmtree(self.workdir, ignore_errors=True)
+        # 复用传入的 home/workdir 由测试自己清理

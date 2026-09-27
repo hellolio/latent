@@ -1494,3 +1494,34 @@ async fn wait_idle_blocks_until_run_finishes_without_polling() {
         .unwrap();
     assert!(!agent.is_streaming());
 }
+
+/// trim_oldest_messages 只保留末尾 keep_last 条:打头 system baseline 永不删;
+/// 恰好多出 1 条(唯一可删的是 baseline)时保持原样。
+#[test]
+fn trim_oldest_never_removes_system_baseline() {
+    let provider = Arc::new(ScriptedProvider::new(&model(), vec![]));
+    let agent = create_agent(provider, Arc::new(PassthroughHooks));
+    agent.set_system_prompt(Some("baseline".into()));
+    agent
+        .set_messages(vec![
+            AgentMessage::System { content: "baseline".into(), sections: Default::default(), tools_added: Vec::new(), tools_removed: Vec::new(), timestamp: 0 },
+            AgentMessage::user("m1"),
+            AgentMessage::user("m2"),
+            AgentMessage::user("m3"),
+            AgentMessage::user("m4"),
+        ])
+        .unwrap();
+
+    // 5 条,keep_last=3:可删 m1、m2,删除后 baseline 仍打头
+    agent.trim_oldest_messages(3);
+    let messages = agent.messages();
+    assert!(
+        matches!(messages.first(), Some(AgentMessage::System { .. })),
+        "baseline 必须保留: {messages:?}"
+    );
+    assert_eq!(messages.len(), 4, "baseline + 末尾 keep_last 条");
+
+    // 边界:恰好多出 1 条(唯一可删的就是 baseline)→ 不做任何删除
+    agent.trim_oldest_messages(3);
+    assert_eq!(agent.messages().len(), 4);
+}

@@ -250,6 +250,8 @@ pub struct LoopConfig {
     pub stream_options: StreamOptions,
     /// steering 批量模式(03 文档 QueueMode;Agent 默认 one-at-a-time)
     pub steering_mode: QueueMode,
+    /// follow-up 批量模式(独立于 steering;pi 的 followUpQueueMode)
+    pub follow_up_mode: QueueMode,
 }
 
 impl LoopConfig {
@@ -260,6 +262,7 @@ impl LoopConfig {
             limits: TurnLimits::default(),
             stream_options: StreamOptions::default(),
             steering_mode: QueueMode::OneAtATime,
+            follow_up_mode: QueueMode::OneAtATime,
         }
     }
 }
@@ -352,6 +355,19 @@ impl ToolUpdater for EventUpdater {
     }
 }
 
+/// 并行 thunk 内的事件汇:只入队不派发,由主任务统一串行 await。
+/// Subscriber 契约要求串行、保序送达;thunk 并发自发 on_event 会并发重入订阅者。
+struct QueuedSubscriber {
+    tx: mpsc::UnboundedSender<AgentEvent>,
+}
+
+#[async_trait]
+impl Subscriber for QueuedSubscriber {
+    async fn on_event(&self, event: &AgentEvent) {
+        let _ = self.tx.send(event.clone());
+    }
+}
+
 /// 工具调用批的执行结果。
 struct ToolBatch {
     messages: Vec<AgentMessage>,
@@ -369,6 +385,7 @@ struct LoopState {
     stream_options: StreamOptions,
     limits: TurnLimits,
     steering_mode: QueueMode,
+    follow_up_mode: QueueMode,
 
     model: Model,
     thinking: Option<ThinkingLevel>,
@@ -484,7 +501,7 @@ impl LoopState {
             Some(Wake::ExplicitContinue) | None => {}
         }
         // follow-up 批量模式:All 整批,OneAtATime 每轮一条(余量原地保留)
-        match self.steering_mode {
+        match self.follow_up_mode {
             QueueMode::All => {
                 for _ in 0..self.follow_up_batch.len() {
                     self.receiver.dec_follow_up();
@@ -528,6 +545,7 @@ pub async fn run_agent_loop(
         stream_options: config.stream_options.clone(),
         limits: config.limits,
         steering_mode: config.steering_mode,
+        follow_up_mode: config.follow_up_mode,
         model: config.model,
         thinking: config.thinking,
         current: context.messages,
@@ -1299,7 +1317,7 @@ async fn execute_batch_sequential(
 }
 
 /// 并行批(03 文档 §5.3):start+prepare 顺序执行(immediate 结果就地落定);
-/// 其余 thunk 并发执行,`tool_execution_end` **按完成序**发出(thunk 完成时自发)。
+/// 其余 thunk 并发执行,`tool_execution_end` 按完成序入队、由主任务串行发出。
 async fn execute_batch_parallel(
     calls: &[ToolCall],
     tools: &[Arc<dyn Tool>],
@@ -1331,11 +1349,15 @@ async fn execute_batch_parallel(
         }
     }
 
-    // Phase 2:并发执行 thunk;end 事件由 thunk 完成时自发(完成序)
+    // Phase 2:并发执行 thunk;end/update 事件先入队,由下方派发循环统一
+    // 串行 await(Subscriber 契约:不许并发重入订阅者)
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let mut join_set = tokio::task::JoinSet::new();
     for (index, call, tool) in deferred {
         let hooks = hooks.clone();
-        let sink = sink.clone();
+        let sink: Arc<dyn Subscriber> = Arc::new(QueuedSubscriber {
+            tx: event_tx.clone(),
+        });
         let cancel = cancel.clone();
         join_set.spawn(async move {
             // thunk 内自捕获 panic:转错误结果并正常发 end 事件,保证事件/消息配对
@@ -1359,9 +1381,27 @@ async fn execute_batch_parallel(
             (index, outcome)
         });
     }
-    while let Some(joined) = join_set.join_next().await {
-        if let Ok((index, outcome)) = joined {
-            slots[index] = Some(outcome);
+    drop(event_tx); // 全部 thunk 结束后通道关闭,派发循环随之退出
+
+    // 派发循环与 join 并行推进:通道关闭 = 全部 thunk 已完成且事件已收齐;
+    // 之后只需继续收完 join_set 里剩余的结果
+    let dispatch = async {
+        while let Some(event) = event_rx.recv().await {
+            sink.on_event(&event).await;
+        }
+    };
+    tokio::pin!(dispatch);
+    let mut dispatch_done = false;
+    while !dispatch_done || !join_set.is_empty() {
+        tokio::select! {
+            joined = join_set.join_next(), if !join_set.is_empty() => {
+                if let Some(Ok((index, outcome))) = joined {
+                    slots[index] = Some(outcome);
+                }
+            }
+            _ = &mut dispatch, if !dispatch_done => {
+                dispatch_done = true;
+            }
         }
     }
 

@@ -66,6 +66,13 @@ pub trait SessionSink: Send + Sync {
 #[async_trait]
 pub trait ContextCompactor: Send + Sync {
     async fn compact(&self, model: &Model) -> Result<Vec<AgentMessage>, String>;
+
+    /// 自动压缩阈值判定(06 文档 §3.1):估算当前上下文 token,超过
+    /// contextWindow - reserveTokens 时返回 true。由装配方实现(core 不依赖
+    /// rpi-session,估算基于 Session projection);默认 false = 不自动压缩。
+    fn should_auto_compact(&self, _model: &Model, _messages: &[AgentMessage]) -> bool {
+        false
+    }
 }
 
 /// mode 侧事件(04 文档 §2.3 AgentSessionEvent 的 M4 子集):10 种 agent 事件
@@ -509,31 +516,28 @@ impl AgentSession {
     }
 
     /// 切模型(pi setModel):Agent 状态 + model_change entry 同步落盘。
-    pub fn set_model(&self, model: Model) {
+    /// 落盘内联 await:与 SessionBridge 的消息 append 保持文件内顺序,
+    /// spawn 异步写会让 model_change 排在后续 message 之后(恢复时投影出错模型)。
+    pub async fn set_model(&self, model: Model) {
         self.agent.set_model(model.clone());
         if let Some(sink) = &self.session_sink {
-            let sink = sink.clone();
-            let provider = model.provider.clone();
-            let model_id = model.id.clone();
-            tokio::spawn(async move {
-                if let Err(error) = sink.append_model_change(&provider, &model_id).await {
-                    eprintln!("[rpi] session sink model change append failed: {error}");
-                }
-            });
+            if let Err(error) = sink
+                .append_model_change(&model.provider, &model.id)
+                .await
+            {
+                eprintln!("[rpi] session sink model change append failed: {error}");
+            }
         }
     }
 
     /// 思考级别(pi setThinkingLevel):Agent 状态 + thinking_level_change entry。
-    pub fn set_thinking_level(&self, level: Option<rpi_ai::ThinkingLevel>) {
+    /// 落盘内联 await,理由同 set_model。
+    pub async fn set_thinking_level(&self, level: Option<rpi_ai::ThinkingLevel>) {
         self.agent.set_thinking_level(level);
         if let (Some(sink), Some(level)) = (&self.session_sink, level) {
-            let sink = sink.clone();
-            let name = level.as_str().to_string();
-            tokio::spawn(async move {
-                if let Err(error) = sink.append_thinking_level_change(&name).await {
-                    eprintln!("[rpi] session sink thinking level append failed: {error}");
-                }
-            });
+            if let Err(error) = sink.append_thinking_level_change(level.as_str()).await {
+                eprintln!("[rpi] session sink thinking level append failed: {error}");
+            }
         }
     }
 
@@ -653,10 +657,52 @@ impl AgentSession {
                     reason: "overflow recovery".into(),
                 })
                 .await;
+                self.maybe_auto_compact().await;
                 return retry_stop.map_err(CoreError::from);
             }
         }
+        if let RunStop::EndTurn = &stop {
+            self.maybe_auto_compact().await;
+        }
         Ok(stop)
+    }
+
+    /// 自动压缩(06 文档 §3.1):run 成功结束后按阈值检查,超限则立即压缩,
+    /// 下一次 prompt 从压缩后上下文开始 —— 避免下一轮请求直接 overflow,
+    /// 白耗一次失败调用(阈值判定由装配方注入,见 ContextCompactor)。
+    async fn maybe_auto_compact(&self) {
+        let Some(compactor) = self.compactor.as_ref() else {
+            return;
+        };
+        let Some(model) = self.agent.state_snapshot().model else {
+            return;
+        };
+        let messages = self.agent.messages();
+        if !compactor.should_auto_compact(&model, &messages) {
+            return;
+        }
+        self.broadcast(&AgentSessionEvent::AutoRetryStart {
+            attempt: 1,
+            delay_ms: 0,
+            reason: "context threshold reached: auto-compacting".into(),
+        })
+        .await;
+        let result = match compactor.compact(&model).await {
+            Ok(messages) => self
+                .agent
+                .set_messages(messages)
+                .map_err(|e| e.to_string())
+                .map(|_| ()),
+            Err(error) => Err(error),
+        };
+        self.broadcast(&AgentSessionEvent::AutoRetryEnd {
+            success: result.is_ok(),
+            reason: "auto compaction".into(),
+        })
+        .await;
+        if let Err(error) = result {
+            eprintln!("[rpi] auto compaction failed: {error}");
+        }
     }
 
     async fn broadcast(&self, event: &AgentSessionEvent) {

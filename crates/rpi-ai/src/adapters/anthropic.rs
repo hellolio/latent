@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::adapters::{
-    aborted_error, http_error_message, map_thinking_level, observe_payload, observe_provider_event,
+    aborted_error, effective_max_tokens, error_with_partial, http_error_message,
+    map_thinking_level, observe_payload, observe_provider_event, parse_retry_after_header,
     observe_response, read_chunk, resolve_cache_retention, setup_error, trim_base_url, ByteStream,
     ReadOutcome,
 };
@@ -333,7 +334,7 @@ fn build_request_body(
     let mut body = json!({
         "model": model.id,
         "messages": convert_messages(conversation, cache_control, compat.allow_empty_signature),
-        "max_tokens": opts.max_tokens.map(|t| t as u64).unwrap_or(model.max_tokens as u64),
+        "max_tokens": effective_max_tokens(opts.max_tokens, model),
         "stream": true,
     });
     if !system_text.is_empty() {
@@ -370,10 +371,7 @@ fn build_request_body(
             } else {
                 // 预算式思考(pi adjustMaxTokensForThinking):先给思考腾出 max_tokens 空间,
                 // 再保证回答至少留 1024 token,避免 budget >= max_tokens 的非法请求
-                let base = opts
-                    .max_tokens
-                    .map(|t| t as u64)
-                    .unwrap_or(model.max_tokens as u64);
+                let base = effective_max_tokens(opts.max_tokens, model);
                 let budget_raw = match level {
                     crate::types::ThinkingLevel::Minimal => 1024u64,
                     crate::types::ThinkingLevel::Low => 2048,
@@ -832,8 +830,9 @@ async fn stream_impl(
         let response = match response {
             Ok(r) if !r.status().is_success() => {
                 let status = r.status();
+                let retry_after = parse_retry_after_header(r.headers().get(reqwest::header::RETRY_AFTER));
                 let body = r.text().await.unwrap_or_default();
-                yield setup_error(&model, http_error_message(status, &body));
+                yield setup_error(&model, http_error_message(status, &body, retry_after));
                 return;
             }
             Ok(r) => {
@@ -865,9 +864,11 @@ async fn stream_impl(
                             if let Err(message) =
                                 handle_sse_event(&mut state, &model, &event, &mut events_out, &opts.on_provider_stream_event)
                             {
-                                terminal = Some(AssistantMessageEvent::Error(Box::new(
-                                    AssistantMessage::error(&model, message, false),
-                                )));
+                                terminal = Some(error_with_partial(
+                                    &model,
+                                    state.output.clone(),
+                                    message,
+                                ));
                                 break 'outer;
                             }
                             for event in events_out {
@@ -886,9 +887,11 @@ async fn stream_impl(
                             if let Err(message) =
                                 handle_sse_event(&mut state, &model, &event, &mut events_out, &opts.on_provider_stream_event)
                             {
-                                terminal = Some(AssistantMessageEvent::Error(Box::new(
-                                    AssistantMessage::error(&model, message, false),
-                                )));
+                                terminal = Some(error_with_partial(
+                                    &model,
+                                    state.output.clone(),
+                                    message,
+                                ));
                                 break;
                             }
                             for event in events_out {
@@ -903,9 +906,7 @@ async fn stream_impl(
                     return;
                 }
                 ReadOutcome::Transport(message) => {
-                    terminal = Some(AssistantMessageEvent::Error(Box::new(
-                        AssistantMessage::error(&model, message, false),
-                    )));
+                    terminal = Some(error_with_partial(&model, state.output.clone(), message));
                     break;
                 }
             }
@@ -926,12 +927,13 @@ async fn stream_impl(
             } else {
                 "Anthropic stream ended without a stop reason".to_string()
             };
-            yield AssistantMessageEvent::Error(Box::new(AssistantMessage::error(&model, message, false)));
+            yield error_with_partial(&model, state.output, message);
             return;
         }
         if state.output.stop_reason == StopReason::Error || state.output.stop_reason == StopReason::Aborted {
-            let message = state.output.error_message.clone().unwrap_or_else(|| "unknown error".into());
-            yield AssistantMessageEvent::Error(Box::new(AssistantMessage::error(&model, message, false)));
+            // provider 侧 error 事件:state.output 已携带 stop_reason/error_message
+            // 与已流出内容,直接作为终态(不重建,避免丢内容)
+            yield AssistantMessageEvent::Error(Box::new(state.output));
             return;
         }
         yield AssistantMessageEvent::Done(Box::new(state.output));

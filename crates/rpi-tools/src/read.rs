@@ -38,7 +38,11 @@ fn parse_args(args: &serde_json::Value) -> Result<(String, Option<usize>, Option
     };
     let limit = match obj.get("limit") {
         Some(v) if !v.is_null() => {
-            Some(v.as_u64().ok_or("`limit` must be a positive integer")? as usize)
+            let l = v.as_u64().ok_or("`limit` must be a positive integer")? as usize;
+            if l == 0 {
+                return Err("`limit` must be a positive integer".into());
+            }
+            Some(l)
         }
         _ => None,
     };
@@ -112,6 +116,13 @@ impl Tool for ReadTool {
                 name: "read".into(),
                 message: format!("cannot read `{path}`: {e}"),
             })?;
+        // 二进制文件(NUL 字节,grep 同判据):from_utf8_lossy 会产出大段 U+FFFD 垃圾
+        if bytes.contains(&0) {
+            return Err(ToolError::Failed {
+                name: "read".into(),
+                message: format!("`{path}` appears to be a binary file; use bash to inspect it"),
+            });
+        }
         let content = String::from_utf8_lossy(&bytes);
 
         let lines: Vec<&str> = content.lines().collect();
@@ -141,13 +152,17 @@ impl Tool for ReadTool {
 
         let truncation = truncate_head(&slice, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
         let mut output = truncation.content.clone();
-        if truncation.truncation_by_bytes() {
+        // slice 之前被 offset 跳过部分占用的字节量(单行续读提示的 tail -c 偏移需计入)
+        let skipped_bytes: usize = lines[..start - 1].iter().map(|l| l.len() + 1).sum();
+        // output_lines == 1 的字节截断才是"单行超字节限";多行命中字节限时
+        // 仍可按行翻页,报单行文案会把模型引向错误的数据
+        if truncation.truncated_by == "bytes" && truncation.output_lines == 1 {
             // 单行超字节限:offset 提示无意义,指引改用 bash(05 文档)
-            let skip_bytes = output.len();
+            let shown = output.len();
+            let next = skipped_bytes + shown + 1;
             output.push_str(&format!(
-                "\n\n[Single line exceeds the byte limit; showing the first {skip_bytes} bytes. \
+                "\n\n[Single line exceeds the byte limit; showing the first {shown} bytes. \
                  Use bash to read further: `tail -c +{next} {path} | head -c {MAX}`]",
-                next = skip_bytes + 1,
                 MAX = DEFAULT_MAX_BYTES
             ));
         } else if truncation.truncated {
@@ -250,5 +265,70 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("cannot read"));
+    }
+
+    #[tokio::test]
+    async fn multiline_byte_truncation_hints_offset_not_bash() {
+        let dir = std::env::temp_dir().join(format!("rpi-read-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // 多行、总字节超限但每行很短:应走 offset 翻页提示,而非"单行超限"文案
+        let content = (1..=3000)
+            .map(|i| format!("line-{i}-padding-xxxxxx"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(content.len() > DEFAULT_MAX_BYTES);
+        tokio::fs::write(dir.join("multi.txt"), &content).await.unwrap();
+
+        let tool = ReadTool { cwd: dir.clone() };
+        let output = exec(&tool, serde_json::json!({"path": "multi.txt"}))
+            .await
+            .unwrap();
+        assert!(
+            !output.output.contains("Single line exceeds"),
+            "多行字节截断不应报单行文案: {}",
+            &output.output[..200]
+        );
+        assert!(output.output.contains("Use offset="));
+
+        // 单行超限:保留 bash 续读提示,且偏移计入 offset 跳过的字节
+        let huge = "z".repeat(DEFAULT_MAX_BYTES * 2);
+        tokio::fs::write(dir.join("single.txt"), format!("prefix\n{huge}")).await.unwrap();
+        let output = exec(
+            &tool,
+            serde_json::json!({"path": "single.txt", "offset": 2}),
+        )
+        .await
+        .unwrap();
+        let next: usize = output
+            .output
+            .rsplit("tail -c +")
+            .next()
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .expect("应带 tail -c 续读提示");
+        // offset=1 跳过 "prefix\n"(7 字节)后再截断,提示偏移 = 7 + 已显示字节 + 1
+        assert_eq!(
+            next,
+            "prefix\n".len() + output.output.split("\n\n").next().unwrap().len() + 1
+        );
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn zero_limit_and_binary_file_are_rejected() {
+        let dir = std::env::temp_dir().join(format!("rpi-read-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("bin.dat"), [b'a', 0, b'b']).await.unwrap();
+
+        let tool = ReadTool { cwd: dir.clone() };
+        let err = exec(&tool, serde_json::json!({"path": "bin.dat", "limit": 0}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("positive integer"));
+        let err = exec(&tool, serde_json::json!({"path": "bin.dat"}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("binary file"));
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }

@@ -259,11 +259,17 @@ impl Agent {
         if len <= keep_last {
             return;
         }
+        // 打头 system baseline 永不删:可删区间从它之后开始;
+        // 恰好多出 1 条时唯一可删的就是 baseline,保持原样不破坏 prompt
         let start = match state.messages.first() {
-            Some(AgentMessage::System { .. }) if len - 1 > keep_last => 1,
+            Some(AgentMessage::System { .. }) => 1,
             _ => 0,
         };
-        state.messages.drain(start..len.saturating_sub(keep_last));
+        let removable = len.saturating_sub(keep_last);
+        if removable <= start {
+            return;
+        }
+        state.messages.drain(start..removable);
     }
 
     /// steer:推送进 mpsc 注入通道(03 §10.5;run 期间也可调用,循环在
@@ -388,7 +394,7 @@ impl Agent {
             cancel.clone()
         };
 
-        let (system, model, thinking, tools, transcript, limits, stream_options, steering_mode) = {
+        let (system, model, thinking, tools, transcript, limits, stream_options, steering_mode, follow_up_mode) = {
             let state = self.state.lock().unwrap();
             (
                 state.system.clone(),
@@ -399,6 +405,7 @@ impl Agent {
                 *self.limits.lock().unwrap(),
                 self.stream_options.lock().unwrap().clone(),
                 *self.steering_mode.lock().unwrap(),
+                *self.follow_up_mode.lock().unwrap(),
             )
         };
         let Some(model) = model else {
@@ -426,6 +433,7 @@ impl Agent {
             limits,
             stream_options,
             steering_mode,
+            follow_up_mode,
         };
         let sink: Arc<dyn Subscriber> = match self.self_weak.upgrade() {
             Some(this) => this,

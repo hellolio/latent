@@ -1,0 +1,32 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "write",
+        "arguments": {
+          "path": "note.txt",
+          "content": "hello e2e\n"
+        }
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "name": "edit",
+        "arguments": {
+          "path": "note.txt",
+          "edits": [
+            {
+              "oldText": "hello",
+              "newText": "hi"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "text": "文件写入并编辑完成"
+  }
+]

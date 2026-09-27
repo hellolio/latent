@@ -62,7 +62,8 @@ pub fn truncate_head(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
             truncated = true;
             break;
         }
-        if bytes + line.len() + 1 > max_bytes {
+        // 末行无换行符,不多算 +1:内容恰好等于 max_bytes 时不误报截断
+        if bytes + line.len() > max_bytes {
             truncated = true;
             truncated_by = "bytes";
             break;
@@ -214,5 +215,14 @@ mod tests {
         let result = truncate_head("hello\nworld", 10, 1000);
         assert!(!result.truncated);
         assert_eq!(result.content, "hello\nworld");
+    }
+
+    #[test]
+    fn content_exactly_at_byte_limit_is_not_truncated() {
+        // 末行无换行符不多算 +1:总字节恰好等于上限时不误报
+        let content = format!("{}\n{}", "x".repeat(60), "y".repeat(59)); // 60 + 1 + 59 = 120
+        let result = truncate_head(&content, 10, 120);
+        assert!(!result.truncated, "恰好 120 字节不应报截断");
+        assert_eq!(result.content, content);
     }
 }

@@ -4,7 +4,7 @@ use rpi_agent::{AgentMessage, AssistantMessage, ContentBlock, CustomMessage, Sto
 use rpi_session::compaction::SummarizationRequest;
 use rpi_session::{
     build_context_entries, build_session_projection, create_fixed_summarizer, create_session,
-    estimate_context_tokens, estimate_tokens, find_cut_point, run_compaction,
+    create_session_with, estimate_context_tokens, estimate_tokens, find_cut_point, run_compaction,
     serialize_conversation, should_compact, CompactionOutcome, CompactionSettings,
     ContextReplacement, Entry, SummarizationResponse, Summarizer, DEFAULT_COMPACTION_SETTINGS,
 };
@@ -545,6 +545,42 @@ async fn run_compaction_end_to_end() {
 }
 
 #[tokio::test]
+async fn run_compaction_skips_empty_conversation_range() {
+    // 回归:短会话切点落在首个 user 消息,待摘要范围只有 system 元数据,
+    // serialize_conversation 跳过 System → 不应发出空对话的摘要请求
+    let session = create_session(None::<String>).unwrap();
+    session
+        .append_message(AgentMessage::System {
+            content: String::new(),
+            sections: Default::default(),
+            tools_added: Vec::new(),
+            tools_removed: Vec::new(),
+            timestamp: 0,
+        })
+        .unwrap();
+    session.append_message(AgentMessage::user("第一问")).unwrap();
+    session
+        .append_message(assistant("第一轮的回复", 17, StopReason::Stop))
+        .unwrap();
+    let entries = session.entries();
+
+    struct NoCall;
+    #[async_trait::async_trait]
+    impl Summarizer for NoCall {
+        async fn summarize(
+            &self,
+            request: &SummarizationRequest,
+        ) -> Result<SummarizationResponse, String> {
+            panic!("不应发出摘要请求,对话内容: {:?}", request.messages);
+        }
+    }
+    let outcome = run_compaction(&entries, &CompactionSettings::default(), &NoCall)
+        .await
+        .unwrap();
+    assert!(outcome.is_none(), "空对话范围不应产出压缩结果");
+}
+
+#[tokio::test]
 async fn run_compaction_uses_update_template_when_previous_summary_exists() {
     let session = create_session(None::<String>).unwrap();
     session
@@ -766,4 +802,51 @@ fn empty_entries_projection_is_empty() {
     assert_eq!(projection.thinking_level, "off");
     assert!(projection.model.is_none());
     assert!(build_context_entries(&session.entries(), None).is_empty());
+}
+
+#[test]
+fn crash_half_line_is_isolated_and_next_append_survives() {
+    let dir = std::env::temp_dir().join(format!("rpi_session_crash_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("crash.jsonl");
+
+    // 正常创建会话并写一条消息
+    {
+        let session = create_session_with(Some(&path), "/tmp/proj", None).unwrap();
+        session
+            .append_message(AgentMessage::user("before crash"))
+            .unwrap();
+    }
+    // 模拟写入中途崩溃:留下末尾无换行的半行
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"type\":\"mess").unwrap();
+    }
+
+    // 重新加载:半行按损坏行跳过;恢复后的第一条 append 不能被半行吞掉
+    let session = create_session_with(Some(&path), "/tmp/proj", None).unwrap();
+    assert_eq!(session.corrupt_lines(), 1, "半行应计为损坏行");
+    session
+        .append_message(AgentMessage::user("after crash"))
+        .unwrap();
+
+    let reloaded = create_session_with(Some(&path), "/tmp/proj", None).unwrap();
+    let entries = reloaded.entries();
+    assert!(matches!(
+        entries.last().unwrap(),
+        Entry::Message {
+            message: AgentMessage::User { content, .. },
+            ..
+        } if content == "after crash"
+    ));
+
+    // 不存在半行与新 entry 拼接成的行
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !raw.lines().any(|l| l.contains("\"type\":\"mess{\"")),
+        "半行后应补换行,不允许拼接: {raw}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -223,9 +223,29 @@ fn load_file(path: &Path) -> Result<(SessionHeader, Vec<Entry>, usize), SessionE
             Err(_) => corrupt += 1,
         }
     }
-    header
-        .map(|header| (header, entries, corrupt))
-        .ok_or(SessionError::MissingHeader)
+    let header = header.ok_or(SessionError::MissingHeader)?;
+    repair_missing_trailing_newline(path)?;
+    Ok((header, entries, corrupt))
+}
+
+/// 崩溃恢复:上次写入中途崩溃会留下末尾无换行的半行,load 时已按损坏行跳过;
+/// 若不补上换行,下一次 append 会直接拼接在半行之后,新 entry 被静默吞掉。
+fn repair_missing_trailing_newline(path: &Path) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    drop(file);
+    if last[0] != b'\n' {
+        let mut append = std::fs::OpenOptions::new().append(true).open(path)?;
+        append.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 impl SessionManager {
@@ -265,7 +285,8 @@ impl SessionManager {
     }
 
     pub fn session_name(&self) -> Option<String> {
-        // 最新一条 session_info entry 生效
+        // 最新一条 session_info entry 生效:name=None 表示"清除会话名",
+        // 必须停止查找返回 None,不能跳过它让旧名复活
         self.state
             .lock()
             .unwrap()
@@ -273,9 +294,9 @@ impl SessionManager {
             .iter()
             .rev()
             .find_map(|entry| match entry {
-                Entry::SessionInfo { name, .. } => name.clone(),
+                Entry::SessionInfo { name, .. } => Some(name.clone()),
                 _ => None,
-            })
+            })?
     }
 
     /// 内部追加:分配 id/parentId,落索引,append-only 写文件。

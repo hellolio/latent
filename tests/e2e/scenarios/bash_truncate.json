@@ -1,0 +1,15 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "seq 1 5000"
+        }
+      }
+    ]
+  },
+  {
+    "text": "长输出已截断展示"
+  }
+]

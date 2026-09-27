@@ -156,12 +156,13 @@ fn parse_models_file(path: &Path) -> Result<ModelsFile, String> {
 // ---------------------------------------------------------------------------
 
 fn resolve_credential_value(value: &str) -> Option<String> {
-    if let Ok(env_value) = std::env::var(value) {
-        if !env_value.trim().is_empty() {
-            return Some(env_value);
-        }
+    match std::env::var(value) {
+        Ok(env_value) if !env_value.trim().is_empty() => Some(env_value),
+        // env 名命中但值为空:视为未配置凭据(None),
+        // 不回退字面值 —— 否则 env 变量名会被当作 key 发给 provider
+        Ok(_) => None,
+        Err(_) => Some(value.to_string()),
     }
-    Some(value.to_string())
 }
 
 fn resolve_headers(

@@ -1,0 +1,21 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "read",
+        "arguments": {
+          "path": "a.txt"
+        }
+      },
+      {
+        "name": "read",
+        "arguments": {
+          "path": "b.txt"
+        }
+      }
+    ]
+  },
+  {
+    "text": "两个文件都读完了"
+  }
+]

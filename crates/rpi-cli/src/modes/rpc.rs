@@ -333,7 +333,7 @@ async fn dispatch(
         }
         RpcCommand::SetModel { model } => match config_model_resolver().resolve(&model) {
             Ok(resolved) => {
-                session.set_model(resolved.clone());
+                session.set_model(resolved.clone()).await;
                 write_response(writer, RpcResponse::ok(id, json!({ "model": resolved.id }))).await;
             }
             Err(error) => write_response(writer, RpcResponse::err(id, error.to_string())).await,
@@ -378,28 +378,28 @@ async fn dispatch(
             write_response(writer, RpcResponse::ok(id, json!({ "commands": [] }))).await;
         }
         RpcCommand::Bash { command } => {
-            let output = tokio::process::Command::new("bash")
-                .arg("-c")
-                .arg(&command)
-                .output()
-                .await;
-            match output {
-                Ok(output) => {
-                    write_response(
-                        writer,
-                        RpcResponse::ok(
-                            id,
-                            json!({
-                                "exitCode": output.status.code().unwrap_or(-1),
-                                "stdout": String::from_utf8_lossy(&output.stdout),
-                                "stderr": String::from_utf8_lossy(&output.stderr),
-                            }),
-                        ),
-                    )
-                    .await
-                }
-                Err(error) => write_response(writer, RpcResponse::err(id, error.to_string())).await,
-            }
+            // 长命令同样 spawn:bash 阻塞在内联等待时 abort/get_state/prompt
+            // 全部无响应,且无超时保护,一条 sleep 600 即可让命令循环挂死
+            let writer = writer.clone();
+            return Some(tokio::spawn(async move {
+                let output = tokio::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(&command)
+                    .output()
+                    .await;
+                let response = match output {
+                    Ok(output) => RpcResponse::ok(
+                        id,
+                        json!({
+                            "exitCode": output.status.code().unwrap_or(-1),
+                            "stdout": String::from_utf8_lossy(&output.stdout),
+                            "stderr": String::from_utf8_lossy(&output.stderr),
+                        }),
+                    ),
+                    Err(error) => RpcResponse::err(id, error.to_string()),
+                };
+                write_response(&writer, response).await;
+            }));
         }
         RpcCommand::ExtensionUiResponse {
             id: request_id,

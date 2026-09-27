@@ -1,0 +1,15 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "echo bash-e2e-ok"
+        }
+      }
+    ]
+  },
+  {
+    "text": "bash 执行完毕"
+  }
+]

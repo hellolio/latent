@@ -683,6 +683,20 @@ impl rpi_core::ContextCompactor for SessionCompactor {
         // 压缩后上下文一律从 Session projection 重建(source of truth)
         Ok(self.manager.projection().messages)
     }
+
+    /// 自动压缩阈值判定(06 文档 §3.1):Session projection 的 token 估算
+    /// + should_compact(contextWindow - reserveTokens)。
+    fn should_auto_compact(
+        &self,
+        model: &rpi_ai::Model,
+        _messages: &[rpi_agent::AgentMessage],
+    ) -> bool {
+        let entries = self.manager.branch_entries();
+        let projection = rpi_session::build_session_projection(&entries, None);
+        let estimate =
+            rpi_session::estimate_projected_context_tokens(&projection, &entries);
+        rpi_session::should_compact(estimate.tokens, model.context_window, &self.settings)
+    }
 }
 
 /// mode 侧订阅者(接缝 #5):流式增量直接打印,工具调用打印一行状态。

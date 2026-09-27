@@ -356,8 +356,10 @@ fn kill_process_tree(child: &mut tokio::process::Child) {
 }
 
 #[cfg(not(unix))]
-fn kill_process_tree(_child: &mut tokio::process::Child) {
-    // 非 Unix 保持现状:kill_on_drop(true) 兜底杀直接子进程
+fn kill_process_tree(child: &mut tokio::process::Child) {
+    // 非 Unix 无进程组,kill_on_drop(true) 只在 drop 时杀;若子进程已挂死,
+    // 下方 wait() 永不返回,超时/中止分支自身会挂死 → 先强制杀再收尸
+    let _ = child.start_kill();
 }
 
 /// 输出 + details(pi 的 BashToolDetails {truncation?, fullOutputPath?});

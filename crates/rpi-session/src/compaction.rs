@@ -713,6 +713,13 @@ pub async fn run_compaction(
             SUMMARIZATION_PROMPT.to_string(),
         ),
     };
+    // 序列化后为空(短会话切点落在首个 user 消息,范围内只有 system 元数据,
+    // 而 serialize_conversation 跳过 System)→ 没有可摘要的内容:
+    // 不发摘要请求、不产生 Compaction entry,否则 LLM 在看不到任何对话的
+    // 情况下编造的"摘要"会被当作真实历史压缩结果落盘
+    if conversation.trim().is_empty() {
+        return Ok(None);
+    }
 
     // 摘要请求消息:占位 user 承载序列化对话(实现方把它发给 LLM)
     let mut request_messages = Vec::new();

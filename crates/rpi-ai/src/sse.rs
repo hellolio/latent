@@ -67,16 +67,26 @@ impl LineDecoder {
     }
 
     /// 喂入字节块,产出其中所有完整行(UTF-8)。
+    ///
+    /// 用扫描偏移一次性定位全部行边界再整体保留尾段,避免逐行
+    /// `drain(..=pos)` 对剩余 buffer 的前缀搬移(大 chunk 多行时 O(n²))。
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
         self.buffer.extend_from_slice(chunk);
         let mut lines = Vec::new();
-        while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
-            let line_bytes: Vec<u8> = self.buffer.drain(..=pos).collect();
-            let mut line = &line_bytes[..line_bytes.len() - 1]; // 去掉 \n
+        let mut start = 0usize;
+        let mut search = start;
+        while let Some(pos) = self.buffer[search..].iter().position(|&b| b == b'\n') {
+            let end = search + pos; // \n 的下标
+            let mut line = &self.buffer[start..end];
             if line.last() == Some(&b'\r') {
                 line = &line[..line.len() - 1];
             }
             lines.push(String::from_utf8_lossy(line).into_owned());
+            start = end + 1;
+            search = start;
+        }
+        if start > 0 {
+            self.buffer.drain(..start);
         }
         lines
     }

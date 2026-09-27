@@ -59,19 +59,56 @@ pub(crate) fn trim_base_url(base_url: &str) -> &str {
     base_url.trim_end_matches('/')
 }
 
-/// HTTP 错误响应 → 统一错误文案 `{status}: {body}`。
-pub(crate) fn http_error_message(status: reqwest::StatusCode, body: &str) -> String {
+/// HTTP 错误响应 → 统一错误文案 `{status}: {body}`;响应带 Retry-After(秒)时
+/// 追加 "(retry-after: Ns)" 标记,重试层(retry.rs)据此优先采用服务端退避节奏。
+pub(crate) fn http_error_message(
+    status: reqwest::StatusCode,
+    body: &str,
+    retry_after_secs: Option<u64>,
+) -> String {
     let body = body.trim();
-    if body.is_empty() {
+    let base = if body.is_empty() {
         format!("HTTP {}", status.as_u16())
     } else {
         format!("HTTP {}: {}", status.as_u16(), body)
+    };
+    match retry_after_secs {
+        Some(secs) => format!("{} (retry-after: {}s)", base, secs),
+        None => base,
     }
+}
+
+/// 解析 Retry-After 头(仅接受纯数字秒数;HTTP-date 形式不支持,回退指数退避)。
+pub(crate) fn parse_retry_after_header(
+    value: Option<&reqwest::header::HeaderValue>,
+) -> Option<u64> {
+    value?.to_str().ok()?.trim().parse::<u64>().ok()
 }
 
 /// 请求建立失败:直接以 error 终态收尾(02 文档流协议:请求建立失败可跳过 start)。
 pub(crate) fn setup_error(model: &Model, message: String) -> AssistantMessageEvent {
     AssistantMessageEvent::Error(Box::new(AssistantMessage::error(model, message, false)))
+}
+
+/// 流中失败终态:保留已流出的内容增量(用户在 UI 已看到的 text/tool_use
+/// 不因传输/解析错误丢弃,pi 语义),只覆盖终止原因与错误文案。
+pub(crate) fn error_with_partial(
+    model: &Model,
+    partial: AssistantMessage,
+    message: String,
+) -> AssistantMessageEvent {
+    let mut output = partial;
+    output.stop_reason = crate::types::StopReason::Error;
+    output.error_message = Some(message);
+    AssistantMessageEvent::Error(Box::new(output))
+}
+
+/// 请求体 max_tokens:显式 0 是非法请求体(API 400),视为未指定回退模型默认。
+pub(crate) fn effective_max_tokens(explicit: Option<u32>, model: &Model) -> u64 {
+    explicit
+        .filter(|t| *t > 0)
+        .map(|t| t as u64)
+        .unwrap_or(model.max_tokens as u64)
 }
 
 /// 取消后的终态 aborted 消息。

@@ -11,8 +11,9 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::adapters::{
-    http_error_message, map_thinking_level, observe_payload, observe_provider_event,
-    observe_response, read_chunk, resolve_cache_retention, setup_error, trim_base_url, ReadOutcome,
+    effective_max_tokens, error_with_partial, http_error_message, map_thinking_level,
+    observe_payload, observe_provider_event, observe_response, parse_retry_after_header,
+    read_chunk, resolve_cache_retention, setup_error, trim_base_url, ReadOutcome,
 };
 use crate::json_parse::{parse_json_with_repair, parse_streaming_json};
 use crate::provider::{AssistantMessageEventStream, Provider};
@@ -464,7 +465,7 @@ fn build_request_body(
     if compat.supports_store {
         body["store"] = json!(false);
     }
-    let max_tokens = opts.max_tokens.unwrap_or(model.max_tokens);
+    let max_tokens = effective_max_tokens(opts.max_tokens, model);
     body[compat.max_tokens_field] = json!(max_tokens);
     if let Some(temperature) = opts.temperature {
         body["temperature"] = json!(temperature);
@@ -931,8 +932,9 @@ async fn stream_impl(
         let response = match response {
             Ok(r) if !r.status().is_success() => {
                 let status = r.status();
+                let retry_after = parse_retry_after_header(r.headers().get(reqwest::header::RETRY_AFTER));
                 let body = r.text().await.unwrap_or_default();
-                yield setup_error(&model, http_error_message(status, &body));
+                yield setup_error(&model, http_error_message(status, &body, retry_after));
                 return;
             }
             Ok(r) => {
@@ -972,13 +974,11 @@ async fn stream_impl(
                                     }
                                 }
                                 Err(err) => {
-                                    terminal = Some(AssistantMessageEvent::Error(Box::new(
-                                        AssistantMessage::error(
-                                            &model,
-                                            format!("Could not parse OpenAI SSE chunk: {err}; data={}", event.data),
-                                            false,
-                                        ),
-                                    )));
+                                    terminal = Some(error_with_partial(
+                                        &model,
+                                        state.output.clone(),
+                                        format!("Could not parse OpenAI SSE chunk: {err}; data={}", event.data),
+                                    ));
                                     break 'outer;
                                 }
                             }
@@ -1007,9 +1007,7 @@ async fn stream_impl(
                     return;
                 }
                 ReadOutcome::Transport(message) => {
-                    terminal = Some(AssistantMessageEvent::Error(Box::new(
-                        AssistantMessage::error(&model, message, false),
-                    )));
+                    terminal = Some(error_with_partial(&model, state.output.clone(), message));
                     break;
                 }
             }
@@ -1039,25 +1037,17 @@ async fn stream_impl(
                     StopReason::Stop
                 };
             } else {
-                yield AssistantMessageEvent::Error(Box::new(AssistantMessage::error(
-                    &model,
-                    "Stream ended without finish_reason",
-                    false,
-                )));
+                yield error_with_partial(&model, state.output, "Stream ended without finish_reason".into());
                 return;
             }
         }
         if state.output.stop_reason == StopReason::Pending {
-            yield AssistantMessageEvent::Error(Box::new(AssistantMessage::error(
-                &model,
-                "Stream ended without finish_reason",
-                false,
-            )));
+            yield error_with_partial(&model, state.output, "Stream ended without finish_reason".into());
             return;
         }
         if state.output.stop_reason == StopReason::Error {
-            let message = state.output.error_message.clone().unwrap_or_else(|| "provider error".into());
-            yield AssistantMessageEvent::Error(Box::new(AssistantMessage::error(&model, message, false)));
+            // provider 侧 error:state.output 已携带 stop_reason/error_message 与内容
+            yield AssistantMessageEvent::Error(Box::new(state.output));
             return;
         }
         yield AssistantMessageEvent::Done(Box::new(state.output));

@@ -18,8 +18,8 @@ def test_reply_commits_with_usage_and_footer():
         app.sendline("你好")
         # 流式回复上屏
         app.expect_text(r"这是 mock LLM 的固定回复")
-        # 回合结束后:用量行 + footer token 段(cache 0% 也要显示)
-        app.expect_text(r"\[tokens\]")
+        # 回合结束后:用量盒(标题 tokens)+ footer token 段(cache 0% 也要显示)
+        app.expect_text(r"─+tokens")
         app.expect_text(r"cache 0%")
         app.expect_text(r"↑")
         # 编辑器回到可输入状态
@@ -38,11 +38,19 @@ def test_cjk_committed_without_injected_spaces():
         # 定位带背景色的用户块原始字节,去掉 ANSI 后必须是连续文本。
         # 此前的 bug:insert_before 把宽字符后的空位 cell 打成真实空格,
         # 提交内容变成 "测 试 中 文 消 息"。
+        # 布局调整后编辑器自身也带背景色,逐个背景色段检查,
+        # 任一段里提交文本保持连续即通过。
         raw = "".join(app._raw)
-        match = re.search(r"48;2;\d+;\d+;\d+", raw)
-        assert match, "用户消息块应带背景色"
-        segment = raw[match.start() : match.start() + 800]
-        visible = strip_ansi(segment)
-        assert "测试中文消息" in visible, f"提交的 CJK 文本不应有字间空格: {visible!r}"
+        matches = list(re.finditer(r"48;2;\d+;\d+;\d+", raw))
+        assert matches, "用户消息块应带背景色"
+        found = False
+        last_visible = ""
+        for match in matches:
+            visible = strip_ansi(raw[match.start() : match.start() + 800])
+            if "测试中文消息" in visible:
+                found = True
+                break
+            last_visible = visible
+        assert found, f"提交的 CJK 文本不应有字间空格: {last_visible!r}"
     finally:
         app.close()

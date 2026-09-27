@@ -192,7 +192,16 @@ pub fn viewport(
         )));
         preview.extend(rpi_tui::SelectList::render(&select.list, width, theme));
     } else if preview_cap > 0 && !state.stream_text.is_empty() {
-        let wrapped = rpi_tui::wrap_to_width(&state.stream_text, width);
+        // 只对尾部窗口折行:末尾 preview_cap 行的折行结果由尾部有限字符决定,
+        // 长回复时避免每个 delta/spinner 帧对全量文本 O(n) 重算。
+        // 窗口多取约 2 屏余量,首个可见行与全量折行的差异仅出现在
+        // 单个不可断行 token 跨越 2 屏以上的极端场景
+        let tail_chars = preview_cap.saturating_mul(width).saturating_mul(3) + 512;
+        let mut start = state.stream_text.len().saturating_sub(tail_chars);
+        while start > 0 && !state.stream_text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let wrapped = rpi_tui::wrap_to_width(&state.stream_text[start..], width);
         // 预览恒为固定尾部窗口(不随 ctrl+o 展开态变化):展开态只作用于
         // 定稿转录,避免展开后视口逐增量改高引发闪烁
         let skip = wrapped.len().saturating_sub(preview_cap);

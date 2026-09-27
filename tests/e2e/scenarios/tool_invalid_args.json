@@ -1,0 +1,15 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "read",
+        "arguments": {
+          "limit": 5
+        }
+      }
+    ]
+  },
+  {
+    "text": "参数错误已反馈"
+  }
+]

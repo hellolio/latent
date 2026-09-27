@@ -179,7 +179,7 @@ impl InteractiveState {
             needs_full_redraw: false,
             transcript: Vec::new(),
             pending: Vec::new(),
-            auto_compact: false,
+            auto_compact: true, // 自动压缩已在 session 层接线(阈值触发)
             cwd_display: String::new(),
             git_branch: None,
             current_tool: None,

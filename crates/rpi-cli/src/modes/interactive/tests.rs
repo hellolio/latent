@@ -858,7 +858,7 @@ async fn execute_model_without_arg_opens_selector_at_current_model() {
     match request.kind {
         SelectKind::Model { models } => {
             if let Some(model) = models.get(list.selected) {
-                ctx.session.set_model(model.clone());
+                ctx.session.set_model(model.clone()).await;
                 super::handlers::refresh_footer(&ctx, &mut state);
             }
         }
@@ -991,6 +991,20 @@ async fn typing_slash_opens_filtered_popup() {
         handle_key(&ctx, &mut state, Key::Char(c)).await;
     }
     assert!(!state.slash_popup.visible());
+}
+
+#[tokio::test]
+async fn slash_quit_via_enter_returns_quit_signal() {
+    // 回归:submit_input 曾丢弃 execute_command 的退出信号,/quit 静默失效
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    let mut state = test_state();
+    for c in "/quit".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    let quit = handle_key(&ctx, &mut state, Key::Enter).await;
+    assert!(quit, "/quit 提交后应向事件循环返回退出信号");
 }
 
 #[tokio::test]

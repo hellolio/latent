@@ -42,7 +42,7 @@ pub async fn handle_key(
 ) -> bool {
     // 选择列表激活时,键盘由列表接管
     if state.select.is_some() {
-        handle_select_key(ctx, state, key);
+        handle_select_key(ctx, state, key).await;
         return false;
     }
 
@@ -86,14 +86,17 @@ pub async fn handle_key(
 
     match key {
         rpi_tui::Key::Enter => {
+            // Enter 与 Ctrl+O 同普通键:重置双击 Ctrl+C 窗口
+            state.last_ctrl_c = None;
             let Some(text) = state.take_input() else {
                 return false;
             };
             state.sync_slash_popup();
-            submit_input(ctx, state, text).await;
-            false
+            // 提交可能请求退出(/quit):必须向上传递,否则 /quit 静默失效
+            return submit_input(ctx, state, text).await;
         }
         rpi_tui::Key::Ctrl('o') => {
+            state.last_ctrl_c = None;
             state.expanded = !state.expanded;
             state.needs_full_redraw = true;
             false
@@ -140,7 +143,11 @@ pub async fn handle_key(
 }
 
 /// 选择列表激活时的按键分派。
-fn handle_select_key(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, key: rpi_tui::Key) {
+async fn handle_select_key(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    key: rpi_tui::Key,
+) {
     match key {
         rpi_tui::Key::Up => {
             if let Some(select) = state.select.as_mut() {
@@ -164,7 +171,7 @@ fn handle_select_key(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, key
                     }
                     SelectKind::Model { models } => {
                         if let Some(model) = models.get(index) {
-                            ctx.session.set_model(model.clone());
+                            ctx.session.set_model(model.clone()).await;
                             refresh_footer(ctx, state);
                             state.status = Status::Idle;
                             state.commit_ephemeral(warning_line_theme(
@@ -176,7 +183,7 @@ fn handle_select_key(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, key
                     SelectKind::Thinking => {
                         if let Some(name) = thinking_level_options().get(index) {
                             let level = crate::assembly::parse_thinking_level(name);
-                            ctx.session.set_thinking_level(level);
+                            ctx.session.set_thinking_level(level).await;
                             refresh_footer(ctx, state);
                             state.status = Status::Idle;
                         }
@@ -211,7 +218,11 @@ fn handle_select_key(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, key
 }
 
 /// 提交输入:`!`/`!!` bash 透传、`/` 斜杠命令、普通 prompt。
-async fn submit_input(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, text: String) {
+async fn submit_input(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    text: String,
+) -> bool {
     // `!` bash 透传(优先于斜杠解析)
     if let Some(rest) = text.strip_prefix('!') {
         let (bang_bang, command) = match rest.strip_prefix('!') {
@@ -220,7 +231,7 @@ async fn submit_input(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, te
         };
         if command.is_empty() {
             state.commit_ephemeral(warning_line_theme("usage: !<command>", &state.theme));
-            return;
+            return false;
         }
         state.status = Status::Bash(command.to_string());
         let ui_tx = ctx.ui_tx.clone();
@@ -235,7 +246,7 @@ async fn submit_input(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, te
                 inject: !bang_bang,
             });
         });
-        return;
+        return false;
     }
 
     match slash::parse(&text) {
@@ -252,6 +263,7 @@ async fn submit_input(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, te
                     let _ = ui_tx.send(UiEvent::Notify(format!("Error: {error}")));
                 }
             });
+            return false;
         }
         slash::SlashInput::Unknown(name) => {
             // rpi 无动态命令源:未知 /xxx 本地警告,不发给模型
@@ -259,9 +271,11 @@ async fn submit_input(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, te
                 &format!("Unknown command: {name}(输入 /help 查看可用命令)"),
                 &state.theme,
             ));
+            return false;
         }
         slash::SlashInput::Command(action) => {
-            execute_command(ctx, state, action).await;
+            // 退出类命令(/quit)的信号必须向上传递
+            return execute_command(ctx, state, action).await;
         }
     }
 }
@@ -295,7 +309,11 @@ pub async fn execute_command(
                 return false;
             }
             if arg.is_some() {
-                state.commit_ephemeral(plain_dim("自定义压缩指令暂不支持,已忽略", &state.theme));
+                // 阻断式警告:让用户明确知道参数不会生效,不会误以为自定义指令参与压缩
+                state.commit_ephemeral(warning_line_theme(
+                    "自定义压缩指令暂不支持,本次压缩将使用默认模板",
+                    &state.theme,
+                ));
             }
             state.status = Status::Compacting;
             let session = ctx.session.clone();
@@ -307,7 +325,7 @@ pub async fn execute_command(
         slash::SlashAction::Model { arg } => match arg {
             Some(spec) => match ctx.resolver.resolve(&spec) {
                 Ok(model) => {
-                    ctx.session.set_model(model);
+                    ctx.session.set_model(model).await;
                     refresh_footer(ctx, state);
                     state.status = Status::Idle;
                 }
@@ -335,7 +353,7 @@ pub async fn execute_command(
         slash::SlashAction::Thinking { arg } => match arg {
             Some(name) => match parse_thinking_input(&name) {
                 Some(level) => {
-                    ctx.session.set_thinking_level(level);
+                    ctx.session.set_thinking_level(level).await;
                     refresh_footer(ctx, state);
                     state.status = Status::Idle;
                 }

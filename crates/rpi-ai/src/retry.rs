@@ -54,6 +54,7 @@ static RETRYABLE_PROVIDER_ERROR: LazyLock<Regex> = LazyLock::new(|| {
         "504",
         "520",
         "524",
+        "529",
         "service.?unavailable",
         "server.?error",
         "internal.?error",
@@ -122,6 +123,15 @@ pub fn retry_delay_ms(policy: &RetryPolicy, attempt: u32) -> u64 {
             .max_agent_delay_ms
             .unwrap_or(DEFAULT_MAX_AGENT_RETRY_DELAY_MS),
     )
+}
+
+/// 从错误文案解析服务端 Retry-After 标记(adapters 的 http_error_message 写入
+/// "(retry-after: Ns)");优先于指数退避,尊重服务端退避节奏(如 429/529 限流)。
+pub fn retry_after_ms_from_message(message: &str) -> Option<u64> {
+    static PATTERN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)retry-after:\s*(\d+)s").expect("static pattern"));
+    let captures = PATTERN.captures(message)?;
+    captures[1].parse::<u64>().ok().map(|s| s.saturating_mul(1000))
 }
 
 /// 失败的 assistant 消息是否像瞬时 provider/传输错误。
@@ -232,7 +242,9 @@ where
             .error_message
             .clone()
             .unwrap_or_else(|| "Unknown error".into());
-        let delay_ms = policy.map(|p| retry_delay_ms(p, attempt)).unwrap_or(0);
+        let delay_ms = retry_after_ms_from_message(&error_message)
+            .or_else(|| policy.map(|p| retry_delay_ms(p, attempt)))
+            .unwrap_or(0);
         if let Some(cb) = callbacks {
             cb.on_retry_scheduled(attempt, max_attempts, delay_ms, &error_message);
         }
@@ -406,7 +418,8 @@ impl Provider for RetryingProvider {
 
                 attempt += 1;
                 let error_text = error_message.error_message.clone().unwrap_or_default();
-                let delay_ms = retry_delay_ms(&policy, attempt);
+                let delay_ms = retry_after_ms_from_message(&error_text)
+                    .unwrap_or_else(|| retry_delay_ms(&policy, attempt));
                 if let Some(cb) = &callbacks {
                     cb.on_retry_scheduled(attempt, max_attempts, delay_ms, &error_text);
                 }
@@ -495,9 +508,81 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_marker_is_parsed_from_error_message() {
+        assert_eq!(
+            retry_after_ms_from_message("HTTP 429: slow down (retry-after: 30s)"),
+            Some(30_000)
+        );
+        assert_eq!(
+            retry_after_ms_from_message("HTTP 529 (retry-after: 5s)"),
+            Some(5_000)
+        );
+        assert_eq!(retry_after_ms_from_message("HTTP 503: no header"), None);
+        // HTTP-date 形式不支持 → 回退指数退避
+        assert_eq!(
+            retry_after_ms_from_message("HTTP 429 (retry-after: Wed, 21 Oct 2015 07:28:00 GMT)"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_header_takes_precedence_over_backoff() {
+        #[derive(Default)]
+        struct Cb {
+            delay_ms: std::sync::Mutex<Option<u64>>,
+        }
+        impl RetryCallbacks for Cb {
+            fn on_retry_scheduled(&self, _a: u32, _m: u32, d: u64, _e: &str) {
+                *self.delay_ms.lock().unwrap() = Some(d);
+            }
+        }
+        let model = Model::minimal("m", "mock", "mock");
+        let policy = RetryPolicy {
+            base_delay_ms: 60_000,
+            ..Default::default()
+        };
+        let mut calls = 0;
+        let cb = Cb::default();
+        let _ = retry_assistant_call(
+            || {
+                calls += 1;
+                let calls = calls;
+                let model = model.clone();
+                async move {
+                    if calls == 1 {
+                        AssistantMessage::error(
+                            &model,
+                            "HTTP 429: limited (retry-after: 3s)",
+                            false,
+                        )
+                    } else {
+                        let mut m = AssistantMessage::pending(&model);
+                        m.stop_reason = StopReason::Stop;
+                        m
+                    }
+                }
+            },
+            Some(&policy),
+            None,
+            Some(&cb),
+        )
+        .await;
+        assert_eq!(
+            *cb.delay_ms.lock().unwrap(),
+            Some(3_000),
+            "应采用服务端 Retry-After 而非指数退避"
+        );
+    }
+
+    #[test]
     fn classification_matches_transient_but_not_quota() {
         assert!(is_retryable_assistant_error(&error_message(
             "HTTP 429 Too Many Requests"
+        )));
+        // 529 overloaded(含空 body 时的 "HTTP 529")可重试
+        assert!(is_retryable_assistant_error(&error_message("HTTP 529")));
+        assert!(is_retryable_assistant_error(&error_message(
+            "HTTP 529: overloaded_endpoint"
         )));
         assert!(is_retryable_assistant_error(&error_message(
             "Connection refused"

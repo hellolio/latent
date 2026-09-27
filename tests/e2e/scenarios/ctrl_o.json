@@ -1,0 +1,15 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "for i in $(seq 1 20); do echo output-line-$i; done"
+        }
+      }
+    ]
+  },
+  {
+    "text": "折叠测试完成"
+  }
+]

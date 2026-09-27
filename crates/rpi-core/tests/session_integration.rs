@@ -488,3 +488,72 @@ async fn overflow_recovery_uses_unified_compactor() {
     let last = messages.last().unwrap().as_assistant().unwrap();
     assert_eq!(last.text_content(), "恢复成功");
 }
+
+/// 自动压缩(06 文档 §3.1):run 成功结束后 should_auto_compact 为真 →
+/// 阈值触发主动压缩,set_messages 回填,下一次 prompt 从压缩后上下文开始。
+#[tokio::test]
+async fn auto_compact_triggers_at_threshold_after_run() {
+    struct ThresholdCompactor(AtomicU32);
+    #[async_trait]
+    impl rpi_core::ContextCompactor for ThresholdCompactor {
+        async fn compact(&self, _model: &Model) -> Result<Vec<AgentMessage>, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![AgentMessage::user("压缩后的上下文")])
+        }
+        fn should_auto_compact(&self, _model: &Model, _messages: &[AgentMessage]) -> bool {
+            true
+        }
+    }
+
+    let m = model();
+    let provider = Arc::new(ScriptedProvider::new(
+        &m,
+        vec![
+            ScriptedTurn::text(&m, "第一轮回复"),
+            ScriptedTurn::text(&m, "第二轮回复"),
+        ],
+    ));
+    let compactor = Arc::new(ThresholdCompactor(AtomicU32::new(0)));
+    let session = create_agent_session(AgentSessionConfig {
+        provider,
+        model: m.clone(),
+        hooks: Arc::new(PassthroughHooks),
+        ui: Arc::new(NoopUi),
+        extensions: rpi_core::ExtensionRegistry::default(),
+        tools: vec![],
+        active_tool_names: None,
+        system_prompt: SystemPromptOptions::default(),
+        limits: rpi_agent::TurnLimits::default(),
+        stream_options: Default::default(),
+        session_sink: None,
+        seed_messages: Vec::new(),
+        compactor: Some(compactor.clone()),
+        subscribers: None,
+    })
+    .await
+    .unwrap();
+
+    let stop = session.prompt("第一问").await.unwrap().stop();
+    assert_eq!(stop, rpi_agent::RunStop::EndTurn);
+    assert_eq!(
+        compactor.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "run 结束后应触发一次自动压缩"
+    );
+    // 压缩结果已回填:转录被替换为压缩后上下文(最后一条来自 compact 返回)
+    let messages = session.agent().messages();
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, AgentMessage::User { content, .. } if content == "压缩后的上下文")),
+        "自动压缩后上下文应回填: {messages:?}"
+    );
+
+    // 第二次成功 run 结束后同样触发(每次 EndTurn 后都检查阈值)
+    session.prompt("第二问").await.unwrap();
+    assert_eq!(
+        compactor.0.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "每次成功 run 后都应检查阈值"
+    );
+}

@@ -220,18 +220,29 @@ impl Tool for EditTool {
             None => (false, raw.clone()),
         };
         let line_ending = detect_line_ending(&content_raw);
-        let normalized = content_raw.replace("\r\n", "\n");
+        // 直接在原始内容上替换:old/new 的换行先归一到 LF 再转成文件行尾。
+        // 不做"整体归一 → 写回转回":混合行尾文件会把未编辑区域的裸 LF
+        // 也改写成 CRLF(超出编辑范围的内容变异)
+        let edits_native: Vec<Edit> = edits
+            .iter()
+            .map(|edit| Edit {
+                old_text: edit
+                    .old_text
+                    .replace("\r\n", "\n")
+                    .replace('\n', line_ending),
+                new_text: edit
+                    .new_text
+                    .replace("\r\n", "\n")
+                    .replace('\n', line_ending),
+            })
+            .collect();
 
         let (edited, first_changed_line) =
-            apply_edits(&normalized, &edits).map_err(|message| ToolError::Failed {
+            apply_edits(&content_raw, &edits_native).map_err(|message| ToolError::Failed {
                 name: "edit".into(),
                 message,
             })?;
-        let mut output_text = if line_ending == "\r\n" {
-            edited.replace('\n', "\r\n")
-        } else {
-            edited
-        };
+        let mut output_text = edited;
         if bom {
             output_text.insert(0, '\u{feff}');
         }
@@ -308,6 +319,36 @@ mod tests {
         assert!(content.contains("alpha BETA"));
         assert!(content.contains("alpha GAMMA"));
         assert!(content.contains("\r\n"), "应恢复 CRLF 行尾");
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_line_endings_unedited_lf_lines_are_untouched() {
+        let dir = std::env::temp_dir().join(format!("rpi-edit-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // 混合行尾:编辑只允许影响被编辑行,未编辑区域的裸 LF 不得被改写成 CRLF
+        let path = dir.join("mixed.txt");
+        tokio::fs::write(&path, "crlf line\r\nlf line\nplain crlf\r\n")
+            .await
+            .unwrap();
+
+        let tool = EditTool { cwd: dir.clone() };
+        let output = exec(
+            &tool,
+            serde_json::json!({
+                "path": "mixed.txt",
+                "edits": [{"oldText": "crlf line", "newText": "crlf LINE"}]
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(output.output.contains("Applied 1 edit(s)"));
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(
+            content, "crlf LINE\r\nlf line\nplain crlf\r\n",
+            "未编辑区域的行尾必须原样保留"
+        );
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
