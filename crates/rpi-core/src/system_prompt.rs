@@ -1,6 +1,6 @@
 //! 系统提示词 sections 机制(04 文档 §3):提示词是**可增量更新的命名 sections
-//! 状态**,存在转录里而不是每请求重算的字符串。`diff_system_prompt_sections`
-//! 产出 `SystemMessage.sections` patch(变更节 = 新文本,消失节 = null)。
+//! 状态**,只在内存与请求级字段中维护 —— session 不持久化能力规则,恢复时
+//! 从当前配置重新组装。
 
 use std::collections::BTreeMap;
 
@@ -173,30 +173,9 @@ pub fn build_system_prompt_state(
     )?))
 }
 
-/// 对旧节 diff,产出 SystemMessage.sections patch(变更节 = 新文本,消失节 = null;
-/// 04 文档 diffSystemPromptSections)。
-pub fn diff_system_prompt_sections(
-    old: &SystemPromptSections,
-    new: &SystemPromptSections,
-) -> BTreeMap<String, Option<String>> {
-    let mut patch: BTreeMap<String, Option<String>> = BTreeMap::new();
-    for (name, text) in new {
-        if old.get(name) != Some(text) {
-            patch.insert(name.clone(), Some(text.clone()));
-        }
-    }
-    for name in old.keys() {
-        if !new.contains_key(name) {
-            patch.insert(name.clone(), None);
-        }
-    }
-    patch
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn options() -> SystemPromptOptions {
         SystemPromptOptions {
@@ -252,24 +231,5 @@ mod tests {
         assert!(text.contains("<tools>\nAvailable tools:"), "{text}");
         assert!(text.contains("<cwd>\nWorking directory: /tmp/proj"), "{text}");
         assert!(text.contains("<rules>"), "{text}");
-    }
-
-    #[test]
-    fn diff_produces_replace_and_delete() {
-        let mut old: SystemPromptSections = BTreeMap::new();
-        old.insert("preamble".into(), "old pre".into());
-        old.insert("rules".into(), "old rules".into());
-        old.insert("stale".into(), "gone".into());
-        let mut new: SystemPromptSections = BTreeMap::new();
-        new.insert("preamble".into(), "old pre".into());
-        new.insert("rules".into(), "new rules".into());
-
-        let patch = diff_system_prompt_sections(&old, &new);
-        assert_eq!(patch.get("preamble"), None, "未变节不进 patch");
-        assert_eq!(patch.get("rules").unwrap(), &Some("new rules".into()));
-        assert_eq!(patch.get("stale").unwrap(), &None);
-        // patch 的 serde 形态与 SystemMessage.sections 兼容
-        let value = serde_json::to_value(&patch).unwrap();
-        assert_eq!(value, json!({"rules": "new rules", "stale": null}));
     }
 }

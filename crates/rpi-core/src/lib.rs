@@ -27,6 +27,6 @@ pub use session::{
     SessionSink, SessionSubscriber,
 };
 pub use system_prompt::{
-    build_system_prompt_sections, build_system_prompt_state, diff_system_prompt_sections,
-    sections_to_text, SystemPromptOptions, SystemPromptSections, SystemPromptState,
+    build_system_prompt_sections, build_system_prompt_state, sections_to_text,
+    SystemPromptOptions, SystemPromptSections, SystemPromptState,
 };

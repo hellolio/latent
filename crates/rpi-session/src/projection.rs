@@ -29,6 +29,8 @@ pub struct SessionProjection {
     pub messages: Vec<AgentMessage>,
     pub thinking_level: String,
     pub model: Option<ModelRef>,
+    /// 激活工具集(最新 tool_set_change entry;None = 会话内从未切换,用默认集)
+    pub active_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -36,6 +38,7 @@ pub struct SessionContext {
     pub messages: Vec<AgentMessage>,
     pub thinking_level: String,
     pub model: Option<ModelRef>,
+    pub active_tools: Option<Vec<String>>,
 }
 
 /// by_id 索引(Entry id → 序列位置)。
@@ -106,15 +109,7 @@ pub fn build_context_entries<'a>(entries: &'a [Entry], leaf_id: Option<&str>) ->
         if entry.id() == first_kept_entry_id {
             found_first_kept = true;
         }
-        if found_first_kept
-            && !matches!(
-                entry,
-                Entry::Message {
-                    message: AgentMessage::System { .. },
-                    ..
-                }
-            )
-        {
+        if found_first_kept {
             context_entries.push(entry);
         }
     }
@@ -123,9 +118,10 @@ pub fn build_context_entries<'a>(entries: &'a [Entry], leaf_id: Option<&str>) ->
 }
 
 /// 从路径提取设置态(06 文档 getSessionContextSettings)。
-fn get_session_context_settings(path: &[&Entry]) -> (String, Option<ModelRef>) {
+fn get_session_context_settings(path: &[&Entry]) -> (String, Option<ModelRef>, Option<Vec<String>>) {
     let mut thinking_level = "off".to_string();
     let mut model: Option<ModelRef> = None;
+    let mut tools: Option<Vec<String>> = None;
     for entry in path {
         match entry {
             Entry::ThinkingLevelChange {
@@ -140,6 +136,11 @@ fn get_session_context_settings(path: &[&Entry]) -> (String, Option<ModelRef>) {
                     model_id: model_id.clone(),
                 })
             }
+            Entry::ToolSetChange {
+                tools: names, ..
+            } => {
+                tools = Some(names.clone());
+            }
             Entry::Message {
                 message: AgentMessage::Assistant(assistant),
                 ..
@@ -152,7 +153,7 @@ fn get_session_context_settings(path: &[&Entry]) -> (String, Option<ModelRef>) {
             _ => {}
         }
     }
-    (thinking_level, model)
+    (thinking_level, model, tools)
 }
 
 /// 单个 entry 的上下文消息(06 文档 sessionEntryToContextMessages)。
@@ -192,19 +193,13 @@ pub fn session_entry_to_context_messages(entry: &Entry) -> Vec<AgentMessage> {
         }
         Entry::Compaction {
             summary,
-            system_message,
             timestamp,
             ..
         } => {
-            let mut messages = Vec::new();
-            if let Some(system) = system_message {
-                messages.push(system.clone());
-            }
-            messages.push(AgentMessage::CompactionSummary {
+            vec![AgentMessage::CompactionSummary {
                 summary: summary.clone(),
                 timestamp: *timestamp,
-            });
-            messages
+            }]
         }
         // context_ref 是提交上下文的外部快照引用(审计用),显式不进模型上下文
         Entry::ContextRef { .. } => Vec::new(),
@@ -274,7 +269,7 @@ fn project_context_entry(
 /// (多个 compaction 时旧的忽略);同时从设置态 entry 提取 thinkingLevel/model。
 pub fn build_session_projection(entries: &[Entry], leaf_id: Option<&str>) -> SessionProjection {
     let path = build_session_path(entries, leaf_id);
-    let (thinking_level, model) = get_session_context_settings(&path);
+    let (thinking_level, model, active_tools) = get_session_context_settings(&path);
     let context_entries = build_context_entries(entries, leaf_id);
 
     // 路径上的 context_edit 按 targetId 建表;同一 target 后者覆盖(pi 语义)
@@ -320,6 +315,7 @@ pub fn build_session_projection(entries: &[Entry], leaf_id: Option<&str>) -> Ses
         messages,
         thinking_level,
         model,
+        active_tools,
     }
 }
 
@@ -330,5 +326,6 @@ pub fn build_session_context(entries: &[Entry], leaf_id: Option<&str>) -> Sessio
         messages: projection.messages,
         thinking_level: projection.thinking_level,
         model: projection.model,
+        active_tools: projection.active_tools,
     }
 }

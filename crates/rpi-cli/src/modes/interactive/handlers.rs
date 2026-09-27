@@ -21,12 +21,23 @@ use super::view;
 /// 键盘/命令处理共用的会话上下文(状态 + TUI 之外的全部依赖)。
 pub struct InteractiveCtx<'a> {
     pub session: &'a Arc<rpi_core::AgentSession>,
-    /// None = 内存会话(无 SessionManager)
-    pub session_manager: Option<&'a Arc<rpi_session::SessionManager>>,
+    /// None = 内存会话(无 SessionManager);经 holder 读取当前值(/new 可切换)
+    pub manager_holder: Option<&'a crate::assembly::SessionManagerHolder>,
     /// `/model` 的候选与解析(models.json + 内置 provider 默认表)
     pub resolver: &'a ModelResolver,
+    /// 装配生效的压缩配置(/session 展示)
+    pub compaction_config: &'a crate::assembly::CompactionConfig,
     /// prompt 错误兜底回 UI 通道(事件流之外的装配/并发错误)
     pub ui_tx: mpsc::UnboundedSender<UiEvent>,
+}
+
+impl InteractiveCtx<'_> {
+    /// 当前会话管理器(/new 切换后返回新会话)。
+    pub fn current_manager(
+        &self,
+    ) -> Option<Arc<rpi_session::SessionManager>> {
+        self.manager_holder.and_then(|holder| holder.get())
+    }
 }
 
 use std::sync::Arc;
@@ -322,6 +333,46 @@ pub async fn execute_command(
                 let _ = ui_tx.send(UiEvent::CompactDone(session.compact().await));
             });
         }
+        slash::SlashAction::New => {
+            // 流式期间切换会让进行中的 run 写入错误的 session 文件
+            if ctx.session.agent().is_streaming() {
+                state.commit_ephemeral(view::error_line(
+                    "run 进行中不能新建会话;等待 run 结束或 Esc 中止后再试",
+                    &state.theme,
+                ));
+                return false;
+            }
+            match ctx.manager_holder {
+                Some(holder) => match crate::assembly::switch_new_session(ctx.session, holder)
+                    .await
+                {
+                    Ok(path) => {
+                        // 清空转录区/用量,底部提示新会话(旧会话原样保留在原文件)
+                        state.reset_for_new_session();
+                        refresh_footer(ctx, state);
+                        let message = match &path {
+                            Some(path) => {
+                                format!("new session started: {}", path.display())
+                            }
+                            None => "new session started".to_string(),
+                        };
+                        state.commit_line(plain_dim(&message, &state.theme));
+                    }
+                    Err(error) => {
+                        state.commit_ephemeral(view::error_line(
+                            &format!("新建会话失败: {error}"),
+                            &state.theme,
+                        ));
+                    }
+                },
+                None => {
+                    state.commit_ephemeral(warning_line_theme(
+                        "当前无会话存储,无法新建会话",
+                        &state.theme,
+                    ));
+                }
+            }
+        }
         slash::SlashAction::Model { arg } => match arg {
             Some(spec) => match ctx.resolver.resolve(&spec) {
                 Ok(model) => {
@@ -450,7 +501,7 @@ fn open_theme_selector(state: &mut InteractiveState) {
 
 fn session_info_lines(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> Vec<String> {
     let mut lines = vec!["session".to_string()];
-    match ctx.session_manager {
+    match ctx.current_manager() {
         Some(manager) => {
             lines.push(format!("  id:   {}", manager.session_id()));
             lines.push(format!(
@@ -472,6 +523,24 @@ fn session_info_lines(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> Vec
     lines.push(format!(
         "  usage:    {} tok · ${:.6}",
         state.usage.total.total_tokens, state.usage.total.cost.total
+    ));
+    // reserve 显示:< 1.0 是窗口百分比,换算成当前模型的实际 token 数一起展示
+    let reserve = &ctx.compaction_config.reserve_tokens;
+    let reserve_display = if *reserve > 0.0 && *reserve < 1.0 {
+        let resolved = rpi_session::reserve_tokens_for_window(*reserve, state.context_window);
+        format!("{:.0}% ({} tok of {})", reserve * 100.0, resolved, state.context_window)
+    } else {
+        format!("{} tok", reserve)
+    };
+    lines.push(format!(
+        "  compact:  {} (reserve {}, keep recent {} tok)",
+        if ctx.compaction_config.enabled {
+            "auto"
+        } else {
+            "off"
+        },
+        reserve_display,
+        ctx.compaction_config.keep_recent_tokens
     ));
     lines
 }

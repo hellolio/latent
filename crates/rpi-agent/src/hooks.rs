@@ -168,19 +168,6 @@ impl LoopHooks for PassthroughHooks {
         use rpi_ai::Message;
         msgs.iter()
             .filter_map(|msg| match msg {
-                AgentMessage::System {
-                    content,
-                    sections,
-                    tools_added,
-                    tools_removed,
-                    timestamp,
-                } => Some(Message::System {
-                    content: content.clone(),
-                    sections: sections.clone(),
-                    tools_added: tools_added.clone(),
-                    tools_removed: tools_removed.clone(),
-                    timestamp: *timestamp,
-                }),
                 AgentMessage::User { content, timestamp } => Some(Message::User {
                     content: rpi_ai::UserContent::Text(content.clone()),
                     timestamp: *timestamp,

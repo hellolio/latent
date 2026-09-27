@@ -96,3 +96,39 @@ pytest -v          # 在 tests/e2e/ 下
 harness 扩展：`RpiApp(home=..., workdir=...)` 支持跨实例复用隔离环境（--continue/半行恢复测试）；models.json 每次启动重写（mock 端口随机）。
 
 未纳入本轮（与评审确认一致）：print/json/rpc 三种模式的 e2e（Rust 侧 modes.rs 已覆盖）；模型选择器键盘交互、`!` 透传命令可作后续补充。
+
+---
+
+# 三项功能实现报告（2026-09-27，同日第二轮）
+
+## F1 session 纯净度：session 只存状态，不存能力规则
+
+规则：session 中只保留状态类信息（用户/助手/工具调用记录）；系统提示词、工具 schema 等"能力规则类"提示词一律不进 session，每次请求经请求级字段动态下发。
+
+评审确认的三条违背路径（移植 pi "sections 存转录里"设计所致）与修复：
+
+| 违背路径 | 修复 |
+|---|---|
+| `declare.rs` 每个 turn 把工具 schema 声明作为 `AgentMessage::System` 写进转录并落盘 | 删除整个"转录重放求工具可见集"机制（`declare.rs` 整文件、`AgentMessage::System` 变体、`Message` 循环注入点、convert_to_llm System 分支）。工具 schema 本就每次请求经 `Context.tools` 动态下发，声明机制对模型可见性冗余；I6 不变量改由请求级下发保证 |
+| 工具集变更 / `update_system_prompt` 把 sections patch 作为 System 消息压进 `pending_system_messages` | `pending_system_messages` 机制整体移除；sections 状态只在内存维护并随请求下发；工具集变更落新元数据 entry `tool_set_change`（只记工具名） |
+| `Compaction.systemMessage` 把压缩边界的完整 prompt + 工具快照落盘并在投影时重回上下文 | `CompactionOutcome.system_message` 与 entry 字段删除（v4 旧文件的该字段反序列化时忽略，兼容；`CURRENT_SESSION_VERSION` 升 5） |
+
+resume 重建：系统提示词从当前配置重组（AGENTS.md / system-prompt.md）；激活工具集从 `tool_set_change` entry 恢复（投影新增 `active_tools`，装配期校验后传入）；转录回放不再出现 System 消息。
+
+## F2 `/new` 进程内新建会话
+
+- `slash.rs` 新增 `/new`（流式期间拒绝，与 /compact 一致）；
+- 装配层新增 `SessionManagerHolder` 可切换指针：SessionManagerSink / SessionCompactor / PI_* 环境闭包每次使用读当前值，`switch_new_session` 原子切换；
+- 旧文件零操作（append-only 天然已保存）；新文件 header 记 `parentSession` 血缘；模型/思考级别作为设置态 entry 写入新文件保持自描述；
+- TUI 清空转录区/用量、提示新 session 路径、footer 刷新。
+
+## F3 压缩补差
+
+- **超长 Tool Result 裁剪**（Current Turn 层）：`loop_.rs` 新增 `trim_tool_result_output` + `LoopConfig.tool_result_max_chars`，超限（默认 20000 字符，settings `toolResultMaxChars` 可配，0 = 关）头 60% + 尾 40% 保留、中间省略标注，进转录前生效 —— 内存转录、session 落盘、模型上下文三者一致；
+- **自动压缩阈值可配置**：settings `compaction` 节（`enabled`/`reserveTokens`/`keepRecentTokens`）→ `CompactionConfig` → `SessionCompactor`；`/session` 信息行展示当前配置。
+
+## 验证
+
+- Rust：`cargo test --workspace` 420 passed / 0 failed（含新增：转录纯净性、set_active_tools 无转录噪声、loop 不注入合成消息、trim 单元/端到端、`switch_new_session_starts_fresh_file_and_keeps_old`、tool_set_change roundtrip、run_compaction 空范围回归改用 tool_set_change 元数据）;
+- E2E：**31 passed / 0 failed**，新增 T21（`test_new_session.py`）：/new 后请求不携带旧上下文、旧文件不动、会话文件数 1→2；--continue 续到新会话且回放/请求均不含旧会话内容。
+- 设计文档：docs/06 差异记录已更新（持久化边界、/new、裁剪、可配置阈值）。

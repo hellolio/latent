@@ -57,6 +57,12 @@ struct SettingsFile {
     /// **空数组 `[]` = 显式不激活任何工具**
     #[serde(rename = "tools", alias = "active_tools", default)]
     tools: Option<Vec<String>>,
+    /// 超长 tool result 进转录的字符上限(头尾裁剪);未配置 = 默认 20000
+    #[serde(rename = "toolResultMaxChars", alias = "tool_result_max_chars", default)]
+    tool_result_max_chars: Option<usize>,
+    /// 自动压缩阈值(`compaction` 节)
+    #[serde(rename = "compaction", alias = "auto_compact", default)]
+    compaction: Option<CompactionConfig>,
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
@@ -196,10 +202,79 @@ fn system_prompt_override_from(cwd: Option<&Path>, home: Option<&Path>) -> Optio
 }
 
 /// 装配产物:四种模式共享的业务核句柄。`session_manager` 供 rpc 模式的
-/// get_tree/get_entries/fork 命令查询会话树(rpi-session 是可选组件)。
+/// get_tree/get_entries/fork 命令查询会话树(rpi-session 是可选组件);
+/// `manager_holder` 是可切换指针 —— /new 运行期新建 session 时整体换目标,
+/// sink/compactor/PI_* 环境闭包每次使用都读当前值。
 pub struct BuiltSession {
     pub session: Arc<AgentSession>,
     pub session_manager: Option<Arc<rpi_session::SessionManager>>,
+    pub manager_holder: SessionManagerHolder,
+    /// 装配生效的压缩配置(/session 展示用)
+    pub compaction_config: CompactionConfig,
+}
+
+/// 可切换的会话存储句柄(内部 `Arc<RwLock<Option<Arc<SessionManager>>>>`)。
+#[derive(Clone, Default)]
+pub struct SessionManagerHolder(
+    Arc<std::sync::RwLock<Option<Arc<rpi_session::SessionManager>>>>,
+);
+
+impl SessionManagerHolder {
+    pub fn new(manager: Option<Arc<rpi_session::SessionManager>>) -> Self {
+        SessionManagerHolder(Arc::new(std::sync::RwLock::new(manager)))
+    }
+
+    pub fn get(&self) -> Option<Arc<rpi_session::SessionManager>> {
+        self.0.read().unwrap().clone()
+    }
+
+    pub fn set(&self, manager: Option<Arc<rpi_session::SessionManager>>) {
+        *self.0.write().unwrap() = manager;
+    }
+}
+
+/// /new(pi 无对应命令,rpi 扩展):新建 session 文件并把全部持久化句柄
+/// (sink/compactor/PI_* 环境)切过去。旧文件不做任何操作 —— append-only
+/// 语义下它天然处于已保存状态。模型/思考级别作为设置态 entry 写入新文件,
+/// 保持新会话自描述。流式期间调用方须先行拒绝。返回新 session 文件路径
+/// (内存会话为 None)。
+pub async fn switch_new_session(
+    session: &AgentSession,
+    holder: &SessionManagerHolder,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let old = holder.get();
+    let parent_session = old.as_ref().map(|manager| manager.session_id().to_string());
+    let new_manager: Arc<rpi_session::SessionManager> =
+        match old.as_ref().and_then(|manager| manager.file_path()) {
+            Some(old_file) => {
+                let dir = old_file
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                rpi_session::create_session_in_dir(
+                    dir,
+                    &cwd.display().to_string(),
+                    parent_session.as_deref(),
+                )
+                .map_err(|e| e.to_string())?
+                .into()
+            }
+            None => rpi_session::create_session(None::<String>)
+                .map_err(|e| e.to_string())?
+                .into(),
+        };
+    let new_path = new_manager.file_path().map(|p| p.to_path_buf());
+    holder.set(Some(new_manager));
+
+    // 清空转录与队列(错误状态一并复位);模型/思考级别随新文件落设置态 entry
+    session.agent().reset().map_err(|e| e.to_string())?;
+    let snapshot = session.agent().state_snapshot();
+    if let Some(model) = snapshot.model {
+        session.set_model(model).await;
+    }
+    session.set_thinking_level(snapshot.thinking_level).await;
+    Ok(new_path)
 }
 
 /// 会话存储策略:`Memory` 纯内存(测试);`New` 在目录下新建
@@ -232,14 +307,19 @@ pub struct BuildOptions {
     /// `tools` 键解析成此字段 —— build_session 不直接读用户 settings,测试
     /// 不依赖本机配置。
     pub active_tools: Option<Vec<String>>,
+    /// 超长 tool result 字符上限:None = 默认 20000;Some(0) = 不裁剪。
+    pub tool_result_max_chars: Option<usize>,
+    /// 自动压缩阈值(默认 = CompactionSettings::default)。
+    pub compaction: CompactionConfig,
 }
 
 /// T9:PI_* 会话环境快照闭包。装配期建共享 cell(`Weak<AgentSession>`),
 /// session 建好后回填;工具执行时按需读取,无 session(空 cell)返回空 =
 /// 现状行为。禁用可变全局状态(policy §2):经工具配置参数注入。
+/// manager 经 holder 读取:/new 切换后 PI_SESSION_* 跟随新会话。
 fn session_env_fn(
     session_cell: Arc<Mutex<Weak<AgentSession>>>,
-    session_manager: Arc<rpi_session::SessionManager>,
+    manager_holder: SessionManagerHolder,
 ) -> rpi_tools::SessionEnvFn {
     Arc::new(move || {
         let Some(session) = session_cell.lock().unwrap().upgrade() else {
@@ -257,12 +337,11 @@ fn session_env_fn(
                 thinking_level_name(level).into(),
             ));
         }
-        env.push((
-            "PI_SESSION_ID".into(),
-            session_manager.session_id().to_string(),
-        ));
-        if let Some(path) = session_manager.file_path() {
-            env.push(("PI_SESSION_FILE".into(), path.display().to_string()));
+        if let Some(manager) = manager_holder.get() {
+            env.push(("PI_SESSION_ID".into(), manager.session_id().to_string()));
+            if let Some(path) = manager.file_path() {
+                env.push(("PI_SESSION_FILE".into(), path.display().to_string()));
+            }
         }
         env
     })
@@ -301,13 +380,66 @@ pub struct SessionSettings {
     pub context_snapshot: bool,
     /// settings `tools`:None = 全部激活;Some(空) = 不激活任何工具
     pub active_tools: Option<Vec<String>>,
+    /// settings `toolResultMaxChars`:超长 tool result 进转录的字符上限
+    /// (头尾裁剪);None = 默认 20000,0 = 不裁剪
+    pub tool_result_max_chars: Option<usize>,
+    /// settings 压缩配置(自动压缩阈值,见 `CompactionConfig`)
+    pub compaction: CompactionConfig,
 }
 
-/// CLI 入口用:按 项目 → 全局 顺序解析 settings 的运行期开关。
+/// 压缩设置(settings `compaction` 节;自动压缩阈值可配置)。
+/// `reserveTokens` 语义:**>= 1.0 = 绝对 token 数**;**0 < v < 1.0 = context_window
+/// 的百分比**(0.1 = 10%,随模型窗口缩放;100% 无法表达)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CompactionConfig {
+    /// 自动压缩总开关
+    pub enabled: bool,
+    /// 上下文保留预算(绝对 token 数或窗口百分比)
+    pub reserve_tokens: f64,
+    /// 压缩时保留的近期原文 token 预算
+    pub keep_recent_tokens: u64,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        let d = rpi_session::CompactionSettings::default();
+        CompactionConfig {
+            enabled: d.enabled,
+            reserve_tokens: d.reserve_tokens,
+            keep_recent_tokens: d.keep_recent_tokens,
+        }
+    }
+}
+
+impl From<CompactionConfig> for rpi_session::CompactionSettings {
+    fn from(config: CompactionConfig) -> Self {
+        rpi_session::CompactionSettings {
+            enabled: config.enabled,
+            reserve_tokens: config.reserve_tokens,
+            keep_recent_tokens: config.keep_recent_tokens,
+        }
+    }
+}
+
+/// CLI 入口用:按 项目 → 全局 顺序解析 settings 的运行期开关(项目优先,
+/// 各键独立回退全局)。
 pub fn load_session_settings() -> SessionSettings {
+    let cwd = std::env::current_dir().ok();
+    let home = dirs_home();
+    let files = read_settings_files(cwd.as_deref(), home.as_deref());
+    let tool_result_max_chars = files
+        .iter()
+        .find_map(|settings| settings.tool_result_max_chars);
+    let compaction = files
+        .iter()
+        .find_map(|settings| settings.compaction.clone())
+        .unwrap_or_default();
     SessionSettings {
         context_snapshot: load_context_snapshot_enabled(),
         active_tools: load_active_tool_names(),
+        tool_result_max_chars,
+        compaction,
     }
 }
 
@@ -323,6 +455,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         session_store,
         context_snapshot,
         active_tools,
+        tool_result_max_chars,
+        compaction,
     } = options;
 
     // 扩展:settings → spawn → 总线;连接失败 = 诊断 + 跳过(绝不击穿宿主)
@@ -363,6 +497,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             .map_err(|e| e.to_string())?
             .into(),
     };
+    let manager_holder = SessionManagerHolder::new(Some(session_manager.clone()));
     // 上下文快照(context_ref):调用方显式开启(main 从 settings `contextSnapshot`
     // 解析)才装配 —— 经 `StreamOptions.on_payload` 观测**发送前的原始请求体**
     // (第一手),原样落盘到 session 旁 .ctx 目录 + context_ref entry。默认关,
@@ -381,16 +516,16 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     };
 
     // transcript 统一:resume 时从 Session projection 回填初始转录(source of
-    // truth → context);设置态(thinking level)一并恢复
-    let (seed_messages, seed_thinking_level) = match &session_store {
+    // truth → context);设置态(thinking level、激活工具集)一并恢复
+    let (seed_messages, seed_thinking_level, seed_active_tools) = match &session_store {
         SessionStore::Resume { .. } => {
             let context = rpi_session::build_session_context(
                 &session_manager.branch_entries(),
                 session_manager.get_leaf_id().as_deref(),
             );
-            (context.messages, context.thinking_level)
+            (context.messages, context.thinking_level, context.active_tools)
         }
-        _ => (Vec::new(), "off".to_string()),
+        _ => (Vec::new(), "off".to_string(), None),
     };
 
     // T9/T10:shell 工具装配选项 —— PI_* 会话环境 + settings 命令前缀 + spawn 钩子
@@ -398,7 +533,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     let shell = rpi_tools::ShellSpawnOptions {
         session_env: Some(session_env_fn(
             session_cell.clone(),
-            session_manager.clone(),
+            manager_holder.clone(),
         )),
         command_prefix: load_shell_command_prefix(),
         spawn_hook,
@@ -419,16 +554,21 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         Some(retry_hooks),
     );
 
+    let compaction_settings: rpi_session::CompactionSettings = compaction.clone().into();
     let compactor: Arc<dyn rpi_core::ContextCompactor> = Arc::new(SessionCompactor {
-        manager: session_manager.clone(),
+        manager_holder: manager_holder.clone(),
         provider: provider.clone(),
-        settings: rpi_session::CompactionSettings::default(),
+        settings: compaction_settings,
     });
-    // 激活工具集:调用方显式传入(main 从 settings `tools` 解析),未传 = 全部;
+    // 激活工具集:会话内切换过(ToolSetChange entry)则按记录恢复并校验;
+    // 否则用调用方显式传入(main 从 settings `tools` 解析),未传 = 全部;
     // 配置了未知工具名直接报错(配置错误要显式暴露)
-    let active_tool_names = match active_tools {
-        None => None,
+    let active_tool_names = match seed_active_tools {
         Some(names) => Some(resolve_active_tools(&names, &tools)?),
+        None => match active_tools {
+            None => None,
+            Some(names) => Some(resolve_active_tools(&names, &tools)?),
+        },
     };
     let session = Arc::new(
         create_agent_session(AgentSessionConfig {
@@ -449,7 +589,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             },
             limits: rpi_agent::TurnLimits::default(),
             stream_options,
-            session_sink: Some(Arc::new(SessionManagerSink(session_manager.clone()))),
+            session_sink: Some(Arc::new(SessionManagerSink(manager_holder.clone()))),
             seed_messages,
             compactor: Some(compactor),
             subscribers: Some(subscribers.clone()),
@@ -461,6 +601,11 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // resume 设置态恢复:直接回填 Agent 状态(不再落 thinking_level_change entry)
     if let Some(level) = parse_thinking_level(&seed_thinking_level) {
         session.agent().set_thinking_level(Some(level));
+    }
+    // 超长 tool result 裁剪上限(settings `toolResultMaxChars`;None = 默认值,
+    // Agent 构造时已设,这里只处理显式覆盖)
+    if let Some(max_chars) = tool_result_max_chars {
+        session.agent().set_tool_result_max_chars(max_chars);
     }
 
     // T9:session 建好后回填共享 cell,PI_* 环境闭包此后可按需快照
@@ -485,6 +630,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     Ok(BuiltSession {
         session,
         session_manager: Some(session_manager),
+        manager_holder,
+        compaction_config: compaction,
     })
 }
 
@@ -511,6 +658,8 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         session_store: request.session_store,
         context_snapshot: Some(request.settings.context_snapshot),
         active_tools: request.settings.active_tools,
+        tool_result_max_chars: request.settings.tool_result_max_chars,
+        compaction: request.settings.compaction,
     })
     .await?;
 
@@ -533,26 +682,46 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
 /// rpi-core 的 `SessionSink` 适配器:把可选组件 rpi-session 注入业务核。
 /// 拆卸 rpi-session 时删除本结构体即可,core 与其余 crate 不受影响。
 /// transcript 统一:消息 / usage / 模型与思考级别变更全部落盘。
-struct SessionManagerSink(Arc<rpi_session::SessionManager>);
+/// manager 经 holder 读取:/new 切换后写入跟随新会话。
+struct SessionManagerSink(SessionManagerHolder);
 #[async_trait]
 impl SessionSink for SessionManagerSink {
     async fn append(&self, message: &rpi_agent::AgentMessage) -> Result<(), String> {
-        self.0
+        let Some(manager) = self.0.get() else {
+            return Ok(());
+        };
+        manager
             .append_message(message.clone())
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
 
     async fn append_model_change(&self, provider: &str, model_id: &str) -> Result<(), String> {
-        self.0
+        let Some(manager) = self.0.get() else {
+            return Ok(());
+        };
+        manager
             .append_model_change(provider, model_id)
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
 
     async fn append_thinking_level_change(&self, level: &str) -> Result<(), String> {
-        self.0
+        let Some(manager) = self.0.get() else {
+            return Ok(());
+        };
+        manager
             .append_thinking_level_change(level)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn append_tool_set_change(&self, tools: &[String]) -> Result<(), String> {
+        let Some(manager) = self.0.get() else {
+            return Ok(());
+        };
+        manager
+            .append_tool_set_change(tools)
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
@@ -564,7 +733,10 @@ impl SessionSink for SessionManagerSink {
         model: &str,
         usage: rpi_ai::Usage,
     ) -> Result<(), String> {
-        self.0
+        let Some(manager) = self.0.get() else {
+            return Ok(());
+        };
+        manager
             .append_usage(kind, provider, model, usage, None)
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -635,8 +807,9 @@ impl rpi_session::Summarizer for ProviderSummarizer {
 /// overflow 恢复与 manual /compact 共用的压缩实现:
 /// 移除触发溢出的错误 assistant(ContextEdit)→ run_compaction →
 /// Compaction entry 落盘(原始历史保留)→ Session projection 回填上下文。
+/// manager 经 holder 读取:/new 切换后压缩跟随新会话。
 struct SessionCompactor {
-    manager: Arc<rpi_session::SessionManager>,
+    manager_holder: SessionManagerHolder,
     provider: Arc<dyn rpi_ai::Provider>,
     settings: rpi_session::CompactionSettings,
 }
@@ -644,9 +817,13 @@ struct SessionCompactor {
 #[async_trait]
 impl rpi_core::ContextCompactor for SessionCompactor {
     async fn compact(&self, model: &rpi_ai::Model) -> Result<Vec<rpi_agent::AgentMessage>, String> {
+        let manager = self
+            .manager_holder
+            .get()
+            .ok_or_else(|| "无会话存储,无法压缩".to_string())?;
         // 末尾是 overflow 错误 assistant 时剔除出上下文(append-only ContextEdit;
         // 同时满足 continue_run"最后一条非 assistant"的前置条件)
-        let entries = self.manager.branch_entries();
+        let entries = manager.branch_entries();
         if let Some(rpi_session::Entry::Message {
             id,
             message: rpi_agent::AgentMessage::Assistant(assistant),
@@ -654,13 +831,13 @@ impl rpi_core::ContextCompactor for SessionCompactor {
         }) = entries.last()
         {
             if matches!(assistant.stop_reason, rpi_ai::StopReason::Error) {
-                self.manager
+                manager
                     .append_context_edit(id, None)
                     .map_err(|e| e.to_string())?;
             }
         }
 
-        let entries = self.manager.branch_entries();
+        let entries = manager.branch_entries();
         let summarizer = ProviderSummarizer {
             provider: self.provider.clone(),
             model: model.clone(),
@@ -668,7 +845,7 @@ impl rpi_core::ContextCompactor for SessionCompactor {
         if let Some(outcome) =
             rpi_session::run_compaction(&entries, &self.settings, &summarizer).await?
         {
-            self.manager
+            manager
                 .append_compaction(
                     outcome.summary,
                     outcome.first_kept_entry_id,
@@ -676,12 +853,11 @@ impl rpi_core::ContextCompactor for SessionCompactor {
                     Some(outcome.details),
                     outcome.usage,
                     false,
-                    outcome.system_message,
                 )
                 .map_err(|e| e.to_string())?;
         }
         // 压缩后上下文一律从 Session projection 重建(source of truth)
-        Ok(self.manager.projection().messages)
+        Ok(manager.projection().messages)
     }
 
     /// 自动压缩阈值判定(06 文档 §3.1):Session projection 的 token 估算
@@ -691,7 +867,10 @@ impl rpi_core::ContextCompactor for SessionCompactor {
         model: &rpi_ai::Model,
         _messages: &[rpi_agent::AgentMessage],
     ) -> bool {
-        let entries = self.manager.branch_entries();
+        let Some(manager) = self.manager_holder.get() else {
+            return false;
+        };
+        let entries = manager.branch_entries();
         let projection = rpi_session::build_session_projection(&entries, None);
         let estimate =
             rpi_session::estimate_projected_context_tokens(&projection, &entries);
@@ -987,7 +1166,7 @@ mod tests {
     async fn sink_persists_model_thinking_usage_entries() {
         let manager: Arc<rpi_session::SessionManager> =
             rpi_session::create_session(None::<String>).unwrap().into();
-        let sink = SessionManagerSink(manager.clone());
+        let sink = SessionManagerSink(SessionManagerHolder::new(Some(manager.clone())));
         sink.append(&rpi_agent::AgentMessage::user("hi"))
             .await
             .unwrap();
@@ -1019,16 +1198,7 @@ mod tests {
 
         let manager: Arc<rpi_session::SessionManager> =
             rpi_session::create_session(None::<String>).unwrap().into();
-        // transcript:System 声明 → user → assistant(正常)→ assistant(overflow 错误)
-        manager
-            .append_message(AgentMessage::System {
-                content: String::new(),
-                sections: Default::default(),
-                tools_added: Vec::new(),
-                tools_removed: Vec::new(),
-                timestamp: 0,
-            })
-            .unwrap();
+        // transcript:user → assistant(正常)→ assistant(overflow 错误)
         manager
             .append_message(AgentMessage::user("第一轮问题"))
             .unwrap();
@@ -1048,25 +1218,25 @@ mod tests {
             .unwrap();
 
         let compactor = SessionCompactor {
-            manager: manager.clone(),
+            manager_holder: SessionManagerHolder::new(Some(manager.clone())),
             provider: rpi_ai::create_mock_provider("## Goal\n摘要内容"),
             settings: rpi_session::CompactionSettings {
                 enabled: true,
-                reserve_tokens: 0,
+                reserve_tokens: 0.0,
                 keep_recent_tokens: 0,
             },
         };
         use rpi_core::ContextCompactor as _;
         let messages = compactor.compact(&m).await.unwrap();
 
-        // 原始历史保留(append-only):4 条消息 entry 都在
+        // 原始历史保留(append-only):3 条消息 entry 都在
         let entries = manager.entries();
         assert_eq!(
             entries
                 .iter()
                 .filter(|e| matches!(e, rpi_session::Entry::Message { .. }))
                 .count(),
-            4,
+            3,
             "原始消息不删除"
         );
         // Compaction + ContextEdit(剔除错误 assistant)entry 已落盘
@@ -1076,13 +1246,8 @@ mod tests {
         assert!(entries
             .iter()
             .any(|e| matches!(e, rpi_session::Entry::ContextEdit { .. })));
-        // 压缩后上下文来自 projection:system 快照 + 摘要,被摘要消息不再出现
-        // 压缩后上下文:system 快照 + 摘要 + 保留的近期回复;
+        // 压缩后上下文来自 projection:摘要 + 保留的近期回复;
         // 错误 assistant(ContextEdit 剔除)与被摘要的 user 不再出现
-        assert!(matches!(
-            messages.first(),
-            Some(AgentMessage::System { .. })
-        ));
         assert!(messages
             .iter()
             .any(|m| matches!(m, AgentMessage::CompactionSummary { .. })));

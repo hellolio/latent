@@ -20,7 +20,7 @@ pub fn replay_history(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
     }) {
         state.context_tokens = tokens;
     }
-    if let Some(manager) = ctx.session_manager {
+    if let Some(manager) = ctx.current_manager() {
         let compactions = manager
             .branch_entries()
             .iter()
@@ -41,7 +41,6 @@ pub fn replay_history(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
 /// 单条历史消息 → 转录条目(与实时渲染同一模型)。
 fn replay_message(message: &AgentMessage, theme: &rpi_tui::Theme) -> Vec<TranscriptItem> {
     match message {
-        AgentMessage::System { .. } => vec![TranscriptItem::Blank],
         AgentMessage::User { content, .. } => {
             vec![
                 TranscriptItem::User {

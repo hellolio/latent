@@ -19,7 +19,7 @@ use crate::event::{AgentEvent, SharedPartial, SharedSubscriber, Subscriber};
 use crate::hooks::LoopHooks;
 use crate::loop_::{
     create_injection_endpoints, run_agent_loop, AgentContext, InjectionReceiver, InjectionSender,
-    LoopConfig, RunStop, TurnLimits,
+    LoopConfig, RunStop, TurnLimits, DEFAULT_TOOL_RESULT_MAX_CHARS,
 };
 use crate::message::AgentMessage;
 use crate::tool::Tool;
@@ -34,7 +34,7 @@ pub enum QueueMode {
 
 #[derive(Default)]
 pub struct AgentState {
-    /// 基础系统提示词(转录重放状态由 core 的 sections 机制维护,04 文档 §3.3)
+    /// 基础系统提示词(请求级字段;session 不持久化能力规则,04 文档 §3.3)
     pub system: Option<String>,
     pub model: Option<Model>,
     /// None = 不请求思考(01 文档:ai 侧级别无 off)
@@ -136,6 +136,8 @@ pub struct Agent {
     provider: Arc<dyn Provider>,
     adapter: Arc<AgentHookAdapter>,
     limits: Mutex<TurnLimits>,
+    /// 超长 tool result 进转录前的字符上限(Current Turn 层裁剪)
+    tool_result_max_chars: Mutex<usize>,
     stream_options: Mutex<StreamOptions>,
     /// streaming 标志(T8):watch 化,`wait_idle` 经 receiver 等待、零轮询;
     /// Sender 加锁串行化"检查-置位"(替代 AtomicBool 的 compare_exchange)
@@ -169,6 +171,7 @@ impl Agent {
             provider,
             adapter,
             limits: Mutex::new(TurnLimits::default()),
+            tool_result_max_chars: Mutex::new(DEFAULT_TOOL_RESULT_MAX_CHARS),
             stream_options: Mutex::new(StreamOptions::default()),
             streaming: Mutex::new(streaming),
             streaming_rx,
@@ -199,6 +202,11 @@ impl Agent {
 
     pub fn set_limits(&self, limits: TurnLimits) {
         *self.limits.lock().unwrap() = limits;
+    }
+
+    /// 超长 tool result 的字符上限(0 = 不裁剪)。
+    pub fn set_tool_result_max_chars(&self, max_chars: usize) {
+        *self.tool_result_max_chars.lock().unwrap() = max_chars;
     }
 
     pub fn set_stream_options(&self, options: StreamOptions) {
@@ -251,25 +259,15 @@ impl Agent {
         state.messages.pop()
     }
 
-    /// 只保留末尾 keep_last 条消息(保留打头的 system baseline);
-    /// overflow 恢复时压缩上下文用。
+    /// 只保留末尾 keep_last 条消息;overflow 恢复时压缩上下文用。
     pub fn trim_oldest_messages(&self, keep_last: usize) {
         let mut state = self.state.lock().unwrap();
         let len = state.messages.len();
         if len <= keep_last {
             return;
         }
-        // 打头 system baseline 永不删:可删区间从它之后开始;
-        // 恰好多出 1 条时唯一可删的就是 baseline,保持原样不破坏 prompt
-        let start = match state.messages.first() {
-            Some(AgentMessage::System { .. }) => 1,
-            _ => 0,
-        };
-        let removable = len.saturating_sub(keep_last);
-        if removable <= start {
-            return;
-        }
-        state.messages.drain(start..removable);
+        let removable = len - keep_last;
+        state.messages.drain(..removable);
     }
 
     /// steer:推送进 mpsc 注入通道(03 §10.5;run 期间也可调用,循环在
@@ -352,20 +350,13 @@ impl Agent {
         self.run_with_lifecycle(Vec::new()).await
     }
 
-    /// reset(03 §8.1):保留重放后的首条 system 消息作 baseline;run 存在时报错。
+    /// reset(03 §8.1):清空转录与队列;run 存在时报错。
     pub fn reset(&self) -> Result<(), AgentError> {
         if self.is_streaming() {
             return Err(AgentError::AlreadyRunning);
         }
         let mut state = self.state.lock().unwrap();
-        let baseline = match state.messages.first() {
-            Some(message @ AgentMessage::System { .. }) => Some(message.clone()),
-            _ => None,
-        };
         state.messages.clear();
-        if let Some(baseline) = baseline {
-            state.messages.push(baseline);
-        }
         state.streaming_message = None;
         state.pending_tool_calls.clear();
         state.error_message = None;
@@ -394,7 +385,7 @@ impl Agent {
             cancel.clone()
         };
 
-        let (system, model, thinking, tools, transcript, limits, stream_options, steering_mode, follow_up_mode) = {
+        let (system, model, thinking, tools, transcript, limits, tool_result_max_chars, stream_options, steering_mode, follow_up_mode) = {
             let state = self.state.lock().unwrap();
             (
                 state.system.clone(),
@@ -403,6 +394,7 @@ impl Agent {
                 state.tools.clone(),
                 state.messages.clone(),
                 *self.limits.lock().unwrap(),
+                *self.tool_result_max_chars.lock().unwrap(),
                 self.stream_options.lock().unwrap().clone(),
                 *self.steering_mode.lock().unwrap(),
                 *self.follow_up_mode.lock().unwrap(),
@@ -434,6 +426,7 @@ impl Agent {
             stream_options,
             steering_mode,
             follow_up_mode,
+            tool_result_max_chars,
         };
         let sink: Arc<dyn Subscriber> = match self.self_weak.upgrade() {
             Some(this) => this,

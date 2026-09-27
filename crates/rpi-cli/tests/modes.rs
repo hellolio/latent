@@ -25,6 +25,8 @@ async fn build_with(provider: Arc<ScriptedProvider>) -> rpi_cli::assembly::Built
         session_store: rpi_cli::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: None,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
     })
     .await
     .expect("build_session")
@@ -460,6 +462,65 @@ async fn bash_tool_receives_pi_session_env_via_build_session() {
 
 // ---- Session 文件持久化:CLI 装配走 file-backed session,重启可续聊 ----
 
+/// /new:进程内新建会话文件并切换,旧会话原样保留,转录清空,
+/// 后续消息写入新文件(旧文件不再追加)。
+#[tokio::test]
+async fn switch_new_session_starts_fresh_file_and_keeps_old() {
+    let dir = std::env::temp_dir().join(format!("rpi_new_session_it_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let built = build_with_store(
+        scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]),
+        rpi_cli::assembly::SessionStore::New { dir: dir.clone() },
+    )
+    .await;
+    built.session.prompt("第一轮").await.expect("prompt");
+    built.session.wait_idle().await;
+    let old_manager = built.session_manager.clone().expect("file-backed manager");
+    let old_file = old_manager.file_path().unwrap().to_path_buf();
+    let old_content = std::fs::read_to_string(&old_file).unwrap();
+    let old_lines = old_content.lines().count();
+
+    // /new:新文件建立,转录清空
+    let new_file = rpi_cli::assembly::switch_new_session(&built.session, &built.manager_holder)
+        .await
+        .unwrap()
+        .expect("文件会话应产生新文件");
+    assert_ne!(new_file, old_file, "应切换到新的 session 文件");
+    assert!(new_file.exists());
+    assert!(
+        built.session.agent().messages().is_empty(),
+        "切换后转录应为空"
+    );
+
+    // 旧文件原样保留(header + user + assistant,不追加)
+    let old_after = std::fs::read_to_string(&old_file).unwrap();
+    assert_eq!(
+        old_after.lines().count(),
+        old_lines,
+        "旧 session 文件不应被修改"
+    );
+
+    // 后续对话写入新文件;新文件自描述(model_change 设置态 entry)
+    built.session.prompt("第二轮").await.expect("prompt");
+    built.session.wait_idle().await;
+    let new_content = std::fs::read_to_string(&new_file).unwrap();
+    assert!(new_content.contains("\"type\":\"model_change\""), "新文件应记录模型设置态");
+    assert!(new_content.contains("第二轮"), "新消息应写入新文件");
+    assert!(!old_after.contains("第二轮"), "旧文件不应收到新消息");
+
+    // parent_session 血缘:新文件 header 记录旧 session id
+    let header: rpi_session::SessionHeader =
+        serde_json::from_str(new_content.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        header.parent_session.as_deref(),
+        Some(old_manager.session_id()),
+        "新会话应记录旧会话为 parent"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 async fn build_with_store(
     provider: Arc<ScriptedProvider>,
     store: rpi_cli::assembly::SessionStore,
@@ -492,6 +553,8 @@ async fn build_with_tools(
         session_store: store,
         context_snapshot,
         active_tools,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
     })
     .await
     .expect("build_session")
@@ -543,22 +606,10 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
     {
         let resumed = rpi_session::create_session(Some(&file)).unwrap();
         let messages = session_messages(&resumed.entries());
-        assert!(
-            matches!(&messages[0], rpi_agent::AgentMessage::System { .. }),
-            "首条 system baseline"
-        );
-        let turns: Vec<_> = messages
-            .iter()
-            .filter(|m| {
-                matches!(
-                    m,
-                    rpi_agent::AgentMessage::User { .. } | rpi_agent::AgentMessage::Assistant(_)
-                )
-            })
-            .collect();
-        assert_eq!(turns.len(), 2, "user + assistant");
-        assert!(matches!(turns[0], rpi_agent::AgentMessage::User { .. }));
-        assert!(matches!(turns[1], rpi_agent::AgentMessage::Assistant(_)));
+        // 转录纯净:只存状态类消息(user/assistant),无 system baseline
+        assert_eq!(messages.len(), 2, "user + assistant");
+        assert!(matches!(messages[0], rpi_agent::AgentMessage::User { .. }));
+        assert!(matches!(messages[1], rpi_agent::AgentMessage::Assistant(_)));
 
         let leaf_before = resumed.get_leaf_id().unwrap();
         drop(resumed);
@@ -570,16 +621,11 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         let manager = built.session_manager.clone().unwrap();
         assert_eq!(manager.session_id(), session_id, "resume 不换 session id");
         let messages = session_messages(&manager.entries());
-        // resume 后续聊接在同一树上:工具集相对既有 baseline 无变化时,
-        // declare_tool_changes(不变量 I6)不重复注入 system baseline
-        assert_eq!(messages.len(), 5, "一段 system baseline + 两轮对话");
+        // resume 后续聊接在同一树上:不重复注入任何声明消息
+        assert_eq!(messages.len(), 4, "两轮对话");
+        assert!(matches!(&messages[2], rpi_agent::AgentMessage::User { .. }));
         assert!(matches!(
-            &messages[0],
-            rpi_agent::AgentMessage::System { .. }
-        ));
-        assert!(matches!(&messages[3], rpi_agent::AgentMessage::User { .. }));
-        assert!(matches!(
-            &messages[4],
+            &messages[3],
             rpi_agent::AgentMessage::Assistant(_)
         ));
         let _ = leaf_before;
@@ -643,19 +689,15 @@ async fn context_snapshot_recorded_per_request_and_excluded_from_projection() {
     let jsonl = std::fs::read_to_string(&session_file).unwrap();
     assert!(jsonl.contains("\"type\":\"context_ref\""), "entry 已落盘");
 
-    // 投影排除:重建上下文只有 system baseline + user + assistant
+    // 投影排除:重建上下文只有 user + assistant
     let context = rpi_session::build_session_context(
         &manager.branch_entries(),
         manager.get_leaf_id().as_deref(),
     );
-    assert_eq!(context.messages.len(), 3, "context_ref 不进上下文");
+    assert_eq!(context.messages.len(), 2, "context_ref 不进上下文");
+    assert!(matches!(&context.messages[0], rpi_agent::AgentMessage::User { .. }));
     assert!(matches!(
-        &context.messages[0],
-        rpi_agent::AgentMessage::System { .. }
-    ));
-    assert!(matches!(&context.messages[1], rpi_agent::AgentMessage::User { .. }));
-    assert!(matches!(
-        &context.messages[2],
+        &context.messages[1],
         rpi_agent::AgentMessage::Assistant(_)
     ));
 
@@ -748,6 +790,8 @@ async fn active_tools_narrows_installed_set() {
         session_store: rpi_cli::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: Some(vec!["bask".to_string()]),
+        tool_result_max_chars: None,
+        compaction: Default::default(),
     })
     .await
     {
@@ -758,7 +802,7 @@ async fn active_tools_narrows_installed_set() {
 }
 
 /// 空工具集(tools: []):不激活任何工具 → 不装工具、系统提示词无 <tools> 节、
-/// 转录中也没有工具声明(空 content 的 system)消息。
+/// 转录中没有任何合成声明消息(工具 schema 走请求级字段)。
 #[tokio::test]
 async fn empty_active_tools_installs_nothing_and_declares_nothing() {
     let built = build_with_tools(
@@ -776,12 +820,9 @@ async fn empty_active_tools_installs_nothing_and_declares_nothing() {
     built.session.prompt("你好").await.expect("prompt");
     built.session.wait_idle().await;
     let messages = built.session.agent().messages();
-    assert!(
-        !messages
-            .iter()
-            .any(|msg| matches!(msg, rpi_agent::AgentMessage::System { tools_added, .. } if !tools_added.is_empty())),
-        "不应有工具声明消息"
-    );
+    assert_eq!(messages.len(), 2, "user + assistant,无任何合成声明消息");
+    assert!(matches!(messages[0], rpi_agent::AgentMessage::User { .. }));
+    assert!(matches!(messages[1], rpi_agent::AgentMessage::Assistant(_)));
 }
 
 /// transcript 统一(文档验收 Test 1–3):完整 run(user → assistant(tool call)

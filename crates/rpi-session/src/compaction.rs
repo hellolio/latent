@@ -13,17 +13,21 @@ use crate::projection::{build_session_projection, SessionProjection};
 // 设置(06 文档 §3.1)
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionSettings {
     pub enabled: bool,
-    pub reserve_tokens: u64,
+    /// 预留预算:**>= 1.0 按绝对 token 数**(16384 = 16k);
+    /// **0 < v < 1.0 按 context_window 的百分比**(0.1 = 10%,随模型窗口缩放;
+    /// 100% 无法表达,也不会有意义)。分辨率在 should_compact 调用时进行
+    /// (此时 context_window 已知)。serde 用 f64 兼容整数与浮点两种写法。
+    pub reserve_tokens: f64,
     pub keep_recent_tokens: u64,
 }
 
 pub const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = CompactionSettings {
     enabled: true,
-    reserve_tokens: 16_384,
+    reserve_tokens: 16_384.0,
     keep_recent_tokens: 20_000,
 };
 
@@ -33,7 +37,21 @@ impl Default for CompactionSettings {
     }
 }
 
+/// reserve_tokens → 实际预留 token 数:`v < 1.0` 按 `context_window` 的百分比
+/// 解析(0.1 = 10%),`v >= 1.0` 按绝对 token 数;非正数归零(不预留)。
+pub fn reserve_tokens_for_window(reserve_tokens: f64, context_window: u64) -> u64 {
+    if !(reserve_tokens > 0.0) {
+        return 0;
+    }
+    if reserve_tokens < 1.0 {
+        (context_window as f64 * reserve_tokens).round() as u64
+    } else {
+        reserve_tokens as u64
+    }
+}
+
 /// `contextTokens > contextWindow - reserveTokens` 时触发(06 文档 §3.1)。
+/// reserveTokens < 1.0 时按窗口百分比解析(见 `reserve_tokens_for_window`)。
 pub fn should_compact(
     context_tokens: u64,
     context_window: u64,
@@ -42,7 +60,8 @@ pub fn should_compact(
     if !settings.enabled {
         return false;
     }
-    context_window.saturating_sub(settings.reserve_tokens) < context_tokens
+    let reserve = reserve_tokens_for_window(settings.reserve_tokens, context_window);
+    context_window.saturating_sub(reserve) < context_tokens
 }
 
 // ============================================================================
@@ -156,21 +175,12 @@ pub fn estimate_projected_context_tokens(
         return estimate;
     }
 
-    // 全量估算(system 消息单独计,其余逐条)
-    let mut tokens: u64 = 0;
-    if let Some(system) = projection
+    // 全量估算(逐条)
+    let tokens: u64 = projection
         .messages
         .iter()
-        .rev()
-        .find(|m| matches!(m, AgentMessage::System { .. }))
-    {
-        tokens += estimate_tokens(system) as u64;
-    }
-    for message in &projection.messages {
-        if !matches!(message, AgentMessage::System { .. }) {
-            tokens += estimate_tokens(message) as u64;
-        }
-    }
+        .map(|m| estimate_tokens(m) as u64)
+        .sum();
     ContextUsageEstimate {
         tokens,
         usage_tokens: 0,
@@ -196,23 +206,6 @@ fn estimate_content_blocks_chars(blocks: &[ContentBlock]) -> usize {
 /// chars/4 启发式,保守高估(06 文档 estimateTokens)。
 pub fn estimate_tokens(message: &AgentMessage) -> usize {
     let chars = match message {
-        AgentMessage::System {
-            content,
-            sections,
-            tools_added,
-            ..
-        } => {
-            let mut chars = content.len();
-            for section in sections.values().flatten() {
-                chars += section.len();
-            }
-            if !tools_added.is_empty() {
-                chars += serde_json::to_string(tools_added)
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-            }
-            chars
-        }
         AgentMessage::User { content, .. } => content.len(),
         AgentMessage::Assistant(assistant) => {
             let mut chars = 0;
@@ -658,8 +651,6 @@ pub struct CompactionOutcome {
     /// details:`{readFiles, modifiedFiles}`(06 文档 §3.4)
     pub details: serde_json::Value,
     pub usage: Option<Usage>,
-    /// 压缩边界处的完整 prompt + 工具状态快照
-    pub system_message: Option<AgentMessage>,
 }
 
 /// 运行一次压缩摘要(06 文档 §3.4 的 M3 实现):对 `entries`(活动分支路径,
@@ -713,27 +704,18 @@ pub async fn run_compaction(
             SUMMARIZATION_PROMPT.to_string(),
         ),
     };
-    // 序列化后为空(短会话切点落在首个 user 消息,范围内只有 system 元数据,
-    // 而 serialize_conversation 跳过 System)→ 没有可摘要的内容:
-    // 不发摘要请求、不产生 Compaction entry,否则 LLM 在看不到任何对话的
-    // 情况下编造的"摘要"会被当作真实历史压缩结果落盘
+    // 序列化后为空(短会话切点落在首个 user 消息,范围内只有元数据 entry)
+    // → 没有可摘要的内容:不发摘要请求、不产生 Compaction entry,否则 LLM
+    // 在看不到任何对话的情况下编造的"摘要"会被当作真实历史压缩结果落盘
     if conversation.trim().is_empty() {
         return Ok(None);
     }
 
     // 摘要请求消息:占位 user 承载序列化对话(实现方把它发给 LLM)
-    let mut request_messages = Vec::new();
-    if let Some(system) = projection
-        .messages
-        .iter()
-        .find(|m| matches!(m, AgentMessage::System { .. }))
-    {
-        request_messages.push(system.clone());
-    }
-    request_messages.push(AgentMessage::User {
+    let request_messages = vec![AgentMessage::User {
         content: conversation,
         timestamp: rpi_agent::now_ms(),
-    });
+    }];
 
     let response = summarizer
         .summarize(&SummarizationRequest {
@@ -759,13 +741,8 @@ pub async fn run_compaction(
         }
     }
 
-    // 压缩边界处的 system 快照:当前投影中最后一条 system 消息
-    let system_message = projection
-        .messages
-        .iter()
-        .rev()
-        .find(|m| matches!(m, AgentMessage::System { .. }))
-        .cloned();
+    // 压缩边界不再快照系统提示词/工具状态:session 不持久化能力规则,
+    // 恢复时系统提示词从配置重组、工具 schema 每次请求动态下发
 
     Ok(Some(CompactionOutcome {
         summary,
@@ -773,6 +750,5 @@ pub async fn run_compaction(
         tokens_before: estimate.tokens,
         details,
         usage: response.usage,
-        system_message,
     }))
 }

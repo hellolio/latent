@@ -66,7 +66,9 @@ pub async fn run_interactive_mode(
 ) -> Result<(), String> {
     let BuiltSession {
         session,
-        session_manager,
+        manager_holder,
+        compaction_config,
+        ..
     } = built;
     let (theme, theme_name) = resolve_theme(theme_override.as_deref());
 
@@ -109,8 +111,9 @@ pub async fn run_interactive_mode(
     let resolver = rpi_core::create_model_resolver_from_config(Some(&cwd), home.as_deref());
     let ctx = InteractiveCtx {
         session: &session,
-        session_manager: session_manager.as_ref(),
+        manager_holder: Some(&manager_holder),
         resolver: &resolver,
+        compaction_config: &compaction_config,
         ui_tx: ui.tx.clone(),
     };
 

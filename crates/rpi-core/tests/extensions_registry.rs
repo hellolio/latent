@@ -102,10 +102,12 @@ async fn failing_extension_is_skipped_with_diagnostic_and_partial_tools_dropped(
     // 工具集:好扩展的工具在,坏扩展的泄漏工具不在
     session
         .set_active_tools_by_name(&["good__tool".to_string()])
+        .await
         .expect("good 工具应已知");
     assert!(
         session
             .set_active_tools_by_name(&["bad__leaked".to_string()])
+            .await
             .is_err(),
         "失败扩展的已注册工具必须整体丢弃"
     );

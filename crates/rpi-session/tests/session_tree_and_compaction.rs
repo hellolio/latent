@@ -178,7 +178,7 @@ fn compaction_virtual_expansion_and_multiple_compactions() {
 
     // 压缩:保留从 q2 起
     session
-        .append_compaction("summary of q1", m2.clone(), 500, None, None, false, None)
+        .append_compaction("summary of q1", m2.clone(), 500, None, None, false)
         .unwrap();
     let compaction_id = session.get_leaf_id().unwrap();
 
@@ -202,7 +202,7 @@ fn compaction_virtual_expansion_and_multiple_compactions() {
     // 第二次压缩:旧 compaction 的 id 落在新保留范围内时,只有 index==0 的
     // compaction 产生消息
     session
-        .append_compaction("summary v2", m2.clone(), 800, None, None, false, None)
+        .append_compaction("summary v2", m2.clone(), 800, None, None, false)
         .unwrap();
     let projection = session.projection();
     let compaction_summaries = projection
@@ -353,6 +353,39 @@ fn should_compact_boundary() {
             ..Default::default()
         }
     ));
+}
+
+#[test]
+fn reserve_tokens_percent_of_window() {
+    use rpi_session::reserve_tokens_for_window;
+
+    // 绝对值语义不受影响(>= 1.0)
+    assert_eq!(reserve_tokens_for_window(16_384.0, 32_000), 16_384);
+    // 百分比:0.1 × 32000 = 3200(四舍五入)
+    assert_eq!(reserve_tokens_for_window(0.1, 32_000), 3_200);
+    assert_eq!(reserve_tokens_for_window(0.125, 131_072), 16_384);
+    // 非正数归零
+    assert_eq!(reserve_tokens_for_window(0.0, 32_000), 0);
+    assert_eq!(reserve_tokens_for_window(-0.5, 32_000), 0);
+
+    // 触发边界:32k 窗口、10% 预留 → 已用 > 28800 触发
+    let settings = CompactionSettings {
+        enabled: true,
+        reserve_tokens: 0.1,
+        keep_recent_tokens: 20_000,
+    };
+    assert!(!should_compact(28_800, 32_000, &settings));
+    assert!(should_compact(28_801, 32_000, &settings));
+
+    // serde 兼容:整数写法(16384)与浮点写法(0.1)都能反序列化
+    let parsed: CompactionSettings =
+        serde_json::from_str(r#"{"enabled":true,"reserveTokens":16384,"keepRecentTokens":20000}"#)
+            .unwrap();
+    assert_eq!(parsed.reserve_tokens, 16_384.0);
+    let parsed: CompactionSettings =
+        serde_json::from_str(r#"{"enabled":true,"reserveTokens":0.1,"keepRecentTokens":20000}"#)
+            .unwrap();
+    assert_eq!(parsed.reserve_tokens, 0.1);
 }
 
 #[test]
@@ -546,17 +579,11 @@ async fn run_compaction_end_to_end() {
 
 #[tokio::test]
 async fn run_compaction_skips_empty_conversation_range() {
-    // 回归:短会话切点落在首个 user 消息,待摘要范围只有 system 元数据,
-    // serialize_conversation 跳过 System → 不应发出空对话的摘要请求
+    // 回归:短会话切点落在首个 user 消息,待摘要范围只有元数据 entry
+    // (如 tool_set_change)→ 不应发出空对话的摘要请求
     let session = create_session(None::<String>).unwrap();
     session
-        .append_message(AgentMessage::System {
-            content: String::new(),
-            sections: Default::default(),
-            tools_added: Vec::new(),
-            tools_removed: Vec::new(),
-            timestamp: 0,
-        })
+        .append_tool_set_change(&["read".to_string()])
         .unwrap();
     session.append_message(AgentMessage::user("第一问")).unwrap();
     session
@@ -598,7 +625,6 @@ async fn run_compaction_uses_update_template_when_previous_summary_exists() {
             None,
             None,
             false,
-            None,
         )
         .unwrap();
     session
@@ -770,7 +796,7 @@ fn estimate_trusts_usage_when_no_edit_or_compaction() {
     // compaction 之后的旧 usage 失真 → 全量估算
     let leaf = session.get_leaf_id().unwrap();
     session
-        .append_compaction("s", leaf, 100, None, None, false, None)
+        .append_compaction("s", leaf, 100, None, None, false)
         .unwrap();
     session.append_message(AgentMessage::user("q2")).unwrap();
     let entries = session.entries();

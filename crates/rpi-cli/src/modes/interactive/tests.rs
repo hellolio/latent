@@ -32,6 +32,8 @@ async fn built_memory_session() -> crate::assembly::BuiltSession {
         session_store: crate::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: None,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
     })
     .await
     .unwrap()
@@ -43,8 +45,9 @@ fn ctx_of<'a>(
 ) -> InteractiveCtx<'a> {
     InteractiveCtx {
         session: &built.session,
-        session_manager: built.session_manager.as_ref(),
+        manager_holder: Some(&built.manager_holder),
         resolver,
+        compaction_config: &built.compaction_config,
         ui_tx: {
             let (tx, _rx) = mpsc::unbounded_channel();
             tx
@@ -650,6 +653,8 @@ async fn replay_renders_thinking_blocks() {
         session_store: crate::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: None,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
     })
     .await
     .unwrap();
@@ -693,6 +698,8 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
         session_store: crate::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: None,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
     })
     .await
     .unwrap();

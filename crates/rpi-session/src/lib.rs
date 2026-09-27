@@ -14,10 +14,11 @@ pub mod projection;
 pub use compaction::{
     calculate_context_tokens, create_fixed_summarizer, estimate_context_tokens,
     estimate_projected_context_tokens, estimate_tokens, find_cut_point, find_turn_start_index,
-    get_summarization_failure, run_compaction, serialize_conversation, should_compact,
-    update_summarization_prompt, CompactionOutcome, CompactionSettings, ContextUsageEstimate,
-    CutPointResult, SummarizationRequest, SummarizationResponse, Summarizer,
-    DEFAULT_COMPACTION_SETTINGS, SUMMARIZATION_PROMPT, SUMMARIZATION_SYSTEM_PROMPT,
+    get_summarization_failure, reserve_tokens_for_window, run_compaction,
+    serialize_conversation, should_compact, update_summarization_prompt, CompactionOutcome,
+    CompactionSettings, ContextUsageEstimate, CutPointResult, SummarizationRequest,
+    SummarizationResponse, Summarizer, DEFAULT_COMPACTION_SETTINGS, SUMMARIZATION_PROMPT,
+    SUMMARIZATION_SYSTEM_PROMPT,
 };
 pub use entry::{
     ContextReplacement, Entry, SessionHeader, SessionTreeNode, CURRENT_SESSION_VERSION,

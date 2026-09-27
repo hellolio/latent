@@ -1,5 +1,6 @@
-//! entry 类型(06 文档 §1.2):12 种 SessionEntry + SessionHeader,serde 形态与
-//! pi JSONL 同构(`type` 判别符 + camelCase 字段)。每个 entry 带 `id`(8 位 hex)、
+//! entry 类型(06 文档 §1.2):11 种 pi SessionEntry + rpi 扩展的
+//! tool_set_change / context_ref,加 SessionHeader,serde 形态与 pi JSONL 同构
+//! (`type` 判别符 + camelCase 字段)。每个 entry 带 `id`(8 位 hex)、
 //! `parentId`(根为 null)、`timestamp`(毫秒)构成树。
 //!
 //! 与 pi 的差异:entry timestamp 用毫秒整数(pi 用 ISO 字符串)—— rpi 会话文件
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use rpi_agent::{AgentMessage, Usage};
 
-pub const CURRENT_SESSION_VERSION: u32 = 4;
+pub const CURRENT_SESSION_VERSION: u32 = 5;
 
 /// 文件首行(06 文档 §1.1):`{"type":"session", ...}`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,9 +113,17 @@ pub enum Entry {
         usage: Option<Usage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_hook: Option<bool>,
-        /// 压缩边界处的完整 prompt + 工具状态快照(下一轮上下文从这里恢复)
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        system_message: Option<AgentMessage>,
+        #[serde(default)]
+        timestamp: i64,
+    },
+    /// 激活工具集变更(元数据,**不进**模型上下文):只记名字,不记 schema/
+    /// 提示词等能力规则文本 —— 恢复时按名字重建激活集
+    #[serde(rename_all = "camelCase")]
+    ToolSetChange {
+        id: String,
+        #[serde(default)]
+        parent_id: Option<String>,
+        tools: Vec<String>,
         #[serde(default)]
         timestamp: i64,
     },
@@ -218,6 +227,7 @@ impl Entry {
             | Entry::ModelChange { id, .. }
             | Entry::Usage { id, .. }
             | Entry::Compaction { id, .. }
+            | Entry::ToolSetChange { id, .. }
             | Entry::BranchSummary { id, .. }
             | Entry::Custom { id, .. }
             | Entry::CustomMessage { id, .. }
@@ -235,6 +245,7 @@ impl Entry {
             | Entry::ModelChange { parent_id, .. }
             | Entry::Usage { parent_id, .. }
             | Entry::Compaction { parent_id, .. }
+            | Entry::ToolSetChange { parent_id, .. }
             | Entry::BranchSummary { parent_id, .. }
             | Entry::Custom { parent_id, .. }
             | Entry::CustomMessage { parent_id, .. }
@@ -252,6 +263,7 @@ impl Entry {
             | Entry::ModelChange { timestamp, .. }
             | Entry::Usage { timestamp, .. }
             | Entry::Compaction { timestamp, .. }
+            | Entry::ToolSetChange { timestamp, .. }
             | Entry::BranchSummary { timestamp, .. }
             | Entry::Custom { timestamp, .. }
             | Entry::CustomMessage { timestamp, .. }
@@ -269,6 +281,7 @@ impl Entry {
             | Entry::ModelChange { parent_id: p, .. }
             | Entry::Usage { parent_id: p, .. }
             | Entry::Compaction { parent_id: p, .. }
+            | Entry::ToolSetChange { parent_id: p, .. }
             | Entry::BranchSummary { parent_id: p, .. }
             | Entry::Custom { parent_id: p, .. }
             | Entry::CustomMessage { parent_id: p, .. }
@@ -347,12 +360,17 @@ mod tests {
                 details: None,
                 usage: None,
                 from_hook: None,
-                system_message: None,
                 timestamp: 5,
+            },
+            Entry::ToolSetChange {
+                id: "a5b".into(),
+                parent_id: Some("a5".into()),
+                tools: vec!["read".into(), "bash".into()],
+                timestamp: 55,
             },
             Entry::BranchSummary {
                 id: "a6".into(),
-                parent_id: Some("a5".into()),
+                parent_id: Some("a5b".into()),
                 from_id: "a1".into(),
                 summary: "b".into(),
                 details: None,
@@ -426,18 +444,22 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&entries[5]).unwrap()["type"],
+            "tool_set_change"
+        );
+        assert_eq!(
+            serde_json::to_value(&entries[6]).unwrap()["type"],
             "branch_summary"
         );
         assert_eq!(
-            serde_json::to_value(&entries[8]).unwrap()["type"],
+            serde_json::to_value(&entries[9]).unwrap()["type"],
             "context_edit"
         );
         assert_eq!(
-            serde_json::to_value(&entries[10]).unwrap()["type"],
+            serde_json::to_value(&entries[11]).unwrap()["type"],
             "session_info"
         );
         assert_eq!(
-            serde_json::to_value(&entries[11]).unwrap()["type"],
+            serde_json::to_value(&entries[12]).unwrap()["type"],
             "context_ref"
         );
     }
@@ -447,7 +469,7 @@ mod tests {
         let header = SessionHeader::new("sid".into(), "/tmp".into(), Some("parent".into()));
         let value = serde_json::to_value(&header).unwrap();
         assert_eq!(value["type"], "session");
-        assert_eq!(value["version"], 4);
+        assert_eq!(value["version"], 5);
         assert_eq!(value["parentSession"], "parent");
         let back: SessionHeader = serde_json::from_value(value).unwrap();
         assert_eq!(back, header);

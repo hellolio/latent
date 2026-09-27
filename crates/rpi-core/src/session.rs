@@ -16,8 +16,8 @@ use rpi_ai::{is_context_overflow, Model, Provider, StreamOptions};
 use crate::extensions::{ExtensionActions, ExtensionDiagnostic, ExtensionRegistry, ExtensionUi};
 use crate::retry::RetryHooks;
 use crate::system_prompt::{
-    build_system_prompt_sections, build_system_prompt_state, diff_system_prompt_sections,
-    SystemPromptOptions, SystemPromptSections, SystemPromptState,
+    build_system_prompt_sections, build_system_prompt_state, SystemPromptOptions,
+    SystemPromptSections, SystemPromptState,
 };
 use rpi_agent::{RunStop, TurnLimits};
 
@@ -45,6 +45,11 @@ pub trait SessionSink: Send + Sync {
     }
 
     async fn append_thinking_level_change(&self, _level: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 激活工具集变更(元数据 entry,不进模型上下文;恢复时按此重建激活集)
+    async fn append_tool_set_change(&self, _tools: &[String]) -> Result<(), String> {
         Ok(())
     }
 
@@ -142,8 +147,6 @@ struct SessionRuntime {
     /// 避免丢 custom_prompt/context_files/append 等用户配置
     system_prompt_options: SystemPromptOptions,
     active_tool_names: Vec<String>,
-    /// 待注入的系统提示词 patch(扩展/工具集变更产生,prompt 时进转录)
-    pending_system_messages: Vec<AgentMessage>,
     /// 每次 run 只尝试一次 overflow 恢复(04 文档 _overflowRecoveryAttempted)
     overflow_recovery_attempted: bool,
 }
@@ -264,7 +267,6 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
             system_prompt_options: options,
             sections,
             active_tool_names,
-            pending_system_messages: Vec::new(),
             overflow_recovery_attempted: false,
         }),
     })
@@ -386,18 +388,12 @@ impl AgentSession {
             return Ok(PromptOutcome::Enqueued);
         }
         let text = text.into();
-        let system_messages =
-            std::mem::take(&mut self.runtime.lock().unwrap().pending_system_messages);
-        let mut messages = system_messages.clone();
-        messages.push(AgentMessage::user(text.clone()));
-        let run = self.agent.prompt_messages(messages);
+        let run = self.agent.prompt_messages(vec![AgentMessage::user(text.clone())]);
         match self.run_with_recovery(run).await {
             Ok(stop) => Ok(PromptOutcome::Started(stop)),
             // TOCTOU:is_streaming 检查后并发 prompt 抢先启动了 run →
-            // 按流式语义转 steer(reviewer P2);系统 patch 退回待注入队列,
-            // 随下一次成功启动的 prompt 进转录
+            // 按流式语义转 steer(reviewer P2)
             Err(CoreError::Agent(AgentError::AlreadyRunning)) => {
-                self.runtime.lock().unwrap().pending_system_messages = system_messages;
                 self.steer(text).await;
                 Ok(PromptOutcome::Enqueued)
             }
@@ -455,9 +451,10 @@ impl AgentSession {
         Ok(())
     }
 
-    /// 切换激活工具集(pi @1279):工具集变更由循环的 declareToolChanges
-    /// 公告给模型;系统提示词 tools/rules 节随之 diff 出一条 system patch。
-    pub fn set_active_tools_by_name(&self, names: &[String]) -> Result<(), CoreError> {
+    /// 切换激活工具集:重建系统提示词 sections(请求级字段)+ 换可执行工具集,
+    /// 并落一条 tool_set_change 元数据 entry(恢复时按此重建激活集)。
+    /// session 不持久化任何提示词文本 —— 工具 schema 每次请求动态下发。
+    pub async fn set_active_tools_by_name(&self, names: &[String]) -> Result<(), CoreError> {
         let known: Vec<String> = self
             .tools_all
             .iter()
@@ -492,26 +489,19 @@ impl AgentSession {
             // Forced 整 prompt:提示词不随工具集变化,只换工具集本身
             let forced = matches!(runtime.system_prompt, SystemPromptState::Forced(_));
             let new_sections = build_system_prompt_sections(&options)?;
-            let patch = if forced {
-                Default::default()
-            } else {
-                diff_system_prompt_sections(&runtime.sections, &new_sections)
-            };
-            runtime.sections = new_sections.clone();
-            if !patch.is_empty() {
-                runtime.system_prompt = SystemPromptState::Sections(new_sections);
+            if !forced {
+                runtime.system_prompt = SystemPromptState::Sections(new_sections.clone());
                 self.agent
                     .set_system_prompt(Some(runtime.system_prompt.to_text()));
-                runtime.pending_system_messages.push(AgentMessage::System {
-                    content: String::new(),
-                    sections: patch,
-                    tools_added: Vec::new(),
-                    tools_removed: Vec::new(),
-                    timestamp: rpi_agent::now_ms(),
-                });
             }
+            runtime.sections = new_sections;
         }
         self.agent.install_tools(active_tools);
+        if let Some(sink) = &self.session_sink {
+            if let Err(error) = sink.append_tool_set_change(names).await {
+                eprintln!("[rpi] session sink tool set change append failed: {error}");
+            }
+        }
         Ok(())
     }
 
@@ -558,24 +548,15 @@ impl AgentSession {
         Ok(count)
     }
 
-    /// 更新系统提示词 options:diff 出 sections patch,prompt 时进转录。
+    /// 更新系统提示词 options:重建 sections 状态(仅内存 + 请求级字段下发,
+    /// 不产生转录消息)。
     pub fn update_system_prompt(&self, options: SystemPromptOptions) -> Result<(), CoreError> {
         let new_sections = build_system_prompt_sections(&options)?;
         let mut runtime = self.runtime.lock().unwrap();
-        let patch = diff_system_prompt_sections(&runtime.sections, &new_sections);
         runtime.sections = new_sections.clone();
-        if !patch.is_empty() {
-            runtime.system_prompt = SystemPromptState::Sections(new_sections);
-            self.agent
-                .set_system_prompt(Some(runtime.system_prompt.to_text()));
-            runtime.pending_system_messages.push(AgentMessage::System {
-                content: String::new(),
-                sections: patch,
-                tools_added: Vec::new(),
-                tools_removed: Vec::new(),
-                timestamp: rpi_agent::now_ms(),
-            });
-        }
+        runtime.system_prompt = SystemPromptState::Sections(new_sections);
+        self.agent
+            .set_system_prompt(Some(runtime.system_prompt.to_text()));
         Ok(())
     }
 

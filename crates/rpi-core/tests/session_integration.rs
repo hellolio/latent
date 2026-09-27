@@ -198,7 +198,7 @@ async fn steer_and_follow_up_emit_queue_updates() {
 }
 
 #[tokio::test]
-async fn active_tools_filter_and_system_prompt_sections() {
+async fn active_tools_filter_and_transcript_stays_state_only() {
     let m = model();
     let read = Arc::new(TestTool {
         name: "read".into(),
@@ -223,16 +223,22 @@ async fn active_tools_filter_and_system_prompt_sections() {
     assert_eq!(read.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(bash.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 
-    // 工具片段进了系统提示词
+    // 转录纯净:持久化的只有状态类消息(user/assistant/toolResult),
+    // 没有工具 schema 声明等能力规则文本
     let persisted = sink.0.lock().unwrap();
     assert!(
-        matches!(persisted[0], AgentMessage::System { .. }),
-        "工具声明 system 消息应持久化"
+        persisted.iter().all(|m| matches!(
+            m,
+            AgentMessage::User { .. }
+                | AgentMessage::Assistant(_)
+                | AgentMessage::ToolResult { .. }
+        )),
+        "session 只允许状态类消息: {persisted:?}"
     );
 }
 
 #[tokio::test]
-async fn set_active_tools_diffs_system_prompt() {
+async fn set_active_tools_updates_tools_without_transcript_noise() {
     let m = model();
     let read = Arc::new(TestTool {
         name: "read".into(),
@@ -242,7 +248,7 @@ async fn set_active_tools_diffs_system_prompt() {
         name: "bash".into(),
         calls: AtomicU32::new(0),
     });
-    let (session, _log, _sink, _provider) = build_session(
+    let (session, _log, sink, _provider) = build_session(
         vec![ScriptedTurn::text(&m, "ok")],
         vec![read, bash],
         None,
@@ -251,9 +257,14 @@ async fn set_active_tools_diffs_system_prompt() {
     .await;
 
     // 切到只有 read:更新不报错,下次 prompt 生效
-    session.set_active_tools_by_name(&["read".into()]).unwrap();
+    session
+        .set_active_tools_by_name(&["read".into()])
+        .await
+        .unwrap();
     // 未知工具报错
-    assert!(session.set_active_tools_by_name(&["nope".into()]).is_err());
+    assert!(session.set_active_tools_by_name(&["nope".into()]).await.is_err());
+    // 工具集切换不产生任何转录消息(纯元数据,由装配方落 tool_set_change entry)
+    assert!(sink.0.lock().unwrap().is_empty());
     session.prompt("q").await.unwrap();
     assert_eq!(session.agent().state_snapshot().tool_count, 1);
 }

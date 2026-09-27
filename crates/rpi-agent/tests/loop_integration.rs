@@ -828,11 +828,11 @@ async fn max_turns_budget_stops_infinite_tool_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// declareToolChanges(不变量 I6,端到端)
+// 转录纯净性:循环不再向转录注入工具声明消息(工具 schema 每次请求级下发)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn tool_changes_declared_into_transcript_on_injection() {
+async fn loop_does_not_inject_synthetic_messages_into_transcript() {
     let m = model();
     struct LoopTool(String);
     #[async_trait]
@@ -874,25 +874,71 @@ async fn tool_changes_declared_into_transcript_on_injection() {
     )
     .await;
 
-    // 注入路径上声明了工具集增量:user 之前出现 system 消息,重放 == 可执行集
-    let injected_system = output
+    // 转录只含用户消息 + 助手回复,不含任何合成的声明/系统消息
+    assert_eq!(output.messages.len(), 2);
+    assert!(matches!(output.messages[0], AgentMessage::User { .. }));
+    assert!(matches!(output.messages[1], AgentMessage::Assistant(_)));
+}
+
+/// 超长 tool result 进转录前头尾裁剪(Current Turn 层):LoopConfig 的
+/// tool_result_max_chars 生效,转录与模型上下文只保留裁剪后的内容。
+#[tokio::test]
+async fn oversized_tool_result_is_trimmed_into_transcript() {
+    let m = model();
+    struct BigTool;
+    #[async_trait]
+    impl Tool for BigTool {
+        fn name(&self) -> &str {
+            "big"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _call: ToolCall,
+            _cancel: CancellationToken,
+            _updater: &dyn ToolUpdater,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("A".repeat(1000) + "TAIL"))
+        }
+    }
+    let provider = ScriptedProvider::new(
+        &m,
+        vec![
+            ScriptedTurn::tool_calls(&m, vec![tool_call("t1", "big", serde_json::json!({}))]),
+            text_turn(&m, "done"),
+        ],
+    );
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(BigTool)];
+    let (output, _receiver) = rpi_agent::run_agent_loop(
+        vec![AgentMessage::user("hi")],
+        rpi_agent::AgentContext {
+            system: None,
+            messages: Vec::new(),
+            tools,
+        },
+        Arc::new(PassthroughHooks),
+        rpi_agent::LoopConfig {
+            tool_result_max_chars: 100,
+            ..rpi_agent::LoopConfig::new(m.clone())
+        },
+        Arc::new(provider),
+        Arc::new(Collector::default()),
+        CancellationToken::new(),
+        rpi_agent::create_injection_endpoints().1,
+    )
+    .await;
+
+    let result = output
         .messages
         .iter()
-        .find_map(|msg| match msg {
-            AgentMessage::System { tools_added, .. } if !tools_added.is_empty() => Some(
-                tools_added
-                    .iter()
-                    .map(|t| t.name.clone())
-                    .collect::<Vec<_>>(),
-            ),
-            _ => None,
-        })
-        .expect("应有工具声明 system 消息");
-    let mut expected: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
-    let mut actual = injected_system.clone();
-    expected.sort();
-    actual.sort();
-    assert_eq!(actual, expected);
+        .find_map(|msg| msg.tool_result_content())
+        .expect("应有 tool result");
+    assert!(result.chars().count() < 200, "应被裁剪: {}", result.chars().count());
+    assert!(result.starts_with("AAA"), "保留头部");
+    assert!(result.ends_with("TAIL"), "保留尾部");
+    assert!(result.contains("characters truncated"), "带省略标注");
 }
 
 // ---------------------------------------------------------------------------
@@ -924,14 +970,12 @@ async fn agent_reducer_builds_transcript_from_events() {
 
     // 事件驱动的转录:user → assistant(toolUse) → toolResult → assistant(stop)
     let messages = agent.messages();
-    assert_eq!(messages.len(), 5);
-    // [0] = 工具声明 system 消息(declareToolChanges 注入)
-    assert!(matches!(messages[0], AgentMessage::System { .. }));
-    assert!(matches!(messages[1], AgentMessage::User { .. }));
-    assert!(messages[2].as_assistant().unwrap().has_tool_calls());
-    assert!(matches!(messages[3], AgentMessage::ToolResult { .. }));
+    assert_eq!(messages.len(), 4);
+    assert!(matches!(messages[0], AgentMessage::User { .. }));
+    assert!(messages[1].as_assistant().unwrap().has_tool_calls());
+    assert!(matches!(messages[2], AgentMessage::ToolResult { .. }));
     assert_eq!(
-        messages[4].as_assistant().unwrap().text_content(),
+        messages[3].as_assistant().unwrap().text_content(),
         "finished"
     );
     // 最后一次 agent_end 前 collector 收到的 agent_end 事件计数
@@ -1495,16 +1539,14 @@ async fn wait_idle_blocks_until_run_finishes_without_polling() {
     assert!(!agent.is_streaming());
 }
 
-/// trim_oldest_messages 只保留末尾 keep_last 条:打头 system baseline 永不删;
-/// 恰好多出 1 条(唯一可删的是 baseline)时保持原样。
+/// trim_oldest_messages 只保留末尾 keep_last 条。
 #[test]
-fn trim_oldest_never_removes_system_baseline() {
+fn trim_oldest_keeps_last_messages() {
     let provider = Arc::new(ScriptedProvider::new(&model(), vec![]));
     let agent = create_agent(provider, Arc::new(PassthroughHooks));
     agent.set_system_prompt(Some("baseline".into()));
     agent
         .set_messages(vec![
-            AgentMessage::System { content: "baseline".into(), sections: Default::default(), tools_added: Vec::new(), tools_removed: Vec::new(), timestamp: 0 },
             AgentMessage::user("m1"),
             AgentMessage::user("m2"),
             AgentMessage::user("m3"),
@@ -1512,16 +1554,14 @@ fn trim_oldest_never_removes_system_baseline() {
         ])
         .unwrap();
 
-    // 5 条,keep_last=3:可删 m1、m2,删除后 baseline 仍打头
-    agent.trim_oldest_messages(3);
+    // 4 条,keep_last=2:保留 m3、m4
+    agent.trim_oldest_messages(2);
     let messages = agent.messages();
-    assert!(
-        matches!(messages.first(), Some(AgentMessage::System { .. })),
-        "baseline 必须保留: {messages:?}"
-    );
-    assert_eq!(messages.len(), 4, "baseline + 末尾 keep_last 条");
+    assert_eq!(messages.len(), 2);
+    assert!(matches!(messages[0], AgentMessage::User { content: ref c, .. } if c == "m3"));
+    assert!(matches!(messages[1], AgentMessage::User { content: ref c, .. } if c == "m4"));
 
-    // 边界:恰好多出 1 条(唯一可删的就是 baseline)→ 不做任何删除
-    agent.trim_oldest_messages(3);
-    assert_eq!(agent.messages().len(), 4);
+    // 边界:keep_last >= len → 不变
+    agent.trim_oldest_messages(5);
+    assert_eq!(agent.messages().len(), 2);
 }

@@ -1,13 +1,13 @@
 //! AgentMessage(01 文档 §1/§1.5):agent 侧消息联合,serde 形态与 pi JSONL 兼容。
 //!
-//! 封闭 enum + `Custom` 逃生口(09 B2);System 携带 sections/toolsAdded/toolsRemoved
-//! 控制面(declareToolChanges 依赖),四种自定义消息由 `convert_to_llm` 折叠为 LLM 消息。
-
-use std::collections::BTreeMap;
+//! 封闭 enum + `Custom` 逃生口(09 B2)。转录只保留**状态类**消息(用户/助手/
+//! 工具结果等);系统提示词与工具 schema 属"能力规则",永远经请求级字段
+//! (`Context.system` / `tools`)动态下发,不以消息形式进转录或 session。
+//! 四种自定义消息由 `convert_to_llm` 折叠为 LLM 消息。
 
 use serde::{Deserialize, Serialize};
 
-use rpi_ai::{AssistantMessage, ContentBlock, Tool, ToolReference, Usage};
+use rpi_ai::{AssistantMessage, ContentBlock, Usage};
 
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -19,21 +19,6 @@ pub fn now_ms() -> i64 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum AgentMessage {
-    #[serde(rename_all = "camelCase")]
-    System {
-        /// 首条 = 基础 prompt;后续 = 追加指令(01 文档 §1.1)
-        #[serde(default)]
-        content: String,
-        /// 命名节 patch:字符串 = 替换,None = 删除
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        sections: BTreeMap<String, Option<String>>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tools_added: Vec<Tool>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tools_removed: Vec<ToolReference>,
-        #[serde(default)]
-        timestamp: i64,
-    },
     #[serde(rename_all = "camelCase")]
     User {
         #[serde(default)]
@@ -100,16 +85,6 @@ impl AgentMessage {
         AgentMessage::User { content: text.into(), timestamp: now_ms() }
     }
 
-    pub fn system(text: impl Into<String>) -> Self {
-        AgentMessage::System {
-            content: text.into(),
-            sections: BTreeMap::new(),
-            tools_added: Vec::new(),
-            tools_removed: Vec::new(),
-            timestamp: now_ms(),
-        }
-    }
-
     /// 工具结果消息(文本内容便捷构造)。
     pub fn tool_result_text(
         tool_call_id: impl Into<String>,
@@ -164,7 +139,6 @@ mod tests {
         assistant.stop_reason = rpi_ai::StopReason::Stop;
 
         let messages = vec![
-            AgentMessage::system("sys"),
             AgentMessage::user("q"),
             AgentMessage::Assistant(Box::new(assistant)),
             AgentMessage::tool_result_text("t1", "read", "r", false),
@@ -188,25 +162,5 @@ mod tests {
             serde_json::to_value(AgentMessage::tool_result_text("t", "read", "", false)).unwrap()["role"],
             "toolResult"
         );
-    }
-
-    /// system 消息的控制面字段(toolsAdded/toolsRemoved/sections)roundtrip。
-    #[test]
-    fn system_message_control_plane_roundtrip() {
-        let mut sections = BTreeMap::new();
-        sections.insert("style".to_string(), Some("terse".to_string()));
-        let message = AgentMessage::System {
-            content: String::new(),
-            sections,
-            tools_added: vec![Tool::new("read", "d", serde_json::json!({"type": "object"}))],
-            tools_removed: vec![ToolReference { name: "bash".into() }],
-            timestamp: 7,
-        };
-        let value = serde_json::to_value(&message).unwrap();
-        assert_eq!(value["role"], "system");
-        assert_eq!(value["toolsAdded"][0]["name"], "read");
-        assert_eq!(value["toolsRemoved"][0]["name"], "bash");
-        let back: AgentMessage = serde_json::from_value(value).unwrap();
-        assert_eq!(back, message);
     }
 }

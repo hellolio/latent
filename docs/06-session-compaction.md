@@ -131,7 +131,18 @@ rpi 扩展 entry:`context_ref`(第 12 种;`CURRENT_SESSION_VERSION = 4`)—— �
 - 产生时机:每次真实 wire 请求一条 —— **provider 内部重试的每次尝试也各记一条**(每次都是真实提交);compaction 摘要请求不经 agent 的 stream_options,不产生快照;纯内存会话跳过;
 - **不进模型上下文**:`session_entry_to_context_messages` 显式排除,投影/恢复/压缩管线不受影响;旧版二进制读新文件把该行按损坏行静默跳过(不致命)。
 
-rpi 还支持**系统提示词外置**(用户可编辑):约定文件 项目 `.rpi/system-prompt.md` → 全局 `~/.rpi/system-prompt.md`,首个存在且非空(空白视为未配置)的生效;内容经 `SystemPromptOptions.custom_prompt` **替换身份句(preamble)**,`<cwd>`/`<tools>`/`<rules>` 等动态节仍自动注入(工具集变化照常 diff 更新)。仅在程序启动/新建会话(装配期)读取一次,会话中途修改文件不生效。
+rpi 还支持**系统提示词外置**(用户可编辑):约定文件 项目 `.rpi/system-prompt.md` → 全局 `~/.rpi/system-prompt.md`,首个存在且非空(空白视为未配置)的生效;内容经 `SystemPromptOptions.custom_prompt` **替换身份句(preamble)**,`<cwd>`/`<tools>`/`<rules>` 等动态节仍自动注入(工具集变化照常更新)。仅在程序启动/新建会话(装配期)读取一次,会话中途修改文件不生效。
+
+**2026-09-27 起 rpi 与 pi 的持久化边界差异:session 只存状态,不存能力规则**(违背即缺陷):
+
+- pi 把系统提示词 sections patch 与工具 schema 声明作为 system 消息存进转录(`Compaction.systemMessage` 快照同源);rpi 已移除该设计 —— 转录/会话文件只保留状态类消息(User/Assistant/ToolResult/BashExecution 等),能力规则(系统提示词、工具 schema)永远经请求级字段(`Context.system` / `tools`)动态下发;
+- 工具集变更落**元数据 entry** `tool_set_change`(只记名字,不记 schema;`CURRENT_SESSION_VERSION = 5`),投影不产生上下文消息,恢复时按名字重建激活集;系统提示词恢复时从当前配置重组;
+- `Compaction` entry 不再携带 `systemMessage` 快照(旧 v4 文件中的该字段反序列化时被忽略,兼容);
+- pi 的 `declareToolChanges`(循环内声明工具集增量)不移植 —— 工具 schema 每次请求动态下发后该机制对模型可见性是冗余的(rpi-agent 的 `declare.rs` 已删除);
+- 超长 tool result 的 Current Turn 裁剪:`crates/rpi-agent/src/loop_.rs` `trim_tool_result_output`(默认上限 20000 字符,settings `toolResultMaxChars` 可配,0 = 关闭),头 60% + 尾 40% 保留、中间省略标注,进转录前生效(内存转录、session 落盘与模型上下文三者一致);
+- 自动压缩阈值可配置(settings `compaction` 节:`enabled` / `reserveTokens` / `keepRecentTokens`),装配时替换默认值;`/session` 信息行展示当前配置。`reserveTokens` **>= 1.0 按绝对 token 数;0 < v < 1.0 按 context_window 的百分比**(0.1 = 10%,随模型窗口缩放,分辨率在 should_compact 调用时进行;100% 无法表达,非正数归零)—— 默认仍为绝对值 16384(pi 对齐;约 128k 窗口的 12.5%,小窗口模型建议写绝对值或提高百分比)。
+
+rpi 扩展命令 `/new`(进程内新建会话):新建 `<项目前缀>__<新session-id>.jsonl` 并切换持久化目标(sink/compactor/PI_* 环境闭包经 `SessionManagerHolder` 读当前值),转录清空、模型/思考级别作为设置态 entry 写入新文件、新文件 header 记录 `parentSession` 血缘;旧文件不做任何操作(append-only 天然已保存)。`--continue` 按 mtime 续到最新会话,即 /new 之后的新会话。
 
 ## 踩坑记录
 

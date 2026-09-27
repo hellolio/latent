@@ -330,6 +330,11 @@ impl SessionManager {
                 timestamp,
                 ..
             }
+            | Entry::ToolSetChange {
+                id: entry_id,
+                timestamp,
+                ..
+            }
             | Entry::BranchSummary {
                 id: entry_id,
                 timestamp,
@@ -446,9 +451,8 @@ impl SessionManager {
         })
     }
 
-    /// 追加压缩 entry(06 文档 §3.4):summary + firstKeptEntryId + tokensBefore,
-    /// 可选 systemMessage 快照;原 entry 保留在树中。
-    #[allow(clippy::too_many_arguments)]
+    /// 追加压缩 entry(06 文档 §3.4):summary + firstKeptEntryId + tokensBefore;
+    /// 原 entry 保留在树中。
     pub fn append_compaction(
         &self,
         summary: impl Into<String>,
@@ -457,7 +461,6 @@ impl SessionManager {
         details: Option<serde_json::Value>,
         usage: Option<Usage>,
         from_hook: bool,
-        system_message: Option<AgentMessage>,
     ) -> Result<String, SessionError> {
         self.append_entry(Entry::Compaction {
             id: String::new(),
@@ -468,7 +471,16 @@ impl SessionManager {
             details,
             usage,
             from_hook: from_hook.then_some(true),
-            system_message,
+            timestamp: 0,
+        })
+    }
+
+    /// 追加激活工具集变更 entry(元数据,不进模型上下文;只记工具名)。
+    pub fn append_tool_set_change(&self, tools: &[String]) -> Result<String, SessionError> {
+        self.append_entry(Entry::ToolSetChange {
+            id: String::new(),
+            parent_id: None,
+            tools: tools.to_vec(),
             timestamp: 0,
         })
     }

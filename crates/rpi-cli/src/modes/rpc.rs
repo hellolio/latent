@@ -203,6 +203,7 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
     let BuiltSession {
         session,
         session_manager,
+        ..
     } = built;
 
     let subscriber: SessionSharedSubscriber = Arc::new(RpcEventSubscriber {

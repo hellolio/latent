@@ -33,7 +33,6 @@ use rpi_ai::{
 };
 
 use crate::agent::QueueMode;
-use crate::declare::declare_tool_changes;
 use crate::event::{AgentEvent, MessageDeltaPayload, SharedPartial, Subscriber};
 use crate::hooks::{
     LoopHooks, ToolCallCtx, ToolPatch, ToolResultCtx, TurnCtx, TurnDecision, TurnUpdate,
@@ -252,6 +251,9 @@ pub struct LoopConfig {
     pub steering_mode: QueueMode,
     /// follow-up 批量模式(独立于 steering;pi 的 followUpQueueMode)
     pub follow_up_mode: QueueMode,
+    /// 超长 tool result 进转录前的字符上限(Current Turn 层裁剪):超出时
+    /// 头尾保留、中间省略。0 = 不裁剪。
+    pub tool_result_max_chars: usize,
 }
 
 impl LoopConfig {
@@ -263,8 +265,33 @@ impl LoopConfig {
             stream_options: StreamOptions::default(),
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
+            tool_result_max_chars: DEFAULT_TOOL_RESULT_MAX_CHARS,
         }
     }
+}
+
+/// 超长 tool result 的默认字符上限(约 5k token;内置工具 bash/read 已有
+/// 各自的行/字节截断,此上限兜底任意工具/扩展的超长输出)。
+pub const DEFAULT_TOOL_RESULT_MAX_CHARS: usize = 20_000;
+
+/// 超长文本头尾保留裁剪:保留前 60%、后 40%(头部常含 read 的文件开头,
+/// 尾部常含 bash 的错误/结果行),中间替换为省略标注。按 char 边界操作,
+/// 多字节字符安全。`max_chars` 以内原样返回。
+pub fn trim_tool_result_output(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if max_chars == 0 || total <= max_chars {
+        return text.to_string();
+    }
+    let head = max_chars * 3 / 5;
+    let tail = max_chars - head;
+    let mut out = String::with_capacity(max_chars * 4 + 64);
+    out.extend(text.chars().take(head));
+    out.push_str(&format!(
+        "\n\n[... {} characters truncated ...]\n\n",
+        total - head - tail
+    ));
+    out.extend(text.chars().skip(total - tail));
+    out
 }
 
 /// 超限的护栏种类(可区分终止,不伪装成 error)。
@@ -386,6 +413,7 @@ struct LoopState {
     limits: TurnLimits,
     steering_mode: QueueMode,
     follow_up_mode: QueueMode,
+    tool_result_max_chars: usize,
 
     model: Model,
     thinking: Option<ThinkingLevel>,
@@ -546,6 +574,7 @@ pub async fn run_agent_loop(
         limits: config.limits,
         steering_mode: config.steering_mode,
         follow_up_mode: config.follow_up_mode,
+        tool_result_max_chars: config.tool_result_max_chars,
         model: config.model,
         thinking: config.thinking,
         current: context.messages,
@@ -638,11 +667,10 @@ async fn step_awaiting_request(state: &mut LoopState, wake: Option<Box<Wake>>) -
 
     state.sink.on_event(&AgentEvent::TurnStart).await;
 
-    // 注入(初始 prompts + prepared + wake 载荷 + follow-up/steering 批),
-    // 注入前声明工具集增量
+    // 注入(初始 prompts + prepared + wake 载荷 + follow-up/steering 批)
     let mut injectables = std::mem::take(&mut state.initial_prompts);
     injectables.extend(state.collect_injectables(wake, prepared).await);
-    for message in declare_tool_changes(&state.current, &state.tools, injectables) {
+    for message in injectables {
         state.inject(message).await;
     }
 
@@ -781,6 +809,7 @@ async fn step_executing_tools(state: &mut LoopState) -> Phase {
                 &state.hooks,
                 &state.sink,
                 &state.cancel,
+                state.tool_result_max_chars,
                 &mut state.current,
                 &mut state.new_messages,
             )
@@ -1223,6 +1252,7 @@ async fn execute_tool_calls(
     hooks: &Arc<dyn LoopHooks>,
     sink: &Arc<dyn Subscriber>,
     cancel: &CancellationToken,
+    tool_result_max_chars: usize,
     transcript: &mut Vec<AgentMessage>,
     new_messages: &mut Vec<AgentMessage>,
 ) -> ToolBatch {
@@ -1237,17 +1267,28 @@ async fn execute_tool_calls(
 
     let (outcomes, messages) = if sequential {
         // 串行:逐工具 start → prepare → execute → finalize → end → message_start/end 交错(pi §5.2)
-        let outcomes =
-            execute_batch_sequential(calls, tools, hooks, sink, cancel, transcript, new_messages)
-                .await;
-        let messages: Vec<AgentMessage> = outcomes.iter().map(outcome_to_message).collect();
+        let outcomes = execute_batch_sequential(
+            calls,
+            tools,
+            hooks,
+            sink,
+            cancel,
+            tool_result_max_chars,
+            transcript,
+            new_messages,
+        )
+        .await;
+        let messages: Vec<AgentMessage> = outcomes
+            .iter()
+            .map(|outcome| outcome_to_message(outcome, tool_result_max_chars))
+            .collect();
         (outcomes, messages)
     } else {
         // 并行:end 事件已按完成序发出;结果消息按源序补发(不变量 I4)
         let outcomes = execute_batch_parallel(calls, tools, hooks, sink, cancel).await;
         let mut messages = Vec::with_capacity(outcomes.len());
         for outcome in &outcomes {
-            let result = outcome_to_message(outcome);
+            let result = outcome_to_message(outcome, tool_result_max_chars);
             emit_message_events(sink, &result).await;
             transcript.push(result.clone());
             new_messages.push(result.clone());
@@ -1272,6 +1313,7 @@ async fn execute_batch_sequential(
     hooks: &Arc<dyn LoopHooks>,
     sink: &Arc<dyn Subscriber>,
     cancel: &CancellationToken,
+    tool_result_max_chars: usize,
     transcript: &mut Vec<AgentMessage>,
     new_messages: &mut Vec<AgentMessage>,
 ) -> Vec<ToolOutcome> {
@@ -1286,7 +1328,7 @@ async fn execute_batch_sequential(
         if cancel.is_cancelled() {
             emit_tool_end(sink, call, "Operation aborted", true).await;
             let outcome = ToolOutcome::Cancelled { call: call.clone() };
-            let result = outcome_to_message(&outcome);
+            let result = outcome_to_message(&outcome, tool_result_max_chars);
             emit_message_events(sink, &result).await;
             transcript.push(result.clone());
             new_messages.push(result);
@@ -1307,7 +1349,7 @@ async fn execute_batch_sequential(
             }
         };
         emit_tool_end_for_outcome(sink, &outcome).await;
-        let result = outcome_to_message(&outcome);
+        let result = outcome_to_message(&outcome, tool_result_max_chars);
         emit_message_events(sink, &result).await;
         transcript.push(result.clone());
         new_messages.push(result);
@@ -1545,7 +1587,7 @@ async fn execute_and_finalize(
     }
 }
 
-fn outcome_to_message(outcome: &ToolOutcome) -> AgentMessage {
+fn outcome_to_message(outcome: &ToolOutcome, tool_result_max_chars: usize) -> AgentMessage {
     let call = outcome.call();
     match outcome {
         ToolOutcome::Completed {
@@ -1553,7 +1595,11 @@ fn outcome_to_message(outcome: &ToolOutcome) -> AgentMessage {
         } => AgentMessage::ToolResult {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
-            content: vec![ContentBlock::text(output.output.clone())],
+            // 超长输出进转录前头尾裁剪(Current Turn 层;会话与模型一致)
+            content: vec![ContentBlock::text(trim_tool_result_output(
+                &output.output,
+                tool_result_max_chars,
+            ))],
             // details 无内容时用 None(JSONL null 往返读回 None,保证
             // 内存转录与 session projection 一致)
             details: (!output.details.is_null()).then(|| output.details.clone()),
@@ -1616,6 +1662,33 @@ pub fn validate_arguments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_tool_result_keeps_head_and_tail_with_marker() {
+        let text = "a".repeat(1000);
+        let trimmed = trim_tool_result_output(&text, 100);
+        assert!(
+            trimmed.chars().count() < 160,
+            "输出应接近上限: {}",
+            trimmed.chars().count()
+        );
+        assert!(trimmed.starts_with(&"a".repeat(60)), "保留前 60%");
+        assert!(trimmed.ends_with(&"a".repeat(40)), "保留后 40%");
+        assert!(trimmed.contains("900 characters truncated"));
+
+        // 限内原样;max_chars=0 不裁剪
+        assert_eq!(trim_tool_result_output("short", 100), "short");
+        assert_eq!(trim_tool_result_output(&text, 0), text);
+    }
+
+    #[test]
+    fn trim_tool_result_is_multibyte_safe() {
+        let text = "中".repeat(1000);
+        let trimmed = trim_tool_result_output(&text, 100);
+        assert!(trimmed.starts_with("中中中"));
+        assert!(trimmed.ends_with("中中中"));
+        assert!(trimmed.contains("characters truncated"));
+    }
 
     #[test]
     fn argument_validation_checks_type_required_and_nesting() {

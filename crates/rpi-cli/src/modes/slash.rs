@@ -37,6 +37,11 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "压缩上下文(摘要替换历史)",
     },
     SlashCommand {
+        name: "new",
+        args: "",
+        description: "新建会话(当前会话已保存,原样保留在原文件)",
+    },
+    SlashCommand {
         name: "session",
         args: "",
         description: "显示会话信息与统计",
@@ -56,6 +61,7 @@ pub enum SlashAction {
     Thinking { arg: Option<String> },
     Theme { arg: Option<String> },
     Compact { arg: Option<String> },
+    New,
     Session,
     Quit,
 }
@@ -100,6 +106,7 @@ pub fn parse(input: &str) -> SlashInput {
         "compact" => SlashInput::Command(SlashAction::Compact {
             arg: arg.map(str::to_string),
         }),
+        "new" => SlashInput::Command(SlashAction::New),
         _ => SlashInput::Unknown(format!("/{name}")),
     }
 }
@@ -139,6 +146,7 @@ mod tests {
             parse("/compact"),
             SlashInput::Command(SlashAction::Compact { arg: None })
         );
+        assert_eq!(parse("/new"), SlashInput::Command(SlashAction::New));
         assert_eq!(
             parse("/compact 保留近期消息"),
             SlashInput::Command(SlashAction::Compact {

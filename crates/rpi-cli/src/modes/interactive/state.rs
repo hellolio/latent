@@ -236,6 +236,21 @@ impl InteractiveState {
         }
     }
 
+    /// /new 切换会话后复位会话相关的瞬态:转录区、流式缓冲、用量与 ctx 估计
+    /// (footer 字段由调用方 refresh_footer 从 Agent 状态重新读取)。
+    pub fn reset_for_new_session(&mut self) {
+        self.transcript.clear();
+        self.pending.clear();
+        self.stream_text.clear();
+        self.pending_thinking = None;
+        self.current_tool = None;
+        self.last_tool_error = false;
+        self.usage = UsageTracker::default();
+        self.context_tokens = 0;
+        self.status = Status::Idle;
+        self.needs_full_redraw = true;
+    }
+
     /// 消费历史:Enter 提交后的文本(含多行)。
     pub fn take_input(&mut self) -> Option<String> {
         let text = self.editor.text().trim().to_string();

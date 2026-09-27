@@ -1,10 +1,11 @@
 //! I 系列不变量 property test(03 文档 §10.1/§10.7 M2+,11 计划 T6)。
 //!
 //! 每条不变量至少一个独立用例并注明 I 编号:
-//! - **I6**:重放 system 消息的工具声明后,模型可见集恒等于 `context.tools`;
 //! - **配对**:正常 / abort / length 截断三条路径下 toolCall 与 toolResult 一一配对;
 //! - **I4**:并行时事件完成序 vs 消息源序双保序;
 //! - **I5**:length 截断消息的全部 tool call 被拒执行(含防振荡计数)。
+//! (原 I6 声明重放不变量随 declare 机制移除:工具 schema 每次请求经
+//! `Context.tools` 动态下发,不再经转录声明。)
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -96,70 +97,6 @@ fn tool_call(id: &str, name: &str) -> ContentBlock {
         id: id.into(),
         name: name.into(),
         arguments: serde_json::json!({}),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// I6:声明重放后模型可见集恒等于 context.tools
-// ---------------------------------------------------------------------------
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
-
-    #[test]
-    fn i6_replay_after_declaration_equals_context_tools(
-        pool in prop::collection::vec("[a-z][a-z0-9_]{0,6}", 1..7),
-        ops in prop::collection::vec((0usize..7, any::<bool>()), 0..10),
-        desired_bits in prop::collection::vec(any::<bool>(), 7),
-    ) {
-        let pool: Vec<String> = pool.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-        // 转录:op 序列编码为 system 消息的 toolsAdded/toolsRemoved
-        let mut transcript: Vec<AgentMessage> = Vec::new();
-        for (index, add) in ops {
-            let Some(name) = pool.get(index % pool.len()) else { continue };
-            let (added, removed) = if add {
-                (vec![rpi_ai::Tool::new(name.clone(), "", serde_json::json!({"type": "object"}))], vec![])
-            } else {
-                (vec![], vec![rpi_ai::ToolReference { name: name.clone() }])
-            };
-            transcript.push(AgentMessage::System {
-                content: String::new(),
-                sections: Default::default(),
-                tools_added: added,
-                tools_removed: removed,
-                timestamp: 0,
-            });
-        }
-        // 期望可见集:pool 的一个子集
-        let desired: Vec<String> = pool
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| desired_bits.get(*i).copied().unwrap_or(false))
-            .map(|(_, name)| name.clone())
-            .collect();
-        let tools: Vec<Arc<dyn Tool>> = desired
-            .iter()
-            .map(|name| ProbeTool::new(name, 0) as Arc<dyn Tool>)
-            .collect();
-
-        let pending = vec![AgentMessage::user("hi")];
-        let injected = rpi_agent::declare_tool_changes(&transcript, &tools, pending);
-
-        // I6:transcript + 注入结果重放 == context.tools(按名字集合与声明一致性)
-        let mut full = transcript.clone();
-        full.extend(injected.iter().cloned());
-        let replay = rpi_agent::declared_tools(&full);
-        let mut replay_names: Vec<String> = replay.iter().map(|t| t.name.clone()).collect();
-        replay_names.sort();
-        let mut desired_names = desired.clone();
-        desired_names.sort();
-        prop_assert_eq!(replay_names, desired_names);
-
-        // 幂等:再次声明无增量(注入后可见集已收敛,重复注入必须原样返回)
-        let again = rpi_agent::declare_tool_changes(&full, &tools, vec![AgentMessage::user("x")]);
-        prop_assert_eq!(again.len(), 1);
-        let is_user = matches!(&again[0], AgentMessage::User { .. });
-        prop_assert!(is_user);
     }
 }
 
