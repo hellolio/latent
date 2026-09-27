@@ -9,8 +9,13 @@ use rpi_tui::{loader, markdown, tool_card, Theme, UiLine};
 
 use super::state::{InteractiveState, Status, ToolStatus, TranscriptItem};
 
-/// 流式预览最多展示的行数(超出取尾部)。
-pub const MAX_PREVIEW_ROWS: usize = 8;
+/// 交流区与输入区之间的空隙行数(空闲/工具执行时预览区固定补空到此值)。
+pub const MAX_PREVIEW_ROWS: usize = 2;
+/// 流式输出/思考中预览区的固定行数(超出取尾部)。视口高度在全过程中
+/// 恒定:模型回话期间视口不因增量而改高(ratatui Inline 视口改高要
+/// insert_before + 清屏 + 重建 Terminal,逐增量触发会闪烁并把屏幕顶行
+/// 推进 scrollback,冲刷真实历史),全文在 MessageEnd 一并进转录。
+pub const STREAM_PREVIEW_ROWS: usize = 10;
 /// 编辑器最多展示的视觉行数(pi 编辑器同样封顶)。
 pub const MAX_EDITOR_ROWS: usize = 6;
 
@@ -95,24 +100,26 @@ pub fn render_transcript(
     out
 }
 
-/// user 消息背景块(pi userMessageBg):整行铺背景色。背景覆盖包括行尾
-/// 在内的每一个单元格,保证块内背景完全一致(无终端底色缝隙)。
+/// user 消息背景块(pi userMessageBg):整行铺背景色,上下各留一行同色
+/// 空行作内边距(块高 ≈ 字体高度 2 倍以上,呼吸感与输入区一致)。背景
+/// 覆盖包括行尾在内的每一个单元格,保证块内背景完全一致(无终端底色缝隙)。
 pub fn user_block(content: &str, theme: &Theme, width: usize) -> Vec<UiLine> {
     let style = Style::new().fg(theme.user_text).bg(theme.user_bg);
-    let mut out = Vec::new();
+    let pad_line = || Line::from(Span::styled(" ".repeat(width.max(1)), style));
+    let mut out = vec![pad_line()];
+    let mut body = Vec::new();
     for raw in rpi_tui::wrap_to_width(content, width.max(1)) {
         let pad = width.saturating_sub(rpi_tui::display_width(&raw));
-        out.push(Line::from(Span::styled(
+        body.push(Line::from(Span::styled(
             format!("{raw}{}", " ".repeat(pad)),
             style,
         )));
     }
-    if out.is_empty() {
-        out.push(Line::from(Span::styled(
-            " ".repeat(width.max(1)),
-            style,
-        )));
+    if body.is_empty() {
+        body.push(pad_line());
     }
+    out.extend(body);
+    out.push(pad_line());
     out
 }
 
@@ -153,7 +160,7 @@ pub fn welcome_lines(version: &str, expanded: bool, theme: &Theme, width: usize)
 }
 
 /// 底部视口帧:预览区(流式尾部/thinking 尾部)+ 状态行 + 补全弹窗 +
-/// 编辑器框 + footer(Codex CLI 布局)。
+/// 编辑器区(带背景色,无边框)+ footer(Codex CLI 布局)。
 pub struct ViewportFrame {
     pub lines: Vec<UiLine>,
     /// 光标相对视口左上角的 (列, 行);None = 隐藏
@@ -200,7 +207,7 @@ pub fn viewport(
         .as_ref()
         .filter(|t| !t.trim().is_empty())
     {
-        let rows: Vec<&str> = text.lines().rev().take(preview_cap.min(3)).collect();
+        let rows: Vec<&str> = text.lines().rev().take(preview_cap).collect();
         for row in rows.into_iter().rev() {
             preview.push(Line::from(vec![
                 Span::styled(
@@ -228,8 +235,11 @@ pub fn viewport(
     }
     lines.extend(preview);
 
-    // 2. 状态行(Codex 风格,busy 时一行;idle 不占行):
-    //    `↻ Working (3s · esc to interrupt)` / `⏺ bash` / `aborted`
+    // 1.5 空隙行:预览区(模型输出)与状态行之间保留一行字体间距
+    lines.push(Line::raw(""));
+
+    // 2. 状态行(Codex 风格,busy 时一行带 shimmer 渐变;idle 不占行):
+    //    `◐ Working (3s · esc to interrupt)` / `⏺ bash` / `aborted`
     let status = status_line(state);
     lines.extend(status);
 
@@ -238,41 +248,50 @@ pub fn viewport(
         lines.extend(state.slash_popup.render(width, theme, popup_cap));
     }
 
-    // 4. 编辑器框:无边框标题圆角框;状态语义只体现在边框颜色上
-    let border_style = border_style(state);
-    let inner_width = width.saturating_sub(2).max(1);
+    // 4. 编辑器区:无边框,整行铺 user_bg 背景(与已发送用户消息同款,
+    //    靠背景色区分输入区;busy 语义由上方状态行承担)
     let view = state
         .editor
-        .view(inner_width.saturating_sub(2), editor_cap.max(1));
-    lines.push(Line::from(Span::styled(
-        format!("╭{}", "─".repeat(width.saturating_sub(2))),
-        border_style,
-    )));
+        .view(width.saturating_sub(2), editor_cap.max(1));
 
-    // 5. 编辑器内容行(首行 ❯ 前缀;光标按显示宽定位;空输入显示占位文本)
+    // 5. 编辑器内容行(整行铺 user_bg,上下各一行同色空行作内边距,与
+    //    用户消息块一致;首行 ❯ 前缀;光标按显示宽定位;空输入显示占位文本)
+    let bg = theme.user_bg;
+    let text_style = Style::new().fg(theme.user_text).bg(bg);
+    let prefix_style = Style::new().fg(theme.accent).bg(bg);
+    let pad_row = |mut spans: Vec<Span<'static>>, used: usize| {
+        let pad = width.saturating_sub(used);
+        spans.push(Span::styled(" ".repeat(pad), text_style));
+        Line::from(spans)
+    };
+    let full_pad = || Line::from(Span::styled(" ".repeat(width.max(1)), text_style));
+    lines.push(full_pad());
     let editor_first_row = lines.len();
     if state.editor.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("❯ ".to_string(), Style::new().fg(theme.accent)),
-            Span::styled(
-                "Ask rpi to do anything".to_string(),
-                Style::new().fg(theme.dim),
-            ),
-        ]));
+        let placeholder = "Ask rpi to do anything";
+        lines.push(pad_row(
+            vec![
+                Span::styled("❯ ".to_string(), prefix_style),
+                Span::styled(
+                    placeholder.to_string(),
+                    Style::new().fg(theme.dim).bg(bg),
+                ),
+            ],
+            2 + rpi_tui::display_width(placeholder),
+        ));
     } else {
         for (i, row) in view.rows.iter().enumerate() {
             let prefix = if i == 0 { "❯ " } else { "  " };
-            let mut spans = vec![Span::styled(
-                prefix.to_string(),
-                Style::new().fg(theme.accent),
-            )];
-            spans.push(Span::styled(
-                row.clone(),
-                Style::new().fg(theme.assistant_text),
+            lines.push(pad_row(
+                vec![
+                    Span::styled(prefix.to_string(), prefix_style),
+                    Span::styled(row.clone(), text_style),
+                ],
+                2 + rpi_tui::display_width(row),
             ));
-            lines.push(Line::from(spans));
         }
     }
+    lines.push(full_pad());
     if let Some((row, col)) = view.cursor {
         cursor = Some((
             (2 + col).min(width.saturating_sub(2)) as u16,
@@ -280,17 +299,10 @@ pub fn viewport(
         ));
     }
 
-    // 6. 底边框
-    lines.push(Line::from(Span::styled(
-        format!("╰{}", "─".repeat(width.saturating_sub(2))),
-        border_style,
-    )));
-
-    // 7. footer 三行(cwd · 右对齐 token 段 · 右对齐模型)
+    // 6. footer 三行(cwd · 右对齐 token 段 · 右对齐模型)
     let footer = FooterData {
         cwd: state.cwd_display.clone(),
         git_branch: state.git_branch.clone(),
-        session_label: state.session_label.clone(),
         input_tokens: state.usage.total.input,
         output_tokens: state.usage.total.output,
         cache_read: state.usage.total.cache_read,
@@ -312,8 +324,9 @@ pub fn viewport(
     }
 }
 
-/// 状态行(Codex 风格:busy 时一行带 spinner 与 `esc to interrupt` 提示;
-/// idle 时也恒占一行空占位,保证视口高度不随 busy↔idle 切换抖动)。
+/// 状态行(Codex 风格:busy 时一行带 shimmer 渐变与 `esc to interrupt` 提示;
+/// idle 时空占一行,保证视口高度不随 busy↔idle 切换抖动)。
+/// 等待态文字逐字符做明暗渐变,波峰随 spinner 拍数向右扫动(等待感)。
 fn status_line(state: &InteractiveState) -> Vec<UiLine> {
     let theme = &state.theme;
     let secs = state.spin * super::SPINNER_INTERVAL.as_millis() as usize / 1000;
@@ -337,21 +350,37 @@ fn status_line(state: &InteractiveState) -> Vec<UiLine> {
             theme.spinner,
             format!("{} Compacting history", loader::frame(state.spin)),
         ),
-        Status::Bash(command) => (theme.border_bash, format!("! {command}")),
-        Status::Aborted => (theme.error, "aborted".to_string()),
+        Status::Bash(command) => {
+            return vec![Line::from(Span::styled(
+                format!("! {command}"),
+                Style::new().fg(theme.border_bash),
+            ))];
+        }
+        Status::Aborted => {
+            return vec![Line::from(Span::styled(
+                "aborted".to_string(),
+                Style::new().fg(theme.error),
+            ))];
+        }
     };
-    vec![Line::from(Span::styled(text, Style::new().fg(color)))]
-}
-
-fn border_style(state: &InteractiveState) -> Style {
-    let theme = &state.theme;
-    let color = match &state.status {
-        Status::Idle => theme.border_idle,
-        Status::Bash(_) => theme.border_bash,
-        Status::Aborted => theme.error,
-        _ => theme.border_busy,
-    };
-    Style::new().fg(color)
+    // shimmer:亮度 = 0.35~1.0 的正弦波,波峰位置随 tick 向右扫
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len().max(1) as f32;
+    let phase = (state.spin % 24) as f32 / 24.0;
+    let spans: Vec<Span<'static>> = chars
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let wave =
+                0.5 + 0.5 * ((i as f32 / n - phase) * std::f32::consts::TAU).sin();
+            let t = 0.35 + 0.65 * wave;
+            Span::styled(
+                c.to_string(),
+                Style::new().fg(rpi_tui::theme::blend_rgb(theme.dim, color, t)),
+            )
+        })
+        .collect();
+    vec![Line::from(spans)]
 }
 
 fn truncate_plain(text: &str, width: usize) -> String {
@@ -398,14 +427,21 @@ mod tests {
     #[test]
     fn user_block_pads_background() {
         let lines = user_block("hello", &theme(), 40);
-        assert_eq!(lines.len(), 1);
-        let text = line_text(&lines[0]);
+        // 上下各一行同背景色空行(内边距)+ 文字行
+        assert_eq!(lines.len(), 3);
+        let text = line_text(&lines[1]);
         // 内容 + 补齐空格,整行(含行尾)铺满背景
         assert_eq!(rpi_tui::display_width(&text), 40, "{text:?}");
         assert!(text.starts_with("hello"));
-        // 背景完全一致:整行单一 span,且带 bg 色(无终端底色缝隙)
-        assert_eq!(lines[0].spans.len(), 1);
-        assert_eq!(lines[0].spans[0].style.bg, Some(theme().user_bg));
+        // 三行(含内边距行)背景完全一致:各为单一 span,带 bg 色
+        for line in &lines {
+            assert_eq!(line.spans.len(), 1);
+            assert_eq!(line.spans[0].style.bg, Some(theme().user_bg));
+            assert_eq!(rpi_tui::display_width(&line_text(line)), 40);
+        }
+        // 内边距行为纯空格
+        assert!(line_text(&lines[0]).trim().is_empty());
+        assert!(line_text(&lines[2]).trim().is_empty());
     }
 
     #[test]
@@ -430,22 +466,21 @@ mod tests {
         let mut st = state();
         st.editor.set_text("hi");
         let frame = viewport(&st, None, 8, 6, 8);
-        // 预览 8(恒占)+ 状态 1(恒占)+ 边框 2 + 编辑行 1 + footer 3 = 15
+        // 预览 8(恒占)+ 空隙 1 + 状态 1 + 编辑区(上下内边距 2 + 编辑行 1)
+        // + footer 3 = 16
         assert_eq!(
             frame.lines.len(),
-            15,
+            16,
             "{:?}",
             frame.lines.iter().map(line_text).collect::<Vec<_>>()
         );
-        assert_eq!(frame.height, 15);
-        // 光标在编辑器行(行 10 = 预览 8 + 状态 1 + 顶边框),列 = 2 + 2 = 4
-        assert_eq!(frame.cursor, Some((4, 10)));
+        assert_eq!(frame.height, 16);
+        // 光标在编辑器行(行 11 = 预览 8 + 空隙 1 + 状态 1 + 顶部内边距),列 = 2 + 2 = 4
+        assert_eq!(frame.cursor, Some((4, 11)));
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert!(texts[9].starts_with("╭"), "{texts:?}");
-        assert!(texts[10].starts_with("❯ hi"));
-        assert!(texts[11].starts_with("╰"), "{texts:?}");
-        // idle 时预览与状态行均为空占位
-        for row in &texts[..9] {
+        assert!(texts[11].starts_with("❯ hi"), "{texts:?}");
+        // idle 时预览、空隙行与状态行均为空占位
+        for row in &texts[..10] {
             assert!(row.trim().is_empty(), "空闲占位应为空行: {texts:?}");
         }
     }
@@ -457,7 +492,7 @@ mod tests {
         let st = state();
         let frame = viewport(&st, None, 4, 6, 8);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert_eq!(frame.height, 4 + 1 + 2 + 1 + 3);
+        assert_eq!(frame.height, 4 + 1 + 1 + 3 + 3);
         for row in &texts[..4] {
             assert!(row.trim().is_empty(), "预览空位应为空行: {texts:?}");
         }
@@ -466,7 +501,7 @@ mod tests {
         st.status = Status::Thinking;
         st.stream_text = "line1\nline2".into();
         let frame = viewport(&st, None, 4, 6, 8);
-        assert_eq!(frame.height, 4 + 1 + 2 + 1 + 3);
+        assert_eq!(frame.height, 4 + 1 + 1 + 3 + 3);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
         assert!(texts.iter().take(4).any(|t| t.contains("line2")));
     }
@@ -486,29 +521,45 @@ mod tests {
     #[test]
     fn viewport_status_line_reflects_busy_state() {
         let mut state = state();
-        // idle:状态行为空占位(仍占一行)
-        assert_eq!(viewport(&state, None, 0, 6, 8).lines.len(), 7);
+        // idle:预览空位 + 空隙行 + 状态行空占位
+        assert_eq!(viewport(&state, None, 0, 6, 8).lines.len(), 8);
         assert!(line_text(&viewport(&state, None, 0, 6, 8).lines[0]).trim().is_empty());
         state.status = Status::Thinking;
         state.spin = 25; // 25 * 120ms = 3s
         let frame = viewport(&state, None, 0, 6, 8);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert!(texts[0].contains(loader::frame(25)), "{texts:?}");
-        assert!(texts[0].contains("Working (3s"), "{texts:?}");
-        assert!(texts[0].contains("esc to interrupt"), "{texts:?}");
+        // 预览空位(0)+ 空隙行 → 状态行在 index 1
+        assert!(texts[1].contains(loader::frame(25)), "{texts:?}");
+        assert!(texts[1].contains("Working (3s"), "{texts:?}");
+        assert!(texts[1].contains("esc to interrupt"), "{texts:?}");
         state.status = Status::Bash("ls".into());
         let frame = viewport(&state, None, 0, 6, 8);
-        assert!(line_text(&frame.lines[0]).contains("! ls"));
+        assert!(line_text(&frame.lines[1]).contains("! ls"));
     }
 
     #[test]
     fn viewport_empty_editor_shows_placeholder() {
         let state = state();
         let frame = viewport(&state, None, 0, 6, 8);
-        // 预览 0 + 状态占位 1 + 顶边框 → 编辑器首行在 index 2
-        let text = line_text(&frame.lines[2]);
+        // 预览 0 + 空隙 1 + 状态 1 + 顶部内边距 → 编辑器首行在 index 3
+        let text = line_text(&frame.lines[3]);
         assert!(text.starts_with("❯ "), "{text}");
         assert!(text.contains("Ask rpi to do anything"), "{text}");
+    }
+
+    #[test]
+    fn viewport_editor_row_has_full_width_background() {
+        let mut st = state();
+        st.editor.set_text("hi");
+        let frame = viewport(&st, None, 0, 6, 8);
+        // 空隙 1 + 状态 1 → 顶部内边距 idx 2,编辑行 idx 3
+        let row = &frame.lines[3];
+        // 前缀 + 内容 + 行尾补齐,三个 span 共用 user_bg(整行无底色缝隙)
+        assert_eq!(row.spans.len(), 3, "{row:?}");
+        for span in &row.spans {
+            assert_eq!(span.style.bg, Some(st.theme.user_bg), "{span:?}");
+        }
+        assert_eq!(rpi_tui::display_width(&line_text(row)), 80);
     }
 
     #[test]
@@ -519,11 +570,12 @@ mod tests {
         assert!(state.slash_popup.visible());
         let frame = viewport(&state, None, 0, 6, 8);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        // 弹窗(边框 + 1 个 /model 匹配行)紧贴编辑器框上方
+        // 弹窗(边框 + 1 个 /model 匹配行)紧贴编辑器区上方
         let popup_top = texts.iter().position(|t| t.starts_with('╭')).unwrap();
         assert!(texts[popup_top + 1].contains("/model"), "{texts:?}");
         assert!(texts[popup_top + 2].starts_with('╰'), "{texts:?}");
-        assert!(texts[popup_top + 3].starts_with('╭'), "弹窗下方是编辑器框: {texts:?}");
+        // 弹窗下方是编辑器区顶部内边距行(空),再往下才是 ❯ 行
+        assert!(texts[popup_top + 3].trim().is_empty(), "{texts:?}");
         assert!(texts[popup_top + 4].starts_with("❯ /mod"), "{texts:?}");
     }
 

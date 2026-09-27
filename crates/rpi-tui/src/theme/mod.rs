@@ -134,6 +134,19 @@ impl Theme {
     }
 }
 
+/// 线性混色:`t` 为 a→b 的插值比例(0 = 纯 a,1 = 纯 b)。任一端非 Rgb
+/// (ANSI 兜底主题)时返回 a,避免 16 色语义色被错误量化。
+pub fn blend_rgb(a: Color, b: Color, t: f32) -> Color {
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg_, bb)) = (a, b) else {
+        return a;
+    };
+    let mix = |x: u8, y: u8| {
+        let v = f32::from(x) * (1.0 - t) + f32::from(y) * t;
+        v.round().clamp(0.0, 255.0) as u8
+    };
+    Color::Rgb(mix(ar, br), mix(ag, bg_), mix(ab, bb))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

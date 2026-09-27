@@ -1,5 +1,5 @@
 //! 底部状态栏(pi components/footer.ts 的对应物,三行):
-//! 1. cwd(~/ 缩写)+(git 分支)· session 名;
+//! 1. cwd(~/ 缩写)+(git 分支);
 //! 2. 右对齐 token 段:↑in │ ↓out │ cache 命中率 │ ctx%(>70% warning 黄、
 //!    >90% error 红)· 用量/窗口 │ $cost,每段独立着色;
 //! 3. 右对齐模型 · thinking。
@@ -17,7 +17,6 @@ pub struct FooterData {
     /// 已做 ~ 缩写的当前目录
     pub cwd: String,
     pub git_branch: Option<String>,
-    pub session_label: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// 累计缓存读 token(命中率分子)
@@ -47,16 +46,14 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
     if let Some(branch) = &data.git_branch {
         first.push(Span::styled(format!(" ({branch})"), dim));
     }
-    if let Some(session) = &data.session_label {
-        first.push(Span::styled(format!(" • {session}"), dim));
-    }
     let line1 = truncate_line(Line::from(first), width);
 
     let line2 = right_align(usage_line(data, theme), width);
     let line3 = right_align(
         Line::from(Span::styled(
             format!("{} · t:{}", data.model, data.thinking),
-            Style::new().fg(theme.muted),
+            // 模型行与 cwd 同色(此前 muted 过暗,与背景区分度不足)
+            Style::new().fg(theme.footer_cwd),
         )),
         width,
     );
@@ -67,6 +64,47 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
 /// ctx 用量 │ $cost。各段独立着色,分隔符 dim。
 fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
+    let mut spans = usage_segments(data, theme, false);
+    if data.context_window > 0 && data.context_tokens > 0 {
+        let pct = ((data.context_tokens * 100) / data.context_window).min(100);
+        let pct_style = if pct > 90 {
+            Style::new().fg(theme.error)
+        } else if pct > 70 {
+            Style::new().fg(theme.warning)
+        } else {
+            dim
+        };
+        let auto = if data.auto_compact { " (auto)" } else { "" };
+        if !spans.is_empty() {
+            spans.push(Span::styled(" │ ".to_string(), dim));
+        }
+        spans.push(Span::styled(
+            format!(
+                "ctx {pct}% ({}/{})",
+                format_tokens(data.context_tokens),
+                format_window(data.context_window)
+            ),
+            pct_style,
+        ));
+        if !auto.is_empty() {
+            spans.push(Span::styled(auto.to_string(), dim));
+        }
+    }
+    if spans.is_empty() {
+        spans.push(Span::raw(""));
+    }
+    Line::from(spans)
+}
+
+/// ↑in │ ↓out │ cache 命中率 │ $cost 分段(footer 与转录单回合用量行共用)。
+/// `always_show` = true 时零用量也显示(转录行不消失);false 时 footer 语义,
+/// 无用量返回空段。
+fn usage_segments(
+    data: &FooterData,
+    theme: &Theme,
+    always_show: bool,
+) -> Vec<Span<'static>> {
+    let dim = Style::new().fg(theme.dim);
     let mut spans: Vec<Span<'static>> = Vec::new();
     let push = |spans: &mut Vec<Span<'static>>, sep: &mut bool, span: Span<'static>| {
         if *sep {
@@ -76,7 +114,7 @@ fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
         spans.push(span);
     };
     let mut sep = false;
-    if data.input_tokens > 0 || data.output_tokens > 0 {
+    if always_show || data.input_tokens > 0 || data.output_tokens > 0 {
         push(
             &mut spans,
             &mut sep,
@@ -117,31 +155,38 @@ fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
             );
         }
     }
-    if data.context_window > 0 && data.context_tokens > 0 {
-        let pct = ((data.context_tokens * 100) / data.context_window).min(100);
-        let pct_style = if pct > 90 {
-            Style::new().fg(theme.error)
-        } else if pct > 70 {
-            Style::new().fg(theme.warning)
-        } else {
-            dim
-        };
-        let auto = if data.auto_compact { " (auto)" } else { "" };
-        push(
-            &mut spans,
-            &mut sep,
-            Span::styled(
-                format!(
-                    "ctx {pct}% ({}/{})",
-                    format_tokens(data.context_tokens),
-                    format_window(data.context_window)
-                ),
-                pct_style,
-            ),
-        );
-        if !auto.is_empty() {
-            spans.push(Span::styled(auto.to_string(), dim));
+    spans
+}
+
+/// 单回合用量行(转录定稿后落盘):图标与配色与 footer 右侧 token 段一致,
+/// 额外带 reasoning 段(footer 不显示)。
+pub fn turn_usage_line(
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    reasoning: Option<u64>,
+    cost_total: f64,
+    theme: &Theme,
+) -> Line<'static> {
+    let dim = Style::new().fg(theme.dim);
+    let data = FooterData {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read,
+        cache_write,
+        cost_total,
+        ..FooterData::default()
+    };
+    let mut spans = usage_segments(&data, theme, true);
+    if let Some(reasoning) = reasoning.filter(|r| *r > 0) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" │ ".to_string(), dim));
         }
+        spans.push(Span::styled(
+            format!("reasoning {}", format_tokens(reasoning)),
+            dim,
+        ));
     }
     if spans.is_empty() {
         spans.push(Span::raw(""));
@@ -220,9 +265,8 @@ mod tests {
 
     fn data() -> FooterData {
         FooterData {
-            cwd: "~/work".into(),
-            git_branch: Some("main".into()),
-            session_label: Some("fix-bug".into()),
+        cwd: "~/work".into(),
+        git_branch: Some("main".into()),
             input_tokens: 11_000,
             output_tokens: 149,
             cache_read: 5_500,
@@ -237,10 +281,10 @@ mod tests {
     }
 
     #[test]
-    fn first_line_has_cwd_branch_session() {
+    fn first_line_has_cwd_branch() {
         let out = lines(&data(), 60, &theme());
         let first = line_text(&out[0]);
-        assert_eq!(first, "~/work (main) • fix-bug", "{first}");
+        assert_eq!(first, "~/work (main)", "{first}");
     }
 
     #[test]
@@ -280,13 +324,13 @@ mod tests {
         assert_eq!(output_span.style.fg, Some(theme.usage_output));
         let cost_span = second.spans.iter().find(|s| s.content.starts_with('$')).unwrap();
         assert_eq!(cost_span.style.fg, Some(theme.usage_cost));
-        // 模型行用 muted,与 token 段区分
+        // 模型行与 cwd 同色(footer_cwd),不再用 muted
         let model_span = out[2]
             .spans
             .iter()
             .find(|s| s.content.contains("mock/m1"))
             .unwrap();
-        assert_eq!(model_span.style.fg, Some(theme.muted));
+        assert_eq!(model_span.style.fg, Some(theme.footer_cwd));
     }
 
     #[test]

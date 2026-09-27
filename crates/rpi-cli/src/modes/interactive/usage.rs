@@ -27,23 +27,59 @@ impl UsageTracker {
     }
 }
 
-/// 单回合用量行(定稿后随转录落盘)。
+/// 单回合用量行(定稿后随转录落盘):样式与 footer 右侧 token 段一致
+/// (同图标同配色,见 rpi_tui::footer::turn_usage_line)。
 pub fn usage_line(usage: &rpi_ai::Usage, theme: &rpi_tui::Theme) -> Line<'static> {
-    let mut text = format!(
-        "[tokens] in {} · out {} · cache {}/{}",
-        usage.input, usage.output, usage.cache_read, usage.cache_write
-    );
-    if let Some(reasoning) = usage.reasoning {
-        text.push_str(&format!(" · reasoning {reasoning}"));
-    }
-    text.push_str(&format!(" · ${:.6}", usage.cost.total));
-    Line::from(Span::styled(text, Style::new().fg(theme.dim)))
+    rpi_tui::footer::turn_usage_line(
+        usage.input,
+        usage.output,
+        usage.cache_read,
+        usage.cache_write,
+        usage.reasoning,
+        usage.cost.total,
+        theme,
+    )
 }
 
 /// 最后一次请求的完整上下文规模(footer ctx% 的分母侧估计):pi footer 同源
 /// 算法(usage.input + output + cacheRead + cacheWrite)。
 pub fn context_tokens_of(usage: &rpi_ai::Usage) -> u64 {
     usage.input + usage.output + usage.cache_read + usage.cache_write
+}
+
+/// 单回合用量块:用量行外加 box-drawing 外框,与模型正文明确分隔
+/// (边框色与 markdown 代码块一致)。
+pub fn usage_block(
+    usage: &rpi_ai::Usage,
+    theme: &rpi_tui::Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let border = Style::new().fg(theme.md_code_block_border);
+    let width = width.max(8);
+    let inner = width.saturating_sub(4).max(1); // "│ " + " │"
+    let content = usage_line(usage, theme);
+    let text: String = content.spans.iter().map(|s| s.content.as_ref()).collect();
+    let (trunc, _) = rpi_tui::truncate_to_width(&text, inner);
+    let pad = inner.saturating_sub(rpi_tui::display_width(&trunc));
+    let label = "── tokens ";
+    let top = format!(
+        "╭{label}{}╮",
+        "─".repeat(width.saturating_sub(2 + label.chars().count()))
+    );
+    let mut row: Vec<Span<'static>> = vec![Span::styled("│ ".to_string(), border)];
+    row.extend(content.spans);
+    row.push(Span::styled(
+        format!("{}{}", " ".repeat(pad), " │"),
+        border,
+    ));
+    vec![
+        Line::from(Span::styled(top, border)),
+        Line::from(row),
+        Line::from(Span::styled(
+            format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
+            border,
+        )),
+    ]
 }
 
 fn accumulate(total: &mut rpi_ai::Usage, usage: &rpi_ai::Usage) {
@@ -112,10 +148,32 @@ mod tests {
         let theme = rpi_tui::Theme::dark_ansi();
         let line = usage_line(&usage(), &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("in 100"), "{text}");
-        assert!(text.contains("out 20"), "{text}");
-        assert!(text.contains("cache 5/10"), "{text}");
+        // 与 footer token 段同格式:↑/↓ 图标 + 命中率 + $cost + reasoning
+        assert!(text.contains("↑ 100"), "{text}");
+        assert!(text.contains("↓ 20"), "{text}");
+        // 命中率 = 5 / (100+5+10) = 4%
+        assert!(text.contains("cache 4%"), "{text}");
         assert!(text.contains("reasoning 8"), "{text}");
-        assert!(text.contains("$0.001200"), "{text}");
+        assert!(text.contains("$0.0012"), "{text}");
+    }
+
+    #[test]
+    fn usage_line_spans_share_footer_colors() {
+        let theme = rpi_tui::Theme::dark_ansi();
+        let line = usage_line(&usage(), &theme);
+        let input = line
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with("↑ "))
+            .unwrap();
+        assert_eq!(input.style.fg, Some(theme.usage_input));
+        let output = line
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with("↓ "))
+            .unwrap();
+        assert_eq!(output.style.fg, Some(theme.usage_output));
+        let cost = line.spans.iter().find(|s| s.content.starts_with('$')).unwrap();
+        assert_eq!(cost.style.fg, Some(theme.usage_cost));
     }
 }

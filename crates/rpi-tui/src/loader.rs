@@ -1,7 +1,7 @@
 //! Spinner 动画帧(pi Loader 组件的对应物):状态行/编辑器边框的忙碌指示。
 
-/// 动画帧序列(取 pi loader 的星形族)。
-pub const FRAMES: [&str; 6] = ["✶", "✸", "✹", "✺", "✹", "✸"];
+/// 动画帧序列:半圆旋转族(与字符同宽同高的转圈效果)。
+pub const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 /// 第 `tick` 拍的帧(tick 递增,自动取模)。
 pub fn frame(tick: usize) -> &'static str {

@@ -16,13 +16,32 @@ use super::Theme;
 /// 主题名 → 语义主题(统一规则 + 精选微调)。
 pub fn from_name(name: ThemeName) -> Theme {
     let p = name.palette();
+    // 正文统一中性色(assistant_text):取中性灰白而非调色板 fg,避免部分
+    // 主题(如 Tokyo Night)的 fg 带明显色相偏向。
+    let text = if p.is_dark() {
+        Color::Rgb(0xd4, 0xd4, 0xd4)
+    } else {
+        Color::Rgb(0x38, 0x3a, 0x42)
+    };
+    // 用户块文字比正文暗一档(柔和);背景与中性灰混色,不带 fg 的色相
+    let user_text = if p.is_dark() {
+        Color::Rgb(0xbe, 0xbe, 0xbe)
+    } else {
+        Color::Rgb(0x4a, 0x4a, 0x4a)
+    };
+    // thinking:偏暗的中性灰(去掉调色板 muted 的蓝色偏向)
+    let thinking = if p.is_dark() {
+        Color::Rgb(0x8c, 0x8c, 0x8c)
+    } else {
+        Color::Rgb(0x76, 0x76, 0x76)
+    };
     let mut theme = Theme {
         accent: p.accent,
-        // 0.16:用户块背景要柔和他可辨,太暗会与终端底色混在一起
-        user_bg: blend(p.bg, p.fg, 0.16),
-        user_text: p.fg,
-        assistant_text: p.fg,
-        thinking: p.muted,
+        // 0.14:用户块背景要柔和他可辨,太暗会与终端底色混在一起
+        user_bg: blend(p.bg, user_text, 0.14),
+        user_text,
+        assistant_text: text,
+        thinking,
         tool_title: p.info,
         tool_pending: p.warning,
         tool_success: p.success,
@@ -63,7 +82,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             // 低饱和石墨色,弱文字(dim)提亮保证可读
             t.accent = Color::Rgb(0xff, 0x9e, 0x64); // orange
             t.footer_cwd = t.accent;
-            t.user_bg = Color::Rgb(0x34, 0x37, 0x44); // 石墨,比官方 selection 亮、去蓝
+            t.user_bg = Color::Rgb(0x33, 0x34, 0x38); // 中性石墨,去蓝
             t.border_idle = Color::Rgb(0x3b, 0x42, 0x61);
             t.md_code_block_border = t.border_idle;
             t.md_code = Color::Rgb(0xff, 0x9e, 0x64);

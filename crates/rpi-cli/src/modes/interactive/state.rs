@@ -9,7 +9,7 @@ use rpi_tui::{CommandEntry, CommandPopup, Editor, Key, SelectList, Theme, UiLine
 
 use super::usage::UsageTracker;
 
-/// 会话运行状态(编辑器边框标题/颜色与 spinner 的依据)。
+/// 会话运行状态(状态行样式与 spinner 动画的依据)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
     Idle,
@@ -134,8 +134,6 @@ pub struct InteractiveState {
     pub transcript: Vec<TranscriptItem>,
     /// 待提交进 scrollback 的行(事件循环每轮 flush 后清空)
     pub pending: Vec<UiLine>,
-    /// footer:session 名(有的话)
-    pub session_label: Option<String>,
     /// footer:auto-compact 开关(/compact 后由上层设置)
     pub auto_compact: bool,
     /// footer:cwd(已做 ~ 缩写)
@@ -179,7 +177,6 @@ impl InteractiveState {
             needs_full_redraw: false,
             transcript: Vec::new(),
             pending: Vec::new(),
-            session_label: None,
             auto_compact: false,
             cwd_display: String::new(),
             git_branch: None,

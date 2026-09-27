@@ -452,7 +452,9 @@ impl Model {
             reasoning: false,
             thinking_level_map: None,
             context_window: 128_000,
-            max_tokens: 4_096,
+            // 未显式配置时的输出上限:默认给足思考预算(thinking 可能占满
+            // max_tokens,过小会导致回答未生成就被 length 截断)
+            max_tokens: 32_768,
             sampling_params: None,
             compat: None,
         }

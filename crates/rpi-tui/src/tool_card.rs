@@ -58,6 +58,8 @@ pub fn title_line(
 
 /// 工具输出正文:折叠时保留前 COLLAPSED_OUTPUT_ROWS 行 + 余量提示;
 /// 展开时全部折行输出。空输出返回空。
+/// 整行铺淡色背景(用户块背景上叠 14% 状态色:成功浅绿/失败浅红),
+/// 正文保持可读的 user_text 色,背景只做状态暗示。
 pub fn output_lines(
     output: &str,
     status: ToolStatus,
@@ -65,11 +67,9 @@ pub fn output_lines(
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let body_style = match status {
-        ToolStatus::Error => Style::new().fg(theme.tool_error),
-        _ => Style::new().fg(theme.tool_output),
-    };
-    let hint_style = Style::new().fg(theme.dim);
+    let bg = crate::theme::blend_rgb(theme.user_bg, status.color(theme), 0.14);
+    let body_style = Style::new().fg(theme.user_text).bg(bg);
+    let hint_style = Style::new().fg(theme.dim).bg(bg);
     let inner = width.saturating_sub(4).max(1);
     let mut wrapped: Vec<String> = Vec::new();
     for raw in output.lines() {
@@ -80,11 +80,13 @@ pub fn output_lines(
     if wrapped.is_empty() {
         return Vec::new();
     }
-    let prefix = "  ┆ ";
     let render_row = |text: &str, style: Style| -> Line<'static> {
-        let mut spans = vec![Span::styled(prefix, hint_style)];
-        spans.push(Span::styled(text.to_string(), style));
-        truncate_line(Line::from(spans), width)
+        // 内容 + 行尾补齐:整行铺满背景(无终端底色缝隙)
+        let pad = width.saturating_sub(display_width(text));
+        Line::from(Span::styled(
+            format!("{text}{}", " ".repeat(pad)),
+            style,
+        ))
     };
     if expanded || wrapped.len() <= COLLAPSED_OUTPUT_ROWS {
         let mut out: Vec<Line<'static>> = wrapped
@@ -93,7 +95,7 @@ pub fn output_lines(
             .collect();
         // 折叠阈值内的完整输出后附展开提示(仅当确实可折叠时)
         if !expanded && wrapped.len() > COLLAPSED_OUTPUT_ROWS {
-            out.push(hint_line(wrapped.len(), width, theme));
+            out.push(hint_line(wrapped.len(), width, hint_style));
         }
         return out;
     }
@@ -101,19 +103,18 @@ pub fn output_lines(
         .iter()
         .map(|row| render_row(row, body_style))
         .collect();
-    out.push(hint_line(wrapped.len(), width, theme));
+    out.push(hint_line(wrapped.len(), width, hint_style));
     out
 }
 
-fn hint_line(total: usize, width: usize, theme: &Theme) -> Line<'static> {
+fn hint_line(total: usize, width: usize, style: Style) -> Line<'static> {
     let more = total.saturating_sub(COLLAPSED_OUTPUT_ROWS);
     let text = format!("  … +{more} lines (ctrl+o to expand)");
-    let text = if display_width(&text) > width.max(1) {
-        crate::width::truncate_to_width(&text, width).0
-    } else {
-        text
-    };
-    Line::from(Span::styled(text, Style::new().fg(theme.dim)))
+    let pad = width.saturating_sub(display_width(&text));
+    Line::from(Span::styled(
+        format!("{text}{}", " ".repeat(pad)),
+        style,
+    ))
 }
 
 #[cfg(test)]
@@ -164,9 +165,22 @@ mod tests {
     }
 
     #[test]
-    fn error_output_uses_error_color() {
-        let lines = output_lines("boom", ToolStatus::Error, false, 40, &theme());
-        assert_eq!(lines[0].spans[1].style.fg, Some(theme().tool_error));
+    fn output_rows_tinted_by_status() {
+        // 真彩色主题:失败浅红背景、成功浅绿背景(用户块背景叠 14% 状态色),
+        // 正文 fg 保持 user_text
+        let t = Theme::dark();
+        let err = output_lines("boom", ToolStatus::Error, false, 40, &t);
+        let expected_err = crate::theme::blend_rgb(t.user_bg, t.tool_error, 0.14);
+        assert_eq!(err[0].spans[0].style.bg, Some(expected_err));
+        assert_eq!(err[0].spans[0].style.fg, Some(t.user_text));
+        let ok = output_lines("ok", ToolStatus::Success, false, 40, &t);
+        let expected_ok = crate::theme::blend_rgb(t.user_bg, t.tool_success, 0.14);
+        assert_eq!(ok[0].spans[0].style.bg, Some(expected_ok));
+        // 整行铺满背景(内容 + 行尾补齐)
+        assert_eq!(crate::width::display_width(&line_text(&ok[0])), 40);
+        // ANSI 兜底主题(非 Rgb 背景色)不调色,保持原背景
+        let ansi = output_lines("boom", ToolStatus::Error, false, 40, &theme());
+        assert_eq!(ansi[0].spans[0].style.bg, Some(theme().user_bg));
     }
 
     #[test]

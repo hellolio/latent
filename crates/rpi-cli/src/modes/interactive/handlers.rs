@@ -15,7 +15,7 @@ use super::events::UiEvent;
 use super::state::{
     InteractiveState, SelectKind, SelectRequest, Status, ToolStatus, TranscriptItem,
 };
-use super::usage::{context_tokens_of, usage_line};
+use super::usage::{context_tokens_of, usage_block};
 use super::view;
 
 /// 键盘/命令处理共用的会话上下文(状态 + TUI 之外的全部依赖)。
@@ -695,7 +695,9 @@ async fn handle_session_event(
                 }
                 StopReason::Length => {
                     state.usage.push(&message.usage);
-                    state.commit(usage_item_of(&message.usage, &state.theme));
+                    for item in usage_item_of(&message.usage, &state.theme, state.width) {
+                        state.commit(item);
+                    }
                     state.commit_ephemeral(view::error_line(
                         "Response was truncated before completion.",
                         &state.theme,
@@ -704,7 +706,9 @@ async fn handle_session_event(
                 }
                 _ => {
                     state.usage.push(&message.usage);
-                    state.commit(usage_item_of(&message.usage, &state.theme));
+                    for item in usage_item_of(&message.usage, &state.theme, state.width) {
+                        state.commit(item);
+                    }
                     state.context_tokens = context_tokens_of(&message.usage);
                 }
             }
@@ -777,6 +781,9 @@ fn commit_pending_thinking(state: &mut InteractiveState) {
     }
 }
 
-fn usage_item_of(usage: &rpi_ai::Usage, theme: &Theme) -> TranscriptItem {
-    TranscriptItem::Line(usage_line(usage, theme))
+fn usage_item_of(usage: &rpi_ai::Usage, theme: &Theme, width: usize) -> Vec<TranscriptItem> {
+    usage_block(usage, theme, width)
+        .into_iter()
+        .map(TranscriptItem::Line)
+        .collect()
 }

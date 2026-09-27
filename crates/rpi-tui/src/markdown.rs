@@ -34,7 +34,10 @@ impl<'a> Markdown<'a> {
         let mut out: Vec<Line<'static>> = Vec::new();
         let mut fence: Option<String> = None;
         let mut code: Vec<String> = Vec::new();
-        for raw in source.lines() {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut i = 0usize;
+        while i < lines.len() {
+            let raw = lines[i];
             if fence.is_some() {
                 if raw.trim_start().starts_with("```") {
                     let lang = fence.take().unwrap_or_default();
@@ -43,11 +46,22 @@ impl<'a> Markdown<'a> {
                 } else {
                     code.push(raw.to_string());
                 }
+                i += 1;
                 continue;
             }
             let trimmed = raw.trim_start();
             if let Some(rest) = trimmed.strip_prefix("```") {
                 fence = Some(rest.trim().to_string());
+                i += 1;
+                continue;
+            }
+            // 表格(GFM 管道表):连续以 | 开头的行整体收集渲染
+            if trimmed.starts_with('|') {
+                let start = i;
+                while i < lines.len() && lines[i].trim_start().starts_with('|') {
+                    i += 1;
+                }
+                out.extend(self.render_table(&lines[start..i], width));
                 continue;
             }
             // 空行:分段(连续空行折叠)
@@ -59,6 +73,7 @@ impl<'a> Markdown<'a> {
                 {
                     out.push(Line::raw(""));
                 }
+                i += 1;
                 continue;
             }
             // 标题 #..######
@@ -83,6 +98,7 @@ impl<'a> Markdown<'a> {
                         )],
                         width,
                     ));
+                    i += 1;
                     continue;
                 }
             }
@@ -95,6 +111,7 @@ impl<'a> Markdown<'a> {
                     )
                     .into(),
                 );
+                i += 1;
                 continue;
             }
             // 引用
@@ -105,6 +122,7 @@ impl<'a> Markdown<'a> {
                 )];
                 spans.extend(self.render_inline(quote));
                 out.extend(self.wrap_styled(spans, width));
+                i += 1;
                 continue;
             }
             // 列表(无序 / 有序)
@@ -117,16 +135,100 @@ impl<'a> Markdown<'a> {
                 spans.push(Span::styled(bullet, Style::new().fg(self.theme.accent)));
                 spans.extend(self.render_inline(item));
                 out.extend(self.wrap_styled(spans, width));
+                i += 1;
                 continue;
             }
             // 普通段落
             let spans = self.render_inline(raw);
             out.extend(self.wrap_styled(spans, width));
+            i += 1;
         }
         // 未闭合围栏:剩余内容照常渲染
         if !code.is_empty() {
             out.extend(self.render_code_block(&code, fence.as_deref(), width));
         }
+        out
+    }
+
+    /// 表格(GFM 管道表):box-drawing 边框(mdCodeBlockBorder),表头加粗。
+    /// 列宽按内容自适应,总宽超限时逐列截断(单元格内不折行)。
+    fn render_table(&self, rows: &[&str], width: usize) -> Vec<Line<'static>> {
+        let border = Style::new().fg(self.theme.md_code_block_border);
+        let parse_cells = |row: &str| -> Vec<String> {
+            let t = row.trim().trim_start_matches('|').trim_end_matches('|');
+            t.split('|').map(|c| c.trim().to_string()).collect()
+        };
+        let is_separator = |cells: &[String]| {
+            !cells.is_empty()
+                && cells.iter().all(|c| {
+                    let stripped = c.replace(':', "");
+                    !stripped.is_empty() && stripped.chars().all(|ch| ch == '-')
+                })
+        };
+        let parsed: Vec<Vec<String>> = rows.iter().map(|r| parse_cells(r)).collect();
+        let ncols = parsed.iter().map(Vec::len).max().unwrap_or(0);
+        if ncols == 0 {
+            return Vec::new();
+        }
+        // 表头识别:首行下方为分隔行(|---|---|)时首行为表头
+        let (header, body): (Option<&Vec<String>>, &[Vec<String>]) = match parsed.split_first() {
+            Some((first, rest)) if is_separator(first) => (None, rest),
+            Some((first, rest)) => match rest.first() {
+                Some(second) if is_separator(second) => (Some(first), &rest[1..]),
+                _ => (None, &parsed[..]),
+            },
+            None => return Vec::new(),
+        };
+        // 列宽 = 各列最大显示宽;超宽时按均摊上限截断
+        let mut widths = vec![0usize; ncols];
+        for row in parsed.iter().filter(|r| !is_separator(r)) {
+            for (j, cell) in row.iter().enumerate() {
+                widths[j] = widths[j].max(crate::width::display_width(cell));
+            }
+        }
+        let cap = (width.saturating_sub(1) / ncols).saturating_sub(3).max(1);
+        for w in &mut widths {
+            *w = (*w).min(cap);
+        }
+        let hline = |left: &str, mid: &str, right: &str| -> Line<'static> {
+            let mut s = String::from(left);
+            for (j, w) in widths.iter().enumerate() {
+                if j > 0 {
+                    s.push_str(mid);
+                }
+                s.push_str(&"─".repeat(w + 2));
+            }
+            s.push_str(right);
+            Line::from(Span::styled(s, border))
+        };
+        let render_row = |cells: &[String], style: Style| -> Line<'static> {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (j, w) in widths.iter().enumerate() {
+                let cell = cells.get(j).map(String::as_str).unwrap_or("");
+                let (trunc, _) = crate::width::truncate_to_width(cell, *w);
+                let pad = w.saturating_sub(crate::width::display_width(&trunc));
+                spans.push(Span::styled("│ ".to_string(), border));
+                spans.push(Span::styled(
+                    format!("{trunc}{}", " ".repeat(pad + 1)),
+                    style,
+                ));
+            }
+            spans.push(Span::styled("│".to_string(), border));
+            Line::from(spans)
+        };
+        let header_style = Style::new()
+            .fg(self.theme.assistant_text)
+            .add_modifier(ratatui::style::Modifier::BOLD);
+        let body_style = Style::new().fg(self.theme.assistant_text);
+        let mut out = vec![hline("╭", "┬", "╮")];
+        if let Some(header) = header {
+            out.push(render_row(header, header_style));
+            out.push(hline("├", "┼", "┤"));
+        }
+        for row in body {
+            out.push(render_row(row, body_style));
+        }
+        out.push(hline("╰", "┴", "╯"));
         out
     }
 
@@ -386,6 +488,33 @@ mod tests {
         assert!(out[0].starts_with("▌ "));
         assert!(out[0].contains("quoted"));
         assert!(out[1].starts_with("───"));
+    }
+
+    #[test]
+    fn gfm_table_renders_box_drawing() {
+        let out = render(
+            "| 区块 | 内容 |\n|---|---|\n| 一 | 参数 |\n| 二 | 结果 |",
+            40,
+        );
+        // 顶边框 + 表头 + 分隔 + 2 行正文 + 底边框
+        assert_eq!(out.len(), 6, "{out:?}");
+        assert!(out[0].starts_with("╭") && out[0].contains('┬'), "{out:?}");
+        assert!(out[1].contains("区块") && out[1].contains("内容"));
+        assert!(out[2].starts_with("├") && out[2].contains('┼'), "{out:?}");
+        assert!(out[3].contains("一"), "{out:?}");
+        assert!(out[4].contains("结果"), "{out:?}");
+        assert!(out[5].starts_with("╰"), "{out:?}");
+        // 不残留原始管道符文本形态(行首 | 已转为边框)
+        for line in &out {
+            assert!(!line.starts_with("| "), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn table_without_header_separator_renders_all_rows() {
+        let out = render("| a | b |\n| c | d |", 30);
+        // 无分隔行:顶 + 2 行 + 底
+        assert_eq!(out.len(), 4, "{out:?}");
     }
 
     #[test]

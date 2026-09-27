@@ -343,7 +343,7 @@ async fn turn_end_success_records_usage_and_context() {
         })),
     )
     .await;
-    assert!(committed_text(&state).contains("[tokens] in 100"));
+    assert!(committed_text(&state).contains("↑ 100"));
     assert_eq!(
         state.context_tokens, 115,
         "ctx 估计 = in+out+cacheRead+cacheWrite"
@@ -855,9 +855,44 @@ async fn viewport_shrinks_preview_under_budget() {
         .map(|i| format!("line{i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    // 预算 8 行:预览收缩后 帧高 ≤ 8
+    // 预算 8 行:预览收缩后 帧高 ≤ 固定行(空隙 1 + 状态 1 + 编辑区 3
+    // + footer 3)+ 预览 2
     let frame = super::view::viewport(&state, None, 2, 1, 8);
-    assert!(frame.height <= 9, "帧高应受预算约束: {}", frame.height);
+    assert!(frame.height <= 10, "帧高应受预算约束: {}", frame.height);
+}
+
+// 流式输出期间预览上限恒定:视口高度不随增量改高(Inline 视口逐增量
+// resize 会闪烁并把屏幕顶行推进 scrollback,冲刷真实历史)。
+#[tokio::test]
+async fn preview_cap_is_constant_during_streaming() {
+    let mut state = test_state();
+    assert_eq!(
+        super::preview_cap_for(&state),
+        super::view::MAX_PREVIEW_ROWS,
+        "空闲时空隙保持最小"
+    );
+    state.stream_text = "hello".into();
+    assert_eq!(
+        super::preview_cap_for(&state),
+        super::view::STREAM_PREVIEW_ROWS,
+        "流式开始即取固定上限"
+    );
+    state.stream_text = (1..=500)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        super::preview_cap_for(&state),
+        super::view::STREAM_PREVIEW_ROWS,
+        "长文本流式时上限恒定,不随内容增长"
+    );
+    state.stream_text.clear();
+    state.pending_thinking = Some("思考中".into());
+    assert_eq!(
+        super::preview_cap_for(&state),
+        super::view::STREAM_PREVIEW_ROWS,
+        "思考中同样取固定上限"
+    );
 }
 
 // ---- 斜杠补全弹窗(Codex 交互) ----

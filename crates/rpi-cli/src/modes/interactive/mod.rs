@@ -1,9 +1,9 @@
 //! interactive 模式(pi modes/interactive 的对应物):rpi-tui 搭建的聊天界面。
 //!
 //! 布局(pi 风格):启动区(横幅 + 分隔线 + 已加载资源)与消息区提交进终端
-//! 原生 scrollback;底部 Inline 视口承载预览区/编辑器框(边框嵌 spinner 与
-//! 状态)/两行 footer(cwd · ctx% · 模型)。扩展 UI(接缝 #5):notify 上屏,
-//! confirm/select 渲染为视口内的选择列表。
+//! 原生 scrollback;底部 Inline 视口承载预览区/状态行(spinner 与等待信息)/
+//! 编辑器区(带背景色)/三行 footer(cwd · 用量 · 模型)。扩展 UI(接缝 #5):
+//! notify 上屏,confirm/select 渲染为视口内的选择列表。
 //!
 //! 本模块只做装配与事件循环;状态在 state.rs、渲染在 view.rs、事件处理在
 //! handlers.rs、bash 透传在 bash.rs。
@@ -121,9 +121,6 @@ pub async fn run_interactive_mode(
         home.as_deref().and_then(|p| p.to_str()),
     );
     state.git_branch = detect_git_branch(&cwd);
-    state.session_label = session_manager
-        .as_ref()
-        .map(|manager| manager.session_id().to_string());
     refresh_footer_fields(&ctx, &mut state);
 
     // 启动区 + 回放(pi 语义:恢复/续聊时回放当前转录)
@@ -157,10 +154,12 @@ async fn event_loop(
             state.needs_full_redraw = false;
             let transcript = full_redraw_lines(state);
             let partial = ctx.session.agent().partial_message();
+            let cap = preview_cap_for(state)
+                .min(usize::from(app.viewport_height_cap().saturating_sub(8)));
             let frame = view::viewport(
                 state,
                 partial.as_ref(),
-                view::MAX_PREVIEW_ROWS,
+                cap,
                 view::MAX_EDITOR_ROWS,
                 default_popup_cap(app.viewport_height_cap()),
             );
@@ -210,7 +209,7 @@ fn draw(
     partial: Option<&rpi_ai::AssistantMessage>,
 ) -> std::io::Result<()> {
     let budget = app.viewport_height_cap();
-    let mut preview_cap = view::MAX_PREVIEW_ROWS;
+    let mut preview_cap = preview_cap_for(state);
     let mut editor_cap = view::MAX_EDITOR_ROWS;
     let mut popup_cap = default_popup_cap(budget);
     let mut frame = view::viewport(state, partial, preview_cap, editor_cap, popup_cap);
@@ -225,6 +224,23 @@ fn draw(
     }
     app.set_viewport_height(frame.height)?;
     app.draw_viewport(&frame.lines, frame.cursor)
+}
+
+/// 预览区行数上限:流式输出/思考中固定为 `STREAM_PREVIEW_ROWS`(视口高度
+/// 全程恒定,不随增量改高——Inline 视口逐增量 resize 会闪烁并污染
+/// scrollback);空闲时只保留最小空隙(两行)。超出终端预算时由 draw()
+/// 的收缩逻辑截尾。
+fn preview_cap_for(state: &InteractiveState) -> usize {
+    let streaming = !state.stream_text.is_empty()
+        || state
+            .pending_thinking
+            .as_ref()
+            .is_some_and(|t| !t.trim().is_empty());
+    if streaming {
+        view::STREAM_PREVIEW_ROWS
+    } else {
+        view::MAX_PREVIEW_ROWS
+    }
 }
 
 /// 补全弹窗的默认行数上限:不超过 8 行,且保证 composer(3 行)+ footer
