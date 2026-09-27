@@ -366,10 +366,6 @@ mod tests {
             .collect()
     }
 
-    fn screen_text(app: &TuiApp<TestBackend>) -> String {
-        screen_lines(app).join("\n")
-    }
-
     #[test]
     fn committed_lines_land_above_viewport() {
         let mut app = test_app(40, 10, 3);
@@ -419,5 +415,33 @@ mod tests {
         let lines = screen_lines(&app);
         // 视口首行被截断到 6 列(3 个 CJK 字符)
         assert_eq!(lines[0], "很长很", "全屏: {:#?}", screen_lines(&app));
+    }
+
+    #[test]
+    fn commit_lines_land_adjacent_above_viewport() {
+        // render_tick 顺序重构依赖的机制:flush 内容必须紧贴视口顶行落位
+        // (无论视口上方此前的行是内容还是收缩留下的空行)。
+        // TestBackend 无真实光标锚定,视口位置不固定,断言相对结构:
+        // 提交的多行按序相邻落位、不留空行,且整体在视口上方。
+        let mut app = test_app(10, 12, 2);
+        app.draw_viewport(&[Line::raw(""), Line::raw("")], None)
+            .unwrap();
+        app.commit_lines(&[Line::raw("AAAA"), Line::raw("BBBB"), Line::raw("CCCC")])
+            .unwrap();
+        app.draw_viewport(&[Line::raw("▌")], Some((2, 0)))
+            .unwrap();
+        let lines = screen_lines(&app);
+        let find = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.trim_end().starts_with(needle))
+                .unwrap_or_else(|| panic!("{needle} 应上屏: {lines:#?}"))
+        };
+        let (aaaa, bbbb, cccc, viewport) =
+            (find("AAAA"), find("BBBB"), find("CCCC"), find("▌"));
+        assert!(
+            aaaa + 1 == bbbb && bbbb + 1 == cccc && cccc < viewport,
+            "内容应相邻且整体在视口上方: {lines:#?}"
+        );
     }
 }

@@ -105,8 +105,7 @@ fn replay_message(message: &AgentMessage, theme: &rpi_tui::Theme) -> Vec<Transcr
             items
         }
         AgentMessage::ToolResult { is_error, .. } => vec![
-            // 前置空行与正文分隔(与实时路径一致)
-            TranscriptItem::Blank,
+            // 不前置空行:紧随其 ToolCall 条目,边框卡片才能拼成同框
             TranscriptItem::ToolResult {
                 output: message.tool_result_content().unwrap_or_default(),
                 is_error: *is_error,

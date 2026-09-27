@@ -1,35 +1,42 @@
-## TUI 页面 UI 修改方案
+## 修复"回合结束后输入框上方大片空白"问题
 
-涉及文件：`crates/rpi-cli/src/modes/interactive/view.rs`（布局/渲染）、`crates/rpi-tui/src/theme/external.rs`（配色）、`crates/rpi-tui/src/footer.rs`（footer）、`crates/rpi-tui/src/loader.rs`（spinner）、`crates/rpi-cli/src/modes/interactive/mod.rs` 与 `state.rs`（session id 移除），以及各文件内对应测试。
+### 根因
+回合结束的事件循环顺序是:① flush 定稿内容(此时视口仍是流式高度的 18 行,内容填在旧位置)→ ② `draw()` 把视口缩回 10 行 → 收缩时 `rebuild_terminal` 清掉释放的 8 行,成为输入框上方的空白带,要等下一次提交才能回填。ctrl+o 全文重绘把转录重打一遍,所以"切一次就好"。另外思考阶段预览区固定占 10 行但内容只有 4+1 行,视口内部还有 ~5 行补位空白,放大了观感。
 
-### 1. 缩小输入框与交流区空隙（约两行）
-- `view.rs:13`：`MAX_PREVIEW_ROWS` 从 `8` 改为 `2`（预览区固定补空行逻辑 view.rs:224-228 不变，空隙即变为 2 行）。
-- 流式输出预览也只显示尾部 2 行，行为一致。
-- `mod.rs` 的 `draw()` 收缩逻辑（mod.rs:206-228）无需改动，自动适配。
-- 同步更新 `view.rs` 中依赖行数的测试（`viewport_layout_shape`、`viewport_reserves_full_preview_height` 等）。
+### 改动
 
-### 2 + 3. 用户消息与模型输出字体统一为灰白色（用户消息保留灰底）
-- `theme/external.rs`：`user_text` 与 `assistant_text` 目前都取 `p.fg`（Tokyo Night 偏蓝）。改为按明暗取中性色：暗色主题 → 灰白 `Rgb(0xd4,0xd4,0xd4)`，浅色主题 → 中性深灰 `Rgb(0x38,0x3a,0x42)`。两者同值即满足"模型输出与用户输入字体一致，仅差背景色"。
-- 该改动同时影响 markdown 正文、编辑器文字、流式预览（均引用 `assistant_text`），整体统一。
-- `theme/builtin.rs` 的 ANSI 兜底主题本来就是 White，不动。跑 `all_themes_map_without_degenerate_roles` 等主题测试确认无回归。
+**1. 调整每帧渲染顺序(核心,`crates/rpi-cli/src/modes/interactive/mod.rs`)**
 
-### 4. 去掉左下角 session id（git branch 已在显示）
-- `footer.rs:50-52`：删除 `• {session}` span；`FooterData.session_label` 字段一并删除。
-- `state.rs:138` 删除 `session_label` 字段；`mod.rs:124-126` 删除赋值。
-- 更新 `footer.rs` 测试 `first_line_has_cwd_branch_session`（期望变为 `~/work (main)`），grep 其他引用一并清理。
+把 `draw()` 拆为"构建帧 + 同步高度"与"绘制"两步,flush 挪到中间:
 
-### 5. 输入框改为带背景色、无边框（保留 `❯` 前缀）
-- `view.rs` `viewport()`：
-  - 删除顶边框（view.rs:247-250）与底边框（view.rs:284-287）两行；`border_style()`（view.rs:346-355）随之删除（busy 语义改由状态行承担）。
-  - 编辑器每行改为整行铺 `theme.user_bg` 背景（与 `user_block` 同款：内容 + 行尾补空格铺满宽度），文字用 `user_text`（即灰白色），保留首行 `❯ ` 前缀（accent 色，加背景）。
-  - 空输入时占位文本 "Ask rpi to do anything" 同样铺背景。
-  - 光标定位（view.rs:276-281）列偏移保持 `2 + col`（前缀仍在）。
-- 同步更新所有涉及 `╭`/`╰` 边框断言的测试（`viewport_layout_shape`、`viewport_shows_slash_popup_above_composer`、`viewport_empty_editor_shows_placeholder` 等）。
+```
+render_tick(state, app, partial):
+  ① 计算帧(现有收缩循环逻辑原样保留)
+  ② app.set_viewport_height(frame.height)   ← 先改高,收缩产生空带
+  ③ flush state.pending → app.commit_lines  ← 定稿内容 insert_before 从
+                                               视口上方往下填,正好回填空带
+  ④ app.draw_viewport(&frame.lines, frame.cursor)
+```
 
-### 6. 字符级转圈动画 + 等待信息
-- `loader.rs:4`：`FRAMES` 从星形族 `["✶","✸","✹","✺",…]` 改为等宽半圆转圈 `["◐","◓","◑","◒"]`（与字符大小相当）。
-- 等待信息已在输入框正上方的状态行（`status_line()`，view.rs:317-344），保留现有格式并微调：`◐ Working (3s · esc to interrupt)`（含 spinner + 已等待秒数 + esc 提示）；工具执行时 `◐ Running {name} (Ns · esc to interrupt)`。驱动逻辑（120ms tick，mod.rs:186-195）不变。
+- `event_loop` 主路径与循环前的首次绘制改调 `render_tick`;
+- `needs_full_redraw` 分支保持现状(分支内先 flush pending 再 `redraw_full`,与今天一致);
+- flush 不影响帧内容(pending 是转录行,不进视口),帧先算安全;
+- 不新增 resize 次数:高度切换仍只在空闲↔思考↔正文↔回合结束的边界发生(每回合 2~3 次),流式增量全程不触发 resize,无新闪烁源。
 
-### 验证
-- `cargo test -p rpi-tui -p rpi-cli` 全绿（重点：view/footer/theme/loader 的单测）。
-- `cargo build` 通过后，用户手动运行 `cargo run` 目视确认六处效果。
+**2. 思考阶段预览高度精确化(`view.rs` + `mod.rs`)**
+
+- `view.rs` 新增 `pub const THINKING_PREVIEW_ROWS: usize = 5;`(4 行 + 提示恰好占满);
+- `preview_cap_for`:思考中 → 5(替换现在的 10),流式正文 → 10(不变),空闲 → 2(不变)。思考阶段视口内部不再有补位空白;思考→正文交接时的增长空带会被紧随其后的思维链块落盘立即回填。
+
+**3. 测试**
+
+- `rpi-tui/src/app.rs` 加 L2 测试(TestBackend):提交内容 → 绘制视口 → 收缩视口 → 再提交内容,断言收缩空出的行被新内容回填(验证第 1 条依赖的 insert_before 机制);
+- `rpi-cli` 更新 `preview_cap_is_constant_during_streaming`:思考中断言为 5;
+- 回归:`cargo test -p rpi-tui -p rpi-cli` 全绿 + `cargo build --workspace` 零警告。
+
+### 预期效果
+回合结束时模型输出/用量框紧贴输入区上方,无需 ctrl+o;流式期间空带从 ~13 行降到 3~5 行。
+
+### 已知限制(不恶化现状)
+- 纯正文输出的回合,流式期间存在 ~8 行增长空带,回合结束时被正文回填(Inline 视口架构的固有限制);
+- 空带部分回填时少量空行会进 scrollback 回看区。

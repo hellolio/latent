@@ -33,6 +33,8 @@ pub struct FooterData {
     pub thinking: String,
     /// auto-compact 开启标记(ctx% 后缀 `(auto)`)
     pub auto_compact: bool,
+    /// ctrl+o 全局展开态(第一行追加 `· expanded` 提示)
+    pub expanded: bool,
 }
 
 /// 三行 footer。
@@ -45,6 +47,9 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
     )];
     if let Some(branch) = &data.git_branch {
         first.push(Span::styled(format!(" ({branch})"), dim));
+    }
+    if data.expanded {
+        first.push(Span::styled(" · expanded", dim));
     }
     let line1 = truncate_line(Line::from(first), width);
 
@@ -61,11 +66,11 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
 }
 
 /// token 用量段(右对齐显示;session 累计):↑in │ ↓out │ cache 命中率 │
-/// ctx 用量 │ $cost。各段独立着色,分隔符 dim。
+/// ctx 用量 │ $cost。各段独立着色,分隔符 dim;零用量也显示 ↑ 0 │ ↓ 0。
 fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
-    let mut spans = usage_segments(data, theme, false);
-    if data.context_window > 0 && data.context_tokens > 0 {
+    let mut spans = usage_segments(data, theme);
+    if data.context_window > 0 {
         let pct = ((data.context_tokens * 100) / data.context_window).min(100);
         let pct_style = if pct > 90 {
             Style::new().fg(theme.error)
@@ -97,13 +102,8 @@ fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
 }
 
 /// ↑in │ ↓out │ cache 命中率 │ $cost 分段(footer 与转录单回合用量行共用)。
-/// `always_show` = true 时零用量也显示(转录行不消失);false 时 footer 语义,
-/// 无用量返回空段。
-fn usage_segments(
-    data: &FooterData,
-    theme: &Theme,
-    always_show: bool,
-) -> Vec<Span<'static>> {
+/// 零用量也显示 `↑ 0 │ ↓ 0`(footer 要求 token 段常驻)。
+fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
     let dim = Style::new().fg(theme.dim);
     let mut spans: Vec<Span<'static>> = Vec::new();
     let push = |spans: &mut Vec<Span<'static>>, sep: &mut bool, span: Span<'static>| {
@@ -114,7 +114,7 @@ fn usage_segments(
         spans.push(span);
     };
     let mut sep = false;
-    if always_show || data.input_tokens > 0 || data.output_tokens > 0 {
+    {
         push(
             &mut spans,
             &mut sep,
@@ -178,7 +178,7 @@ pub fn turn_usage_line(
         cost_total,
         ..FooterData::default()
     };
-    let mut spans = usage_segments(&data, theme, true);
+    let mut spans = usage_segments(&data, theme);
     if let Some(reasoning) = reasoning.filter(|r| *r > 0) {
         if !spans.is_empty() {
             spans.push(Span::styled(" │ ".to_string(), dim));
@@ -277,6 +277,7 @@ mod tests {
             model: "mock/m1".into(),
             thinking: "high".into(),
             auto_compact: true,
+            expanded: false,
         }
     }
 
@@ -285,6 +286,14 @@ mod tests {
         let out = lines(&data(), 60, &theme());
         let first = line_text(&out[0]);
         assert_eq!(first, "~/work (main)", "{first}");
+    }
+
+    #[test]
+    fn expanded_state_shown_in_first_line() {
+        let mut d = data();
+        d.expanded = true;
+        let first = line_text(&lines(&d, 60, &theme())[0]);
+        assert_eq!(first, "~/work (main) · expanded", "{first}");
     }
 
     #[test]
@@ -352,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_usage_shows_empty_usage_line_right_aligned() {
+    fn zero_usage_shows_zero_tokens_right_aligned() {
         let mut d = data();
         d.input_tokens = 0;
         d.output_tokens = 0;
@@ -362,8 +371,11 @@ mod tests {
         d.cost_total = 0.0;
         let out = lines(&d, 40, &theme());
         assert_eq!(out.len(), 3);
-        // 无用量:第二行为空(仍占行,footer 高度稳定),第三行右对齐模型
-        assert!(line_text(&out[1]).trim().is_empty());
+        // 零用量也显示 ↑ 0 │ ↓ 0(token 段常驻,右对齐)
+        let second = line_text(&out[1]);
+        assert!(second.contains("↑ 0"), "{second}");
+        assert!(second.contains("↓ 0"), "{second}");
+        assert_eq!(display_width(&second), 40);
         let third = line_text(&out[2]);
         assert!(third.ends_with("mock/m1 · t:high"), "{third}");
         assert_eq!(display_width(&third), 40);

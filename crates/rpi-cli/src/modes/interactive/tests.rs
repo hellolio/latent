@@ -181,7 +181,7 @@ async fn ctrl_o_toggles_expansion_and_requests_full_redraw() {
         .map(line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("+2 lines"), "收起态应有折叠提示: {text}");
+    assert!(text.contains("+1 lines"), "收起态应有折叠提示: {text}");
 }
 
 // ---- thinking 持久化(定稿后可回看) ----
@@ -419,7 +419,7 @@ async fn tool_result_renders_title_and_collapsed_output() {
             message: Box::new(rpi_agent::AgentMessage::tool_result_text(
                 "call-1",
                 "bash",
-                "a.txt\nb.txt\nc.txt\nd.txt",
+                "a.txt\nb.txt\nc.txt\nd.txt\ne.txt",
                 false,
             )),
         }),
@@ -431,7 +431,7 @@ async fn tool_result_renders_title_and_collapsed_output() {
     assert!(rendered.contains("a.txt"));
     assert!(
         rendered.contains("+1 lines"),
-        "4 行输出折叠为 3 行 + 提示: {rendered}"
+        "5 行输出折叠为 4 行 + 提示: {rendered}"
     );
     assert!(state.current_tool.is_none());
 }
@@ -862,7 +862,9 @@ async fn viewport_shrinks_preview_under_budget() {
 }
 
 // 流式输出期间预览上限恒定:视口高度不随增量改高(Inline 视口逐增量
-// resize 会闪烁并把屏幕顶行推进 scrollback,冲刷真实历史)。
+// resize 会闪烁并把屏幕顶行推进 scrollback,冲刷真实历史)。busy 期间
+// 一律 5:整回合高度恒定,唯一一次增高发生在提交时刻,空带被用户消息
+// 落盘立即回填,不残留空白。
 #[tokio::test]
 async fn preview_cap_is_constant_during_streaming() {
     let mut state = test_state();
@@ -870,6 +872,13 @@ async fn preview_cap_is_constant_during_streaming() {
         super::preview_cap_for(&state),
         super::view::MAX_PREVIEW_ROWS,
         "空闲时空隙保持最小"
+    );
+    // busy(含尚未收到任何增量的 Working 阶段)即取固定上限
+    state.status = Status::Thinking;
+    assert_eq!(
+        super::preview_cap_for(&state),
+        super::view::STREAM_PREVIEW_ROWS,
+        "busy 一开始就预增高,空带被用户消息回填"
     );
     state.stream_text = "hello".into();
     assert_eq!(
@@ -892,6 +901,13 @@ async fn preview_cap_is_constant_during_streaming() {
         super::preview_cap_for(&state),
         super::view::STREAM_PREVIEW_ROWS,
         "思考中同样取固定上限"
+    );
+    state.pending_thinking = None;
+    state.status = Status::Tool("bash".into());
+    assert_eq!(
+        super::preview_cap_for(&state),
+        super::view::STREAM_PREVIEW_ROWS,
+        "工具执行期间恒定"
     );
 }
 

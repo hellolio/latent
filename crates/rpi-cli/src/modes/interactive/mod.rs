@@ -141,17 +141,16 @@ async fn event_loop(
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), String> {
     let partial = ctx.session.agent().partial_message();
-    draw(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
+    render_tick(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
 
     loop {
-        // flush 待提交转录(差分终端由 TuiApp 保证只打印一次)
-        if !state.pending.is_empty() {
-            let pending = std::mem::take(&mut state.pending);
-            app.commit_lines(&pending).map_err(|e| e.to_string())?;
-        }
-        // ctrl+o 切换后的全文重绘
+        // ctrl+o 切换后的全文重绘(先 flush 挂起的瞬态行,再整体重打)
         if state.needs_full_redraw {
             state.needs_full_redraw = false;
+            if !state.pending.is_empty() {
+                let pending = std::mem::take(&mut state.pending);
+                app.commit_lines(&pending).map_err(|e| e.to_string())?;
+            }
             let transcript = full_redraw_lines(state);
             let partial = ctx.session.agent().partial_message();
             let cap = preview_cap_for(state)
@@ -169,7 +168,7 @@ async fn event_loop(
         }
 
         let partial = ctx.session.agent().partial_message();
-        draw(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
+        render_tick(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
 
         tokio::select! {
             key = key_rx.recv() => {
@@ -202,12 +201,31 @@ async fn event_loop(
     Ok(())
 }
 
-/// 组装视口帧并绘制(终端过矮时收缩预览区/补全弹窗/编辑器行数)。
-fn draw(
+/// 单帧渲染:① 计算帧 → ② 同步视口高度 → ③ flush 待提交转录 →
+/// ④ 绘制视口。高度同步必须在 flush 之前:视口收缩释放的行会形成空带
+/// (终端无法从 scrollback 拉回内容),flush 的定稿内容经 `insert_before`
+/// 从视口上方往下填,正好把空带回填——回合结束后输出紧贴输入区,
+/// 不再留下大片空白等下一次提交。
+fn render_tick(
     state: &mut InteractiveState,
     app: &mut TuiApp,
     partial: Option<&rpi_ai::AssistantMessage>,
 ) -> std::io::Result<()> {
+    let frame = build_frame(state, app, partial);
+    app.set_viewport_height(frame.height)?;
+    if !state.pending.is_empty() {
+        let pending = std::mem::take(&mut state.pending);
+        app.commit_lines(&pending)?;
+    }
+    app.draw_viewport(&frame.lines, frame.cursor)
+}
+
+/// 计算视口帧(终端过矮时收缩预览区/补全弹窗/编辑器行数)。
+fn build_frame(
+    state: &mut InteractiveState,
+    app: &TuiApp,
+    partial: Option<&rpi_ai::AssistantMessage>,
+) -> view::ViewportFrame {
     let budget = app.viewport_height_cap();
     let mut preview_cap = preview_cap_for(state);
     let mut editor_cap = view::MAX_EDITOR_ROWS;
@@ -222,21 +240,23 @@ fn draw(
         editor_cap = 1;
         frame = view::viewport(state, partial, 0, editor_cap, popup_cap);
     }
-    app.set_viewport_height(frame.height)?;
-    app.draw_viewport(&frame.lines, frame.cursor)
+    frame
 }
 
-/// 预览区行数上限:流式输出/思考中固定为 `STREAM_PREVIEW_ROWS`(视口高度
-/// 全程恒定,不随增量改高——Inline 视口逐增量 resize 会闪烁并污染
-/// scrollback);空闲时只保留最小空隙(两行)。超出终端预算时由 draw()
-/// 的收缩逻辑截尾。
+/// 预览区行数上限:busy 期间(流式输出/思考/工具执行)固定为
+/// `STREAM_PREVIEW_ROWS`(5),空闲时只保留最小空隙(两行)。关键在
+/// **busy 一开始就把视口预增高到全程高度**:此后整回合不再有任何增高,
+/// 唯一一次 +3 的空带会被紧随其后的用户消息落盘立即回填,回合内不残留
+/// 增高空带(此前思考 +3、思考转正文再 +5,短思维链填不满,回合结束后
+/// 输入框上方残留大片空白)。超出终端预算时由 build_frame() 收缩截尾。
 fn preview_cap_for(state: &InteractiveState) -> usize {
-    let streaming = !state.stream_text.is_empty()
+    if state.status.is_busy()
+        || !state.stream_text.is_empty()
         || state
             .pending_thinking
             .as_ref()
-            .is_some_and(|t| !t.trim().is_empty());
-    if streaming {
+            .is_some_and(|t| !t.trim().is_empty())
+    {
         view::STREAM_PREVIEW_ROWS
     } else {
         view::MAX_PREVIEW_ROWS

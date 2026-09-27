@@ -722,6 +722,11 @@ async fn handle_session_event(
                     ToolStatus::Success
                 };
                 state.commit(TranscriptItem::ToolCall { name, args, status });
+                // 补空结果条目,让边框卡片闭合(结果未到达的兜底路径)
+                state.commit(TranscriptItem::ToolResult {
+                    output: String::new(),
+                    is_error: state.last_tool_error,
+                });
             }
             state.status = Status::Idle;
         }

@@ -1,14 +1,14 @@
 //! 工具调用卡片(pi components/tool-execution.ts 的子集):
-//! `⏺ 名称 参数` 标题行按状态着色,输出默认折叠、ctrl+o 展开。
+//! 状态色边框卡片(成功绿/失败红),`⏺ 名称 参数` 命令行与输出同框,
+//! 输出默认折叠、ctrl+o 展开。
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::text::truncate_line;
 use crate::theme::Theme;
 use crate::width::display_width;
 
-/// 工具执行状态(标题行 `⏺` 与正文着色依据)。
+/// 工具执行状态(标题行 `⏺` 与边框着色依据)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     Pending,
@@ -26,95 +26,199 @@ impl ToolStatus {
     }
 }
 
-/// 默认折叠时保留的输出行数(pi 同款)。
-pub const COLLAPSED_OUTPUT_ROWS: usize = 3;
+/// 默认折叠时保留的输出行数(pi 同款;折叠行 + 1 行余量提示)。
+pub const COLLAPSED_OUTPUT_ROWS: usize = 4;
 
-/// 标题行:`⏺ name args…`(状态色圆点 + 加粗工具名 + muted 参数预览)。
-pub fn title_line(
-    name: &str,
-    args: &str,
-    status: ToolStatus,
-    width: usize,
-    theme: &Theme,
-) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled("⏺ ", Style::new().fg(status.color(theme))),
-        Span::styled(
-            name.to_string(),
-            Style::new()
-                .fg(theme.tool_title)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let used = 2 + name.chars().count() + 1;
-    // 参数预览需要至少 4 列才有意义,否则省略
-    if !args.is_empty() && used + 4 <= width {
-        let (preview, _) = crate::width::truncate_to_width(args, width - used);
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(preview, Style::new().fg(theme.muted)));
-    }
-    truncate_line(Line::from(spans), width)
+/// 边框横线(╭─…─╮ / ╰─…─╯)。
+fn box_edges(width: usize, border_style: Style, left: &str, right: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("{left}{}{right}", "─".repeat(width.saturating_sub(2))),
+        border_style,
+    ))
 }
 
-/// 工具输出正文:折叠时保留前 COLLAPSED_OUTPUT_ROWS 行 + 余量提示;
-/// 展开时全部折行输出。空输出返回空。
-/// 整行铺淡色背景(用户块背景上叠 14% 状态色:成功浅绿/失败浅红),
-/// 正文保持可读的 user_text 色,背景只做状态暗示。
-pub fn output_lines(
-    output: &str,
+/// 边框内容行:`│ 文本补齐 │`,整行铺满宽度。
+fn box_row(text: &str, style: Style, inner: usize, border_style: Style) -> Line<'static> {
+    let pad = inner.saturating_sub(display_width(text));
+    Line::from(vec![
+        Span::styled("│ ".to_string(), border_style),
+        Span::styled(format!("{text}{}", " ".repeat(pad)), style),
+        Span::styled(" │".to_string(), border_style),
+    ])
+}
+
+/// 输出行折叠:展开全量;收起保留前 `COLLAPSED_OUTPUT_ROWS` 行 + 余量提示。
+fn collapsed_rows(output: &str, inner: usize, expanded: bool) -> (Vec<String>, Option<String>) {
+    let mut rows: Vec<String> = output
+        .lines()
+        .flat_map(|line| crate::width::wrap_to_width(line, inner))
+        .collect();
+    let mut hint = None;
+    if !rows.is_empty() && !expanded && rows.len() > COLLAPSED_OUTPUT_ROWS {
+        let more = rows.len() - COLLAPSED_OUTPUT_ROWS;
+        rows.truncate(COLLAPSED_OUTPUT_ROWS);
+        hint = Some(format!("  … +{more} lines (ctrl+o to expand)"));
+    }
+    (rows, hint)
+}
+
+/// 工具调用卡片上半:顶部边框 + `⏺ name args` 命令行(命令框进框内)。
+/// 输出行与底边由 ToolResult 条目续画,两段拼成同一个框。
+/// 收起时参数单行截断预览;ctrl+o 展开时参数完整折行。
+pub fn tool_box_top(
+    name: &str,
+    args: &str,
     status: ToolStatus,
     expanded: bool,
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let bg = crate::theme::blend_rgb(theme.user_bg, status.color(theme), 0.14);
-    let body_style = Style::new().fg(theme.user_text).bg(bg);
-    let hint_style = Style::new().fg(theme.dim).bg(bg);
+    let width = width.max(4);
+    let color = status.color(theme);
+    let border_style = Style::new().fg(color);
+    let dot_style = Style::new().fg(color);
+    let name_style = Style::new()
+        .fg(theme.tool_title)
+        .add_modifier(Modifier::BOLD);
+    let args_style = Style::new().fg(theme.muted);
     let inner = width.saturating_sub(4).max(1);
-    let mut wrapped: Vec<String> = Vec::new();
-    for raw in output.lines() {
-        for line in crate::width::wrap_to_width(raw, inner) {
-            wrapped.push(line);
+
+    let mut out = vec![box_edges(width, border_style, "╭", "╮")];
+    let name_w = display_width(name);
+    let args_room = inner.saturating_sub(2 + name_w + 1);
+    // 首行:⏺ + 工具名 + 参数首段;后续行:参数续段(对齐参数起始列)。
+    // 收起时参数单行截断;展开时完整折行;无参数/过窄时只有工具名。
+    let chunks: Vec<String> = if !args.is_empty() && args_room >= 4 {
+        if expanded {
+            crate::width::wrap_to_width(args, args_room)
+        } else {
+            vec![crate::width::truncate_to_width(args, args_room).0]
         }
-    }
-    if wrapped.is_empty() {
-        return Vec::new();
-    }
-    let render_row = |text: &str, style: Style| -> Line<'static> {
-        // 内容 + 行尾补齐:整行铺满背景(无终端底色缝隙)
-        let pad = width.saturating_sub(display_width(text));
-        Line::from(Span::styled(
-            format!("{text}{}", " ".repeat(pad)),
-            style,
-        ))
+    } else {
+        Vec::new()
     };
-    if expanded || wrapped.len() <= COLLAPSED_OUTPUT_ROWS {
-        let mut out: Vec<Line<'static>> = wrapped
-            .iter()
-            .map(|row| render_row(row, body_style))
-            .collect();
-        // 折叠阈值内的完整输出后附展开提示(仅当确实可折叠时)
-        if !expanded && wrapped.len() > COLLAPSED_OUTPUT_ROWS {
-            out.push(hint_line(wrapped.len(), width, hint_style));
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let used = 2 + name_w + 1 + display_width(chunk);
+        if i == 0 {
+            spans.push(Span::styled("⏺ ".to_string(), dot_style));
+            spans.push(Span::styled(name.to_string(), name_style));
+            spans.push(Span::styled(" ".to_string(), args_style));
+            spans.push(Span::styled(chunk.clone(), args_style));
+        } else {
+            let indent = format!("{} ", " ".repeat(2 + name_w));
+            spans.push(Span::styled(indent, args_style));
+            spans.push(Span::styled(chunk.clone(), args_style));
         }
-        return out;
+        let pad = inner.saturating_sub(used);
+        out.push(Line::from({
+            let mut all = vec![Span::styled("│ ".to_string(), border_style)];
+            all.extend(spans);
+            if pad > 0 {
+                all.push(Span::styled(" ".repeat(pad), Style::new()));
+            }
+            all.push(Span::styled(" │".to_string(), border_style));
+            all
+        }));
     }
-    let mut out: Vec<Line<'static>> = wrapped[..COLLAPSED_OUTPUT_ROWS]
-        .iter()
-        .map(|row| render_row(row, body_style))
-        .collect();
-    out.push(hint_line(wrapped.len(), width, hint_style));
+    if chunks.is_empty() {
+        let pad = inner.saturating_sub(2 + name_w);
+        out.push(Line::from({
+            let mut all = vec![
+                Span::styled("│ ".to_string(), border_style),
+                Span::styled("⏺ ".to_string(), dot_style),
+                Span::styled(name.to_string(), name_style),
+            ];
+            if pad > 0 {
+                all.push(Span::styled(" ".repeat(pad), Style::new()));
+            }
+            all.push(Span::styled(" │".to_string(), border_style));
+            all
+        }));
+    }
     out
 }
 
-fn hint_line(total: usize, width: usize, style: Style) -> Line<'static> {
-    let more = total.saturating_sub(COLLAPSED_OUTPUT_ROWS);
-    let text = format!("  … +{more} lines (ctrl+o to expand)");
-    let pad = width.saturating_sub(display_width(&text));
-    Line::from(Span::styled(
-        format!("{text}{}", " ".repeat(pad)),
-        style,
-    ))
+/// 工具调用卡片下半:输出行(折叠逻辑同 bash)+ 底部边框。
+pub fn tool_box_bottom(
+    output: &str,
+    is_error: bool,
+    expanded: bool,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    let border = if is_error {
+        theme.tool_error
+    } else {
+        theme.tool_success
+    };
+    let border_style = Style::new().fg(border);
+    let inner = width.saturating_sub(4).max(1);
+    let (rows, hint) = collapsed_rows(output, inner, expanded);
+    let mut out: Vec<Line<'static>> = rows
+        .iter()
+        .map(|text| box_row(text, Style::new().fg(theme.user_text), inner, border_style))
+        .collect();
+    if let Some(hint) = &hint {
+        out.push(box_row(hint, Style::new().fg(theme.dim), inner, border_style));
+    }
+    out.push(box_edges(width, border_style, "╰", "╯"));
+    out
+}
+
+/// `!` bash 透传卡片:命令与输出同框,状态色边框(成功绿/失败红,正统
+/// 状态色不做淡色混合)。折叠逻辑与工具输出一致:保留前
+/// `COLLAPSED_OUTPUT_ROWS` 行输出 + 余量提示,ctrl+o 展开全部。
+pub fn bash_box(
+    command: &str,
+    output: &str,
+    is_error: bool,
+    expanded: bool,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let width = width.max(4);
+    let border_style = Style::new().fg(if is_error {
+        theme.tool_error
+    } else {
+        theme.tool_success
+    });
+    let command_style = Style::new()
+        .fg(theme.assistant_text)
+        .add_modifier(Modifier::BOLD);
+    let inner = width.saturating_sub(4).max(1);
+
+    // 命令行:首行带 "! " 前缀,超宽折行(展开时完整可见)
+    let mut out = vec![box_edges(width, border_style, "╭", "╮")];
+    let marked = format!("! {command}");
+    let command_rows = crate::width::wrap_to_width(&marked, inner);
+    for (i, text) in command_rows.iter().enumerate() {
+        if i == 0 {
+            let rest = text.strip_prefix("! ").unwrap_or(text);
+            let used = 2 + display_width(rest);
+            let pad = inner.saturating_sub(used);
+            out.push(Line::from(vec![
+                Span::styled("│ ".to_string(), border_style),
+                Span::styled("! ".to_string(), border_style),
+                Span::styled(format!("{rest}{}", " ".repeat(pad)), command_style),
+                Span::styled(" │".to_string(), border_style),
+            ]));
+        } else {
+            out.push(box_row(text, command_style, inner, border_style));
+        }
+    }
+
+    // 输出行:折叠保留前 N 行 + 提示,展开全量(下半含底边)
+    let (rows, hint) = collapsed_rows(output, inner, expanded);
+    for text in &rows {
+        out.push(box_row(text, Style::new().fg(theme.user_text), inner, border_style));
+    }
+    if let Some(hint) = &hint {
+        out.push(box_row(hint, Style::new().fg(theme.dim), inner, border_style));
+    }
+    out.push(box_edges(width, border_style, "╰", "╯"));
+    out
 }
 
 #[cfg(test)]
@@ -127,70 +231,127 @@ mod tests {
     }
 
     #[test]
-    fn title_line_shows_name_args_and_status_dot() {
-        let line = title_line("bash", "ls -la", ToolStatus::Success, 40, &theme());
-        let text = line_text(&line);
-        assert!(text.starts_with("⏺ bash"), "{text}");
+    fn tool_box_top_shows_name_args_and_status_dot() {
+        let top = tool_box_top("bash", "ls -la", ToolStatus::Success, false, 40, &theme());
+        let text = line_text(&top[1]);
+        assert!(text.contains("⏺ bash"), "{text}");
         assert!(text.contains("ls -la"));
-        // 参数预览 muted(与工具名不同色)
-        assert_ne!(line.spans[1].style, line.spans[3].style);
+        // 顶部边框开框、无底边(由 tool_box_bottom 续画)
+        assert!(line_text(&top[0]).starts_with('╭'), "{top:?}");
+        assert_eq!(top.len(), 2);
     }
 
     #[test]
-    fn title_line_narrow_omits_args() {
-        let line = title_line("bash", "ls", ToolStatus::Pending, 8, &theme());
-        assert_eq!(line_text(&line), "⏺ bash");
+    fn tool_box_top_narrow_omits_args() {
+        let top = tool_box_top("bash", "ls", ToolStatus::Pending, false, 12, &theme());
+        assert!(!line_text(&top[1]).contains("ls "), "{:?}", top);
     }
 
     #[test]
-    fn output_collapses_with_hint_and_expands() {
+    fn tool_box_top_expands_args_multiline() {
+        let args = "arg1 arg2 arg3 arg4 arg5";
+        let collapsed = tool_box_top("bash", args, ToolStatus::Success, false, 40, &theme());
+        assert_eq!(collapsed.len(), 2, "收起时参数单行: {collapsed:?}");
+        let expanded = tool_box_top("bash", args, ToolStatus::Success, false, 40, &theme());
+        let _ = expanded;
+        // 展开时参数折成多行(这里参数足够长)
+        let long_args = "word ".repeat(30);
+        let expanded = tool_box_top("bash", &long_args, ToolStatus::Success, true, 40, &theme());
+        assert!(expanded.len() > 2, "{expanded:?}");
+    }
+
+    #[test]
+    fn tool_box_bottom_collapses_with_hint_and_expands() {
         let output = (1..=6)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let collapsed = output_lines(&output, ToolStatus::Success, false, 40, &theme());
-        assert_eq!(collapsed.len(), 4, "{collapsed:?}"); // 3 行 + 提示
-        assert!(line_text(&collapsed[3]).contains("+3 lines"));
-        assert!(line_text(&collapsed[3]).contains("ctrl+o"));
+        let collapsed = tool_box_bottom(&output, false, false, 40, &theme());
+        assert_eq!(collapsed.len(), 6, "{collapsed:?}"); // 4 行 + 提示 + 底边
+        assert!(line_text(&collapsed[4]).contains("+2 lines"));
+        assert!(line_text(&collapsed[4]).contains("ctrl+o"));
+        assert!(line_text(&collapsed[5]).starts_with('╰'));
 
-        let expanded = output_lines(&output, ToolStatus::Success, true, 40, &theme());
-        assert_eq!(expanded.len(), 6);
+        let expanded = tool_box_bottom(&output, false, true, 40, &theme());
+        assert_eq!(expanded.len(), 7);
         assert!(line_text(&expanded[5]).contains("line6"));
     }
 
     #[test]
-    fn short_output_needs_no_hint() {
-        let collapsed = output_lines("a\nb", ToolStatus::Success, false, 40, &theme());
-        assert_eq!(collapsed.len(), 2);
+    fn tool_box_bottom_border_color_follows_status() {
+        let t = Theme::dark();
+        let ok = tool_box_bottom("ok", false, false, 40, &t);
+        let err = tool_box_bottom("boom", true, false, 40, &t);
+        assert_eq!(ok[0].spans[0].style.fg, Some(t.tool_success));
+        assert_eq!(err[0].spans[0].style.fg, Some(t.tool_error));
     }
 
     #[test]
-    fn output_rows_tinted_by_status() {
-        // 真彩色主题:失败浅红背景、成功浅绿背景(用户块背景叠 14% 状态色),
-        // 正文 fg 保持 user_text
+    fn tool_box_top_and_bottom_form_one_box() {
         let t = Theme::dark();
-        let err = output_lines("boom", ToolStatus::Error, false, 40, &t);
-        let expected_err = crate::theme::blend_rgb(t.user_bg, t.tool_error, 0.14);
-        assert_eq!(err[0].spans[0].style.bg, Some(expected_err));
-        assert_eq!(err[0].spans[0].style.fg, Some(t.user_text));
-        let ok = output_lines("ok", ToolStatus::Success, false, 40, &t);
-        let expected_ok = crate::theme::blend_rgb(t.user_bg, t.tool_success, 0.14);
-        assert_eq!(ok[0].spans[0].style.bg, Some(expected_ok));
-        // 整行铺满背景(内容 + 行尾补齐)
-        assert_eq!(crate::width::display_width(&line_text(&ok[0])), 40);
-        // ANSI 兜底主题(非 Rgb 背景色)不调色,保持原背景
-        let ansi = output_lines("boom", ToolStatus::Error, false, 40, &theme());
-        assert_eq!(ansi[0].spans[0].style.bg, Some(theme().user_bg));
+        let mut lines = tool_box_top("bash", "ls", ToolStatus::Success, false, 40, &t);
+        lines.extend(tool_box_bottom("file1", false, false, 40, &t));
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(texts[0].starts_with('╭'), "{texts:?}");
+        assert!(texts.last().unwrap().starts_with('╰'), "{texts:?}");
+        // 上下两段边框色一致,行宽铺满
+        for text in &texts {
+            assert_eq!(display_width(text), 40, "{text:?}");
+        }
     }
 
     #[test]
     fn cjk_output_wraps_within_width() {
         let output = "汉".repeat(30);
-        let lines = output_lines(&output, ToolStatus::Success, true, 20, &theme());
+        let lines = tool_box_bottom(&output, false, true, 20, &theme());
         for line in &lines {
             assert!(display_width(&line_text(line)) <= 20, "{}", line_text(line));
         }
         // 与 wrap_to_width 一致:硬切处不插入空格
         assert!(!lines.iter().any(|line| line_text(line).contains("汉 汉")));
+    }
+
+    #[test]
+    fn bash_box_encloses_command_and_output() {
+        let lines = bash_box("ls -la", "file1\nfile2", false, false, 40, &theme());
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        // 命令在框内,输出同框,上下封边
+        assert!(texts[0].starts_with('╭'), "{texts:?}");
+        assert!(texts.last().unwrap().starts_with('╰'), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("│ ! ls -la")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("file1")), "{texts:?}");
+        // 整行铺满宽度(边框闭合)
+        for text in &texts {
+            assert_eq!(display_width(text), 40, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn bash_box_border_color_follows_status() {
+        let t = Theme::dark();
+        let ok = bash_box("ls", "", false, false, 40, &t);
+        let err = bash_box("ls", "boom", true, false, 40, &t);
+        assert_eq!(ok[0].spans[0].style.fg, Some(t.tool_success));
+        assert_eq!(err[0].spans[0].style.fg, Some(t.tool_error));
+    }
+
+    #[test]
+    fn bash_box_collapses_with_hint_and_expands() {
+        let output = (1..=6)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let collapsed = bash_box("ls", &output, false, false, 40, &theme());
+        // 顶边 + 命令 1 + 输出 4 + 提示 1 + 底边
+        assert_eq!(collapsed.len(), 8, "{:?}", collapsed);
+        assert!(
+            collapsed
+                .iter()
+                .any(|l| line_text(l).contains("+2 lines")),
+            "{collapsed:?}"
+        );
+        let expanded = bash_box("ls", &output, false, true, 40, &theme());
+        assert_eq!(expanded.len(), 9); // 顶边 + 命令 1 + 输出 6 + 底边
+        assert!(expanded.iter().any(|l| line_text(l).contains("line6")));
     }
 }
