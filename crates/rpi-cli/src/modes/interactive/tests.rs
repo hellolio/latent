@@ -265,11 +265,53 @@ async fn assistant_message_finalizes_as_markdown_item() {
     let rendered = committed_text(&state);
     assert!(rendered.contains("标题"), "{rendered}");
     assert!(rendered.contains("正文"));
-    // markdown 标题渲染(无 # 前缀)
-    assert!(state
-        .transcript
-        .iter()
-        .any(|item| matches!(item, super::state::TranscriptItem::Assistant { .. })));
+    // 纯文本回复:包 AI 输出框
+    assert!(state.transcript.iter().any(
+        |item| matches!(item, super::state::TranscriptItem::Assistant { boxed: true, .. })
+    ));
+}
+
+#[tokio::test]
+async fn assistant_message_with_tool_call_not_boxed() {
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    let mut state = test_state();
+
+    handle_ui_event(&ctx, &mut state, session_event(assistant_start())).await;
+    handle_ui_event(
+        &ctx,
+        &mut state,
+        session_event(rpi_agent::AgentEvent::MessageDelta {
+            delta: rpi_agent::MessageDeltaPayload::Text {
+                delta: "我来查看目录".into(),
+            },
+        }),
+    )
+    .await;
+    // 定稿消息含工具调用(后续要执行命令)→ 正文不加框
+    let model = rpi_ai::Model::minimal("m", "mock", "mock");
+    let mut assistant = rpi_ai::AssistantMessage::pending(&model);
+    assistant.stop_reason = StopReason::ToolUse;
+    assistant.content = vec![rpi_ai::ContentBlock::ToolCall {
+        id: "call-1".into(),
+        name: "bash".into(),
+        arguments: serde_json::json!({ "command": "ls" }),
+    }];
+    handle_ui_event(
+        &ctx,
+        &mut state,
+        session_event(rpi_agent::AgentEvent::MessageEnd {
+            message: Box::new(rpi_agent::AgentMessage::Assistant(Box::new(assistant))),
+        }),
+    )
+    .await;
+
+    assert!(state.transcript.iter().any(
+        |item| matches!(item, super::state::TranscriptItem::Assistant { boxed: false, .. })
+    ));
+    let rendered = committed_text(&state);
+    assert!(rendered.contains("我来查看目录"), "{rendered}");
 }
 
 // ---- 用量与错误可见性 ----

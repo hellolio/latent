@@ -625,15 +625,17 @@ async fn handle_session_event(
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageEnd { message }) => {
             match message.as_ref() {
                 // assistant 定稿:thinking 块 + 正文(markdown)落盘;不追加
-                // 空行(用量行紧贴正文,pi 风格;后续条目自带间距)
-                rpi_agent::AgentMessage::Assistant(_) => {
+                // 空行(用量行紧贴正文,pi 风格;后续条目自带间距)。
+                // 消息含工具调用(后续要执行命令)→ 不加 AI 输出框
+                rpi_agent::AgentMessage::Assistant(assistant) => {
                     commit_pending_thinking(state);
-                    flush_stream(state);
+                    let boxed = !assistant.has_tool_calls();
+                    flush_stream(state, boxed);
                 }
                 // 用户消息即时上屏(与回放一致;steering 亦可见)。
                 // 消息组之间保留一个空行(分割线已移除,框间靠空行分隔)
                 rpi_agent::AgentMessage::User { content, .. } => {
-                    flush_stream(state);
+                    flush_stream(state, false);
                     state.commit_blank();
                     state.commit(TranscriptItem::User {
                         content: content.clone(),
@@ -647,7 +649,7 @@ async fn handle_session_event(
                     is_error,
                     ..
                 } => {
-                    flush_stream(state);
+                    flush_stream(state, false);
                     let output = message.tool_result_content().unwrap_or_default();
                     let (name, args) = state
                         .current_tool
@@ -672,7 +674,7 @@ async fn handle_session_event(
             args,
             ..
         }) => {
-            flush_stream(state);
+            flush_stream(state, false);
             let args = serde_json::to_string(&args).unwrap_or_default();
             state.current_tool = Some((tool_name.clone(), args));
             state.status = Status::Tool(tool_name);
@@ -772,11 +774,12 @@ async fn handle_session_event(
     }
 }
 
-/// 流式累积 → assistant 定稿(markdown)转录条目。
-fn flush_stream(state: &mut InteractiveState) {
+/// 流式累积 → assistant 定稿(markdown)转录条目。`boxed` = 是否包 AI
+/// 输出框(纯面向用户的输出;含工具调用的消息不加框)。
+fn flush_stream(state: &mut InteractiveState, boxed: bool) {
     if !state.stream_text.trim().is_empty() {
         let markdown = std::mem::take(&mut state.stream_text);
-        state.commit(TranscriptItem::Assistant { markdown });
+        state.commit(TranscriptItem::Assistant { markdown, boxed });
     } else {
         state.stream_text.clear();
     }

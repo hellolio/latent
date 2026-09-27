@@ -250,6 +250,7 @@ fn build_frame(
 /// - **tokens 块在收缩前按 busy 高度落盘**(Idle 在 AgentSettled 才切),
 ///   与上文 AI 框紧贴;回合末收缩释放的预留空带全部落在 tokens 下方。
 ///   守恒:tokens→输入行空白 = 预留 + 状态行 + 编辑器内边距 = 3 行。
+///
 /// 超出终端预算时由 build_frame() 收缩截尾。
 fn preview_cap_for(state: &InteractiveState) -> usize {
     if state.status.is_busy()

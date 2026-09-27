@@ -25,6 +25,8 @@ pub struct Theme {
     pub user_bg: Color,
     pub user_text: Color,
     pub assistant_text: Color,
+    /// AI 输出框边框(纯面向用户的输出;黄色系)
+    pub assistant_border: Color,
     /// thinking 块(pi thinkingText)
     pub thinking: Color,
     /// 工具标题(pi toolTitle,加粗使用)

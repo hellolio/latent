@@ -168,52 +168,32 @@ pub fn tool_box_bottom(
     out
 }
 
-/// AI 输出卡片:把已渲染的行(如 markdown)包进彩色渐变边框。边框字符按
-/// 列位置在主题光谱上取色(左→右渐变,右缘回卷到左缘色);ANSI 兜底
-/// (非 Rgb 主题)退化为 accent 单色。内容行须按 `width - 4` 预渲染,
-/// 本函数负责边框与行尾补齐。
-pub fn box_around(lines: Vec<Line<'static>>, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// AI 输出卡片:把已渲染的行(如 markdown)包进单色边框(黄色系,
+/// `assistant_border`)。内容行须按 `width - 4` 预渲染,本函数负责
+/// 边框与行尾补齐。
+pub fn box_around(
+    lines: Vec<Line<'static>>,
+    width: usize,
+    border: ratatui::style::Color,
+) -> Vec<Line<'static>> {
     let width = width.max(4);
-    let anchors = theme.gradient_anchors();
-    let border_color = |col: usize| {
-        let t = if width > 2 {
-            col as f32 / (width - 2) as f32 * 0.999
-        } else {
-            0.0
-        };
-        crate::theme::gradient_at(&anchors, t).unwrap_or(theme.accent)
-    };
-    let border_span = |text: &str, col: usize| {
-        Span::styled(text.to_string(), Style::new().fg(border_color(col)))
-    };
+    let border_style = Style::new().fg(border);
     let inner = width.saturating_sub(4).max(1);
     let mut out: Vec<Line<'static>> = Vec::new();
-    // 顶边:╭ + ─×(width-2) + ╮,逐字符按列渐变着色
-    let mut top = vec![border_span("╭", 0)];
-    for col in 1..width - 1 {
-        top.push(border_span("─", col));
-    }
-    top.push(border_span("╮", width - 1));
-    out.push(Line::from(top));
+    out.push(box_edges(width, border_style, "╭", "╮"));
     // 内容行:`│ ` + 原样内容 + 行尾补齐 + ` │`
     for line in lines {
         let used = display_width(&line_text(&line));
         let pad = inner.saturating_sub(used);
-        let mut spans = vec![border_span("│ ", 0)];
+        let mut spans = vec![Span::styled("│ ".to_string(), border_style)];
         spans.extend(line.spans);
         if pad > 0 {
             spans.push(Span::styled(" ".repeat(pad), Style::new()));
         }
-        spans.push(border_span(" │", width - 1));
+        spans.push(Span::styled(" │".to_string(), border_style));
         out.push(Line::from(spans));
     }
-    // 底边:╰…╯(与顶边同色谱)
-    let mut bottom = vec![border_span("╰", 0)];
-    for col in 1..width - 1 {
-        bottom.push(border_span("─", col));
-    }
-    bottom.push(border_span("╯", width - 1));
-    out.push(Line::from(bottom));
+    out.push(box_edges(width, border_style, "╰", "╯"));
     out
 }
 
@@ -282,9 +262,9 @@ mod tests {
 
     #[test]
     fn box_around_encloses_rendered_lines() {
-        let t = Theme::dark(); // 真彩色主题,光谱可用
+        let border = ratatui::style::Color::Rgb(0xe0, 0xaf, 0x68);
         let content = vec![Line::raw("hello"), Line::raw("world")];
-        let lines = box_around(content, 40, &t);
+        let lines = box_around(content, 40, border);
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(texts.len(), 4, "{texts:?}");
         assert!(texts[0].starts_with('╭'), "{texts:?}");
@@ -296,27 +276,28 @@ mod tests {
         for text in &texts {
             assert_eq!(display_width(text), 40, "{text:?}");
         }
-        // 渐变:顶边两端 span 颜色不同(光谱起止色相回卷,中段必不同)
-        let top = &lines[0];
-        let first = top.spans[0].style.fg;
-        let mid = top.spans[top.spans.len() / 2].style.fg;
-        assert_ne!(first, mid, "边框应呈渐变而非单色: {top:?}");
+        // 单色边框:全部边框 span 同色
+        for span in &lines[0].spans {
+            assert_eq!(span.style.fg, Some(border), "{span:?}");
+        }
     }
 
     #[test]
-    fn box_around_ansi_theme_falls_back_to_accent() {
-        let t = Theme::dark_ansi(); // 非 Rgb,光谱不可用
-        let lines = box_around(vec![Line::raw("x")], 20, &t);
+    fn box_around_uses_given_border_color() {
+        let lines = box_around(vec![Line::raw("x")], 20, ratatui::style::Color::Yellow);
         for span in &lines[0].spans {
-            assert_eq!(span.style.fg, Some(t.accent), "{span:?}");
+            assert_eq!(span.style.fg, Some(ratatui::style::Color::Yellow), "{span:?}");
         }
     }
 
     #[test]
     fn box_around_content_at_inner_width_keeps_border_closed() {
-        let t = Theme::dark_ansi();
         // 内容按 inner = width - 4 预渲染时,边框闭合整行铺满
-        let lines = box_around(vec![Line::raw("x".repeat(16))], 20, &t);
+        let lines = box_around(
+            vec![Line::raw("x".repeat(16))],
+            20,
+            ratatui::style::Color::Yellow,
+        );
         assert_eq!(display_width(&line_text(&lines[1])), 20);
     }
 

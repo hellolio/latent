@@ -51,7 +51,9 @@ fn replay_message(message: &AgentMessage, theme: &rpi_tui::Theme) -> Vec<Transcr
             ]
         }
         AgentMessage::Assistant(assistant) => {
-            // thinking 与正文合成为可重渲染条目;工具调用/错误随 stop_reason
+            // thinking 与正文合成为可重渲染条目;工具调用/错误随 stop_reason。
+            // 消息含工具调用(后续要执行命令)→ 正文不加 AI 输出框
+            let has_tool_calls = assistant.has_tool_calls();
             let mut markdown = String::new();
             let mut items: Vec<TranscriptItem> = Vec::new();
             for block in &assistant.content {
@@ -81,7 +83,10 @@ fn replay_message(message: &AgentMessage, theme: &rpi_tui::Theme) -> Vec<Transcr
                 }
             }
             if !markdown.trim().is_empty() {
-                items.push(TranscriptItem::Assistant { markdown });
+                items.push(TranscriptItem::Assistant {
+                    markdown,
+                    boxed: !has_tool_calls,
+                });
             }
             match assistant.stop_reason {
                 StopReason::Error => items.push(TranscriptItem::Line(error_line_msg(

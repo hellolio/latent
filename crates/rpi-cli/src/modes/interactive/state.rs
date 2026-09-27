@@ -35,9 +35,11 @@ pub enum TranscriptItem {
     User {
         content: String,
     },
-    /// assistant 定稿正文(markdown 渲染)
+    /// assistant 定稿正文(markdown 渲染)。`boxed` = 纯面向用户的输出
+    /// (消息不含工具调用)才包 AI 输出框;后续要执行命令的不加框。
     Assistant {
         markdown: String,
+        boxed: bool,
     },
     Thinking {
         text: String,

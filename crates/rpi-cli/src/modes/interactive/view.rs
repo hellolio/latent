@@ -32,11 +32,16 @@ pub fn render_item(
         TranscriptItem::Line(line) => vec![line.clone()],
         TranscriptItem::Blank => vec![Line::raw("")],
         TranscriptItem::User { content } => user_block(content, theme, width),
-        TranscriptItem::Assistant { markdown } => {
-            // AI 输出卡片:markdown 渲染进彩色渐变边框(宽度让出边框内边距)
-            let inner = width.saturating_sub(4).max(1);
-            let rendered = assistant_markdown(markdown, theme, inner);
-            tool_card::box_around(rendered, width, theme)
+        TranscriptItem::Assistant { markdown, boxed } => {
+            // 纯面向用户的输出包黄色 AI 输出框(宽度让出边框内边距);
+            // 后续要执行命令的消息(含工具调用)不加框
+            if *boxed {
+                let inner = width.saturating_sub(4).max(1);
+                let rendered = assistant_markdown(markdown, theme, inner);
+                tool_card::box_around(rendered, width, theme.assistant_border)
+            } else {
+                assistant_markdown(markdown, theme, width)
+            }
         }
         TranscriptItem::Thinking { text } => {
             thinking_block(text, theme, width, expanded)
@@ -379,6 +384,12 @@ fn status_line(state: &InteractiveState) -> Vec<UiLine> {
             ))];
         }
     };
+    // 正在接收正文增量时,状态行右侧追加输出提示(纯思考/工具执行不显示)
+    let text = if state.stream_text.is_empty() {
+        text
+    } else {
+        format!("{text} · writing…")
+    };
     // codex 式渐变:整行文字在彩色光谱上取色,色相随位置渐变、波峰随
     // spinner 拍数向右扫动(真彩色主题;ANSI 兜底退化为状态色单色)
     let anchors = theme.gradient_anchors();
@@ -499,6 +510,7 @@ mod tests {
             },
             TranscriptItem::Assistant {
                 markdown: "yo".into(),
+                boxed: true,
             },
             TranscriptItem::ToolCall {
                 name: "bash".into(),
@@ -511,6 +523,7 @@ mod tests {
             },
             TranscriptItem::Assistant {
                 markdown: "done".into(),
+                boxed: true,
             },
         ];
         let lines = render_transcript(&items, &theme(), 40, false);
@@ -618,6 +631,27 @@ mod tests {
         state.status = Status::Bash("ls".into());
         let frame = viewport(&state, None, 0, 6, 8);
         assert!(line_text(&frame.lines[0]).contains("! ls"));
+    }
+
+    #[test]
+    fn viewport_status_line_shows_writing_hint_while_streaming() {
+        let mut state = state();
+        state.status = Status::Thinking;
+        // 纯思考:无输出提示
+        let texts: Vec<String> = viewport(&state, None, 0, 6, 8)
+            .lines
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(!texts[0].contains("writing"), "{texts:?}");
+        // 正文流式中:状态行右侧追加 writing… 提示
+        state.stream_text = "partial answer".into();
+        let texts: Vec<String> = viewport(&state, None, 0, 6, 8)
+            .lines
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(texts[0].contains("writing…"), "{texts:?}");
     }
 
     #[test]

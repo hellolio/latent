@@ -41,6 +41,7 @@ pub fn from_name(name: ThemeName) -> Theme {
         user_bg: blend(p.bg, user_text, 0.14),
         user_text,
         assistant_text: text,
+        assistant_border: p.warning,
         thinking,
         tool_title: p.info,
         tool_pending: p.warning,
