@@ -196,8 +196,8 @@ impl InteractiveState {
         self.commit(TranscriptItem::Blank);
     }
 
-    /// 追加多条转录条目(单条历史消息可展开成多个条目)。两条主输出之间
-    /// 插入分割线(规则在 view::needs_separator;与全文重绘路径一致)。
+    /// 追加多条转录条目(单条历史消息可展开成多个条目)。组间间距由空行
+    /// 条目表达(提交方负责插入,commit_blank 去重保证不双写)。
     pub fn commit_many(&mut self, items: Vec<TranscriptItem>) {
         for item in items {
             // 空行去重:上一条已是空行则跳过(实时与回放路径统一生效)
@@ -205,13 +205,6 @@ impl InteractiveState {
                 && matches!(self.transcript.last(), Some(TranscriptItem::Blank))
             {
                 continue;
-            }
-            if super::view::needs_separator(
-                super::view::last_significant(&self.transcript),
-                &item,
-            ) {
-                self.pending
-                    .push(super::view::message_separator(self.width, &self.theme));
             }
             let lines = super::view::render_item(&item, &self.theme, self.width, self.expanded);
             self.transcript.push(item);

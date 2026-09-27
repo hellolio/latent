@@ -61,6 +61,10 @@ pub struct Theme {
     pub usage_cache: Color,
     /// footer token 段:花费(pi usageCost)
     pub usage_cost: Color,
+    /// footer token 段:上下文用量(蓝色系,与 cache 的紫色区分)
+    pub usage_ctx: Color,
+    /// 单回合用量行:reasoning token(与 ctx 同色系,两者不同行显示)
+    pub usage_reasoning: Color,
     /// 补全弹窗边框(与 dim 区分的独立角色)
     pub popup_border: Color,
     /// 深色/浅色主题标记(驱动 syntect 高亮主题选择)
@@ -132,6 +136,21 @@ impl Theme {
     pub fn bold(color: Color) -> Style {
         Style::new().fg(color).add_modifier(Modifier::BOLD)
     }
+
+    /// 彩色渐变光谱锚点(codex 式渐变文字/边框共用):取 footer token 段
+    /// 的青→紫→绿三色,真彩色主题下构成色相环;ANSI 兜底(非 Rgb)返回
+    /// 空,调用方退化为单色。
+    pub fn gradient_anchors(&self) -> Vec<Color> {
+        let rgb = |c: &Color| matches!(c, Color::Rgb(..));
+        if [self.usage_input, self.usage_cache, self.usage_output]
+            .iter()
+            .all(rgb)
+        {
+            vec![self.usage_input, self.usage_cache, self.usage_output]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 /// 线性混色:`t` 为 a→b 的插值比例(0 = 纯 a,1 = 纯 b)。任一端非 Rgb
@@ -145,6 +164,24 @@ pub fn blend_rgb(a: Color, b: Color, t: f32) -> Color {
         v.round().clamp(0.0, 255.0) as u8
     };
     Color::Rgb(mix(ar, br), mix(ag, bg_), mix(ab, bb))
+}
+
+/// 在彩色光谱锚点间按 `t ∈ [0,1)` 取色(锚点间线性插值,环形衔接;
+/// codex 式渐变文字/边框共用)。锚点为空时返回 None,调用方退化为单色。
+pub fn gradient_at(anchors: &[Color], t: f32) -> Option<Color> {
+    if anchors.is_empty() {
+        return None;
+    }
+    if anchors.len() == 1 {
+        return Some(anchors[0]);
+    }
+    let t = t.rem_euclid(1.0);
+    let scaled = t * anchors.len() as f32;
+    let index = scaled as usize % anchors.len();
+    let frac = scaled - scaled.floor();
+    let a = anchors[index];
+    let b = anchors[(index + 1) % anchors.len()];
+    Some(blend_rgb(a, b, frac))
 }
 
 #[cfg(test)]
@@ -175,5 +212,27 @@ mod tests {
     fn detect_always_dark_default() {
         // 默认主题链路(TokyoNight / ANSI 兜底)都是深色
         assert!(Theme::detect().is_dark);
+    }
+
+    #[test]
+    fn gradient_at_cycles_through_anchors() {
+        let anchors = vec![
+            Color::Rgb(0, 0, 0),
+            Color::Rgb(100, 0, 0),
+            Color::Rgb(200, 0, 0),
+        ];
+        // t=0 → 首锚点;t=0.5(第二段中点)→ 段内插值;负 t 回卷
+        assert_eq!(gradient_at(&anchors, 0.0), Some(anchors[0]));
+        assert_eq!(gradient_at(&anchors, 0.5), Some(Color::Rgb(150, 0, 0)));
+        assert_eq!(gradient_at(&anchors, 1.0), Some(anchors[0]));
+        assert_eq!(gradient_at(&anchors, -0.25), Some(Color::Rgb(150, 0, 0)));
+        // 空光谱返回 None(调用方退化为单色)
+        assert_eq!(gradient_at(&[], 0.5), None);
+    }
+
+    #[test]
+    fn gradient_anchors_require_truecolor() {
+        assert_eq!(Theme::dark().gradient_anchors().len(), 3);
+        assert!(Theme::dark_ansi().gradient_anchors().is_empty());
     }
 }

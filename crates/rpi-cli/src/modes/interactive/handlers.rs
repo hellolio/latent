@@ -630,15 +630,18 @@ async fn handle_session_event(
                     commit_pending_thinking(state);
                     flush_stream(state);
                 }
-                // 用户消息即时上屏(与回放一致;steering 亦可见)
+                // 用户消息即时上屏(与回放一致;steering 亦可见)。
+                // 消息组之间保留一个空行(分割线已移除,框间靠空行分隔)
                 rpi_agent::AgentMessage::User { content, .. } => {
                     flush_stream(state);
+                    state.commit_blank();
                     state.commit(TranscriptItem::User {
                         content: content.clone(),
                     });
                     state.commit_blank();
                 }
-                // 工具结果:标题(按终态着色)+ 输出块(前置空行与正文分隔)
+                // 工具结果:标题(按终态着色)+ 输出块(紧贴上文,框本身
+                // 已提供视觉分隔;TurnEnd 用量块同样紧随其后)
                 rpi_agent::AgentMessage::ToolResult {
                     tool_name,
                     is_error,
@@ -655,7 +658,6 @@ async fn handle_session_event(
                     } else {
                         ToolStatus::Success
                     };
-                    state.commit_blank();
                     state.commit(TranscriptItem::ToolCall { name, args, status });
                     state.commit(TranscriptItem::ToolResult {
                         output,
@@ -680,6 +682,9 @@ async fn handle_session_event(
             state.status = Status::Thinking;
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::TurnEnd { message, .. }) => {
+            // 注意此处保持 busy(Idle 在 AgentSettled):tokens 块必须在视口
+            // 收缩**前**按 busy 高度落盘,与上文(AI 框/工具框)紧贴;随后
+            // 收缩释放的 1 行预留空带全部落在 tokens 下方(输入框一侧)。
             // pi assistant-message.ts 语义:error/aborted 红字上屏且不打
             // 用量行(错误回合无有效 usage);length 先打用量再补截断提示
             match message.stop_reason {

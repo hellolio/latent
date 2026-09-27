@@ -9,15 +9,15 @@ use rpi_tui::{loader, markdown, tool_card, Theme, UiLine};
 
 use super::state::{InteractiveState, Status, TranscriptItem};
 
-/// 交流区与输入区之间的空隙行数(空闲时预览区固定补空到此值)。
-pub const MAX_PREVIEW_ROWS: usize = 2;
-/// 流式输出/思考中预览区的固定行数(超出取尾部)。视口高度在全过程中
-/// 恒定:模型回话期间视口不因增量而改高(ratatui Inline 视口改高要
-/// insert_before + 清屏 + 重建 Terminal,逐增量触发会闪烁并把屏幕顶行
-/// 推进 scrollback,冲刷真实历史),全文在 MessageEnd 一并进转录。
-/// 取 5 而非更大:增高空带只能靠后续落盘回填,预览区越大、阶段切换时的
-/// 空带越高,残留空白越多(思维链 4 行 + 提示恰好占满)。
-pub const STREAM_PREVIEW_ROWS: usize = 5;
+/// 交流区与输入区之间的空隙行数(空闲时预览区不占行,恒为 0)。
+pub const MAX_PREVIEW_ROWS: usize = 0;
+/// 流式预览区行数(busy 预留,超出取尾部)。视口高度在回合全程恒定。
+/// 守恒律:insert_before 滚动机制决定了「回合末 tokens 下方残留的空带 =
+/// busy 预留 + 状态行 + 编辑器内边距」,且 tokens 在收缩**前**落盘时
+/// 与 AI 框紧贴、空带全部落在 tokens 下方。预留 1 行 → 生成中可见 1 行
+/// 流式尾部,回合末 tokens→输入行共 3 行空白(空带 1 + 状态行 1 +
+/// 内边距 1)。pi 上游无此问题的做法是全帧差分重绘,属渲染管线级重构。
+pub const STREAM_PREVIEW_ROWS: usize = 1;
 /// 编辑器最多展示的视觉行数(pi 编辑器同样封顶)。
 pub const MAX_EDITOR_ROWS: usize = 6;
 
@@ -32,7 +32,12 @@ pub fn render_item(
         TranscriptItem::Line(line) => vec![line.clone()],
         TranscriptItem::Blank => vec![Line::raw("")],
         TranscriptItem::User { content } => user_block(content, theme, width),
-        TranscriptItem::Assistant { markdown } => assistant_markdown(markdown, theme, width),
+        TranscriptItem::Assistant { markdown } => {
+            // AI 输出卡片:markdown 渲染进彩色渐变边框(宽度让出边框内边距)
+            let inner = width.saturating_sub(4).max(1);
+            let rendered = assistant_markdown(markdown, theme, inner);
+            tool_card::box_around(rendered, width, theme)
+        }
         TranscriptItem::Thinking { text } => {
             thinking_block(text, theme, width, expanded)
         }
@@ -41,12 +46,7 @@ pub fn render_item(
         }
         TranscriptItem::ToolResult {
             output, is_error, ..
-        } => {
-            let mut out =
-                tool_card::tool_box_bottom(output, *is_error, expanded, width, theme);
-            out.push(Line::raw(""));
-            out
-        }
+        } => tool_card::tool_box_bottom(output, *is_error, expanded, width, theme),
         TranscriptItem::Bash {
             command,
             output,
@@ -62,52 +62,8 @@ pub fn render_item(
     }
 }
 
-/// 分组起点:开启一条新"消息组"的转录条目(思维链从属其后的 assistant
-/// 消息,也是组起点;工具结果从属其前的工具调用,不是)。
-fn is_group_start(item: &TranscriptItem) -> bool {
-    matches!(
-        item,
-        TranscriptItem::User { .. }
-            | TranscriptItem::Assistant { .. }
-            | TranscriptItem::Thinking { .. }
-            | TranscriptItem::ToolCall { .. }
-            | TranscriptItem::Bash { .. }
-    )
-}
-
-/// 参与分割线判定的条目(跳过空行与预渲染 Line:用量框、横幅等)。
-pub fn is_significant(item: &TranscriptItem) -> bool {
-    !matches!(item, TranscriptItem::Blank | TranscriptItem::Line(_))
-}
-
-/// 两条主输出之间是否需要分割线:next 开启新组且此前已有内容时插入;
-/// 思维链后紧随的正文/工具调用属同一条 assistant 消息,不再分割。
-pub fn needs_separator(prev: Option<&TranscriptItem>, next: &TranscriptItem) -> bool {
-    let Some(prev) = prev else {
-        return false;
-    };
-    if !is_group_start(next) {
-        return false;
-    }
-    !(matches!(prev, TranscriptItem::Thinking { .. })
-        && matches!(
-            next,
-            TranscriptItem::Assistant { .. } | TranscriptItem::ToolCall { .. }
-        ))
-}
-
-/// 消息组之间的分割线(dim 横线,与启动区分隔线同款)。
-pub fn message_separator(width: usize, theme: &Theme) -> UiLine {
-    rpi_tui::header_view::separator(width, theme)
-}
-
-/// 从条目序列向前找最近的有效条目(跳过空行/Line)。
-pub fn last_significant(items: &[TranscriptItem]) -> Option<&TranscriptItem> {
-    items.iter().rev().find(|item| is_significant(item))
-}
-
-/// 整个转录的重渲染(ctrl+o 展开/收起后的全文重绘)。消息组之间插分割线,
-/// 规则与实时提交路径(state.commit_many)一致。
+/// 整个转录的重渲染(ctrl+o 展开/收起后的全文重绘)。间距由转录中的
+/// 空行条目表达(与实时提交路径 state.commit_many 一致)。
 pub fn render_transcript(
     items: &[TranscriptItem],
     theme: &Theme,
@@ -115,15 +71,8 @@ pub fn render_transcript(
     expanded: bool,
 ) -> Vec<UiLine> {
     let mut out = Vec::new();
-    let mut prev_significant: Option<&TranscriptItem> = None;
     for item in items {
-        if needs_separator(prev_significant, item) {
-            out.push(message_separator(width, theme));
-        }
         out.extend(render_item(item, theme, width, expanded));
-        if is_significant(item) {
-            prev_significant = Some(item);
-        }
     }
     out
 }
@@ -237,7 +186,7 @@ pub fn viewport(
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         )));
         preview.extend(rpi_tui::SelectList::render(&select.list, width, theme));
-    } else if !state.stream_text.is_empty() {
+    } else if preview_cap > 0 && !state.stream_text.is_empty() {
         let wrapped = rpi_tui::wrap_to_width(&state.stream_text, width);
         // 预览恒为固定尾部窗口(不随 ctrl+o 展开态变化):展开态只作用于
         // 定稿转录,避免展开后视口逐增量改高引发闪烁
@@ -248,40 +197,43 @@ pub fn viewport(
                 Style::new().fg(theme.assistant_text),
             )));
         }
-    } else if let Some(text) = state
-        .pending_thinking
-        .as_ref()
-        .filter(|t| !t.trim().is_empty())
+    } else if preview_cap > 0
+        && state
+            .pending_thinking
+            .as_ref()
+            .is_some_and(|t| !t.trim().is_empty())
     {
-        // 与 bash 折叠逻辑一致:尾部 4 行 + 余量提示(与展开态无关)
-        let rows: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-        let collapsed = rows.len() > tool_card::COLLAPSED_OUTPUT_ROWS;
-        let start = if collapsed {
-            rows.len() - tool_card::COLLAPSED_OUTPUT_ROWS
-        } else {
-            0
-        };
-        for row in &rows[start..] {
-            preview.push(Line::from(vec![
-                Span::styled(
-                    format!("  {} ", loader::THINKING_MARK),
-                    Style::new().fg(theme.thinking),
-                ),
-                Span::styled(
-                    truncate_plain(row, width.saturating_sub(4)),
-                    Style::new().fg(theme.thinking),
-                ),
-            ]));
+        if let Some(text) = state.pending_thinking.as_ref() {
+            // 与 bash 折叠逻辑一致:尾部 4 行 + 余量提示(与展开态无关)
+            let rows: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let collapsed = rows.len() > tool_card::COLLAPSED_OUTPUT_ROWS;
+            let start = if collapsed {
+                rows.len() - tool_card::COLLAPSED_OUTPUT_ROWS
+            } else {
+                0
+            };
+            for row in &rows[start..] {
+                preview.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {} ", loader::THINKING_MARK),
+                        Style::new().fg(theme.thinking),
+                    ),
+                    Span::styled(
+                        truncate_plain(row, width.saturating_sub(4)),
+                        Style::new().fg(theme.thinking),
+                    ),
+                ]));
+            }
+            if collapsed {
+                let more = rows.len() - tool_card::COLLAPSED_OUTPUT_ROWS;
+                preview.push(Line::from(Span::styled(
+                    format!("  … +{more} lines (ctrl+o to expand)"),
+                    Style::new().fg(theme.dim),
+                )));
+            }
         }
-        if collapsed {
-            let more = rows.len() - tool_card::COLLAPSED_OUTPUT_ROWS;
-            preview.push(Line::from(Span::styled(
-                format!("  … +{more} lines (ctrl+o to expand)"),
-                Style::new().fg(theme.dim),
-            )));
-        }
-    } else if let Some(partial) = partial {
-        if let Some(args) = toolcall_args_preview(partial) {
+    } else if preview_cap > 0 && partial.is_some() {
+        if let Some(args) = partial.and_then(toolcall_args_preview) {
             preview.push(Line::from(Span::styled(
                 format!("⚙ {args}"),
                 Style::new().fg(theme.dim),
@@ -289,17 +241,20 @@ pub fn viewport(
         }
     }
     if state.select.is_none() {
+        // 预览恒为尾部窗口:超出 cap 时从头部丢弃(thinking 折叠尾迹可能
+        // 超过 cap,不能让视口高度随内容回涨——那会在回合中段重新产生
+        // 高度变化与收缩空带)
+        if preview.len() > preview_cap {
+            preview.drain(..preview.len() - preview_cap);
+        }
         while preview.len() < preview_cap {
             preview.push(Line::raw(""));
         }
     }
     lines.extend(preview);
 
-    // 1.5 空隙行:预览区(模型输出)与状态行之间保留一行字体间距
-    lines.push(Line::raw(""));
-
-    // 2. 状态行(Codex 风格,busy 时一行带 shimmer 渐变;idle 不占行):
-    //    `◐ Working (3s · esc to interrupt)` / `⏺ bash` / `aborted`
+    // 状态行(busy 时一行带 shimmer 渐变;idle 空占一行)。无预览预留,
+    // busy/idle 视口高度恒同,无需空隙行。
     let status = status_line(state);
     lines.extend(status);
 
@@ -385,9 +340,9 @@ pub fn viewport(
     }
 }
 
-/// 状态行(Codex 风格:busy 时一行带 shimmer 渐变与 `esc to interrupt` 提示;
+/// 状态行(Codex 风格:busy 时一行带彩色渐变与 `esc to interrupt` 提示;
 /// idle 时空占一行,保证视口高度不随 busy↔idle 切换抖动)。
-/// 等待态文字逐字符做明暗渐变,波峰随 spinner 拍数向右扫动(等待感)。
+/// 等待态文字逐字符在彩色光谱上取色,色相随位置渐变、随 spinner 拍数向右扫动。
 fn status_line(state: &InteractiveState) -> Vec<UiLine> {
     let theme = &state.theme;
     let secs = state.spin * super::SPINNER_INTERVAL.as_millis() as usize / 1000;
@@ -424,7 +379,9 @@ fn status_line(state: &InteractiveState) -> Vec<UiLine> {
             ))];
         }
     };
-    // shimmer:亮度 = 0.35~1.0 的正弦波,波峰位置随 tick 向右扫
+    // codex 式渐变:整行文字在彩色光谱上取色,色相随位置渐变、波峰随
+    // spinner 拍数向右扫动(真彩色主题;ANSI 兜底退化为状态色单色)
+    let anchors = theme.gradient_anchors();
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len().max(1) as f32;
     let phase = (state.spin % 24) as f32 / 24.0;
@@ -432,13 +389,12 @@ fn status_line(state: &InteractiveState) -> Vec<UiLine> {
         .into_iter()
         .enumerate()
         .map(|(i, c)| {
-            let wave =
-                0.5 + 0.5 * ((i as f32 / n - phase) * std::f32::consts::TAU).sin();
-            let t = 0.35 + 0.65 * wave;
-            Span::styled(
-                c.to_string(),
-                Style::new().fg(rpi_tui::theme::blend_rgb(theme.dim, color, t)),
+            let color = rpi_tui::theme::gradient_at(
+                &anchors,
+                i as f32 / n + phase,
             )
+            .unwrap_or(color);
+            Span::styled(c.to_string(), Style::new().fg(color))
         })
         .collect();
     vec![Line::from(spans)]
@@ -533,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_separators_between_message_groups() {
+    fn transcript_groups_stack_without_separators() {
         let items = vec![
             TranscriptItem::User {
                 content: "hi".into(),
@@ -559,16 +515,15 @@ mod tests {
         ];
         let lines = render_transcript(&items, &theme(), 40, false);
         let texts: Vec<String> = lines.iter().map(line_text).collect();
-        // 分割线:User→Thinking、Assistant→ToolCall、ToolResult→Assistant;
-        // User 块前无分割线,thinking→正文、工具调用→结果同组不分割
-        let seps: Vec<usize> = texts
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.starts_with('─'))
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(seps.len(), 3, "{texts:?}");
-        assert!(seps[0] > 0, "首条消息前无分割线: {texts:?}");
+        // 分割线已移除:任何行都不再以 ─ 开头的全宽横线形式出现
+        // (assistant markdown 若带代码块,其框有 `╭── label` 标签形态)
+        assert!(
+            !texts.iter().any(|t| t.starts_with("───")),
+            "不应再有分割线: {texts:?}"
+        );
+        // assistant 正文包进渐变边框(│ yo … │)
+        assert!(texts.iter().any(|t| t.contains("│ yo")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("│ done")), "{texts:?}");
     }
 
     #[test]
@@ -593,21 +548,21 @@ mod tests {
         let mut st = state();
         st.editor.set_text("hi");
         let frame = viewport(&st, None, 8, 6, 8);
-        // 预览 8(恒占)+ 空隙 1 + 状态 1 + 编辑区(上下内边距 2 + 编辑行 1)
-        // + footer 3 = 16
+        // 预览 8(恒占)+ 状态 1(空闲无空隙行)+ 编辑区(上下内边距 2 +
+        // 编辑行 1)+ footer 3 = 15
         assert_eq!(
             frame.lines.len(),
-            16,
+            15,
             "{:?}",
             frame.lines.iter().map(line_text).collect::<Vec<_>>()
         );
-        assert_eq!(frame.height, 16);
-        // 光标在编辑器行(行 11 = 预览 8 + 空隙 1 + 状态 1 + 顶部内边距),列 = 2 + 2 = 4
-        assert_eq!(frame.cursor, Some((4, 11)));
+        assert_eq!(frame.height, 15);
+        // 光标在编辑器行(行 10 = 预览 8 + 状态 1 + 顶部内边距),列 = 2 + 2 = 4
+        assert_eq!(frame.cursor, Some((4, 10)));
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert!(texts[11].starts_with("❯ hi"), "{texts:?}");
-        // idle 时预览、空隙行与状态行均为空占位
-        for row in &texts[..10] {
+        assert!(texts[10].starts_with("❯ hi"), "{texts:?}");
+        // idle 时预览与状态行均为空占位
+        for row in &texts[..9] {
             assert!(row.trim().is_empty(), "空闲占位应为空行: {texts:?}");
         }
     }
@@ -619,16 +574,17 @@ mod tests {
         let st = state();
         let frame = viewport(&st, None, 4, 6, 8);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert_eq!(frame.height, 4 + 1 + 1 + 3 + 3);
+        // 空闲:预览 4 + 状态 1 + 编辑区 3 + footer 3(无空隙行)
+        assert_eq!(frame.height, 4 + 1 + 3 + 3);
         for row in &texts[..4] {
             assert!(row.trim().is_empty(), "预览空位应为空行: {texts:?}");
         }
-        // 内容增长但未超 cap:预览区行数不变
+        // 内容增长但未超 cap:预览区行数不变;空隙行已移除,busy/idle 同构
         let mut st = state();
         st.status = Status::Thinking;
         st.stream_text = "line1\nline2".into();
         let frame = viewport(&st, None, 4, 6, 8);
-        assert_eq!(frame.height, 4 + 1 + 1 + 3 + 3);
+        assert_eq!(frame.height, 4 + 1 + 3 + 3);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
         assert!(texts.iter().take(4).any(|t| t.contains("line2")));
     }
@@ -648,28 +604,28 @@ mod tests {
     #[test]
     fn viewport_status_line_reflects_busy_state() {
         let mut state = state();
-        // idle:预览空位 + 空隙行 + 状态行空占位
-        assert_eq!(viewport(&state, None, 0, 6, 8).lines.len(), 8);
+        // idle:状态行空占位(无预览、无空隙行)
+        assert_eq!(viewport(&state, None, 0, 6, 8).lines.len(), 7);
         assert!(line_text(&viewport(&state, None, 0, 6, 8).lines[0]).trim().is_empty());
         state.status = Status::Thinking;
         state.spin = 25; // 25 * 120ms = 3s
         let frame = viewport(&state, None, 0, 6, 8);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        // 预览空位(0)+ 空隙行 → 状态行在 index 1
-        assert!(texts[1].contains(loader::frame(25)), "{texts:?}");
-        assert!(texts[1].contains("Working (3s"), "{texts:?}");
-        assert!(texts[1].contains("esc to interrupt"), "{texts:?}");
+        // 无空隙行(busy/idle 同构)→ 状态行在 index 0
+        assert!(texts[0].contains(loader::frame(25)), "{texts:?}");
+        assert!(texts[0].contains("Working (3s"), "{texts:?}");
+        assert!(texts[0].contains("esc to interrupt"), "{texts:?}");
         state.status = Status::Bash("ls".into());
         let frame = viewport(&state, None, 0, 6, 8);
-        assert!(line_text(&frame.lines[1]).contains("! ls"));
+        assert!(line_text(&frame.lines[0]).contains("! ls"));
     }
 
     #[test]
     fn viewport_empty_editor_shows_placeholder() {
         let state = state();
         let frame = viewport(&state, None, 0, 6, 8);
-        // 预览 0 + 空隙 1 + 状态 1 + 顶部内边距 → 编辑器首行在 index 3
-        let text = line_text(&frame.lines[3]);
+        // 状态行空占位 → 顶部内边距 idx 1,编辑器首行在 index 2
+        let text = line_text(&frame.lines[2]);
         assert!(text.starts_with("❯ "), "{text}");
         assert!(text.contains("Ask rpi to do anything"), "{text}");
     }
@@ -679,8 +635,8 @@ mod tests {
         let mut st = state();
         st.editor.set_text("hi");
         let frame = viewport(&st, None, 0, 6, 8);
-        // 空隙 1 + 状态 1 → 顶部内边距 idx 2,编辑行 idx 3
-        let row = &frame.lines[3];
+        // 状态行空占位 → 顶部内边距 idx 1,编辑行 idx 2
+        let row = &frame.lines[2];
         // 前缀 + 内容 + 行尾补齐,三个 span 共用 user_bg(整行无底色缝隙)
         assert_eq!(row.spans.len(), 3, "{row:?}");
         for span in &row.spans {

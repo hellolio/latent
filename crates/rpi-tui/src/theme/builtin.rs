@@ -38,6 +38,8 @@ pub fn dark() -> Theme {
         usage_output: Color::Rgb(0x9e, 0xce, 0x6a),
         usage_cache: Color::Rgb(0xbb, 0x9a, 0xf7),
         usage_cost: Color::Rgb(0xe0, 0xaf, 0x68),
+        usage_ctx: Color::Rgb(0x7a, 0xa2, 0xf7),
+        usage_reasoning: Color::Rgb(0x7a, 0xa2, 0xf7),
         popup_border: Color::Rgb(0x6b, 0x73, 0x94),
         is_dark: true,
     }
@@ -74,6 +76,8 @@ pub fn dark_ansi() -> Theme {
         usage_output: Color::Green,
         usage_cache: Color::Magenta,
         usage_cost: Color::Yellow,
+        usage_ctx: Color::Blue,
+        usage_reasoning: Color::Blue,
         popup_border: Color::DarkGray,
         is_dark: true,
     }

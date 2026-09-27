@@ -66,6 +66,8 @@ pub fn from_name(name: ThemeName) -> Theme {
         usage_output: p.success,
         usage_cache: p.secondary,
         usage_cost: p.warning,
+        usage_ctx: p.accent,
+        usage_reasoning: p.accent,
         popup_border: blend(p.bg, p.fg, 0.45),
         is_dark: p.is_dark(),
     };

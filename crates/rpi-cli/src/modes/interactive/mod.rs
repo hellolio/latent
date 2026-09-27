@@ -244,11 +244,13 @@ fn build_frame(
 }
 
 /// 预览区行数上限:busy 期间(流式输出/思考/工具执行)固定为
-/// `STREAM_PREVIEW_ROWS`(5),空闲时只保留最小空隙(两行)。关键在
-/// **busy 一开始就把视口预增高到全程高度**:此后整回合不再有任何增高,
-/// 唯一一次 +3 的空带会被紧随其后的用户消息落盘立即回填,回合内不残留
-/// 增高空带(此前思考 +3、思考转正文再 +5,短思维链填不满,回合结束后
-/// 输入框上方残留大片空白)。超出终端预算时由 build_frame() 收缩截尾。
+/// `STREAM_PREVIEW_ROWS`(1),空闲时不占行(0)。两个设计点:
+/// - **busy 一开始就把视口预增高到全程高度**,此后整回合不再增高,输入框
+///   不因流式更新而跳动;
+/// - **tokens 块在收缩前按 busy 高度落盘**(Idle 在 AgentSettled 才切),
+///   与上文 AI 框紧贴;回合末收缩释放的预留空带全部落在 tokens 下方。
+///   守恒:tokens→输入行空白 = 预留 + 状态行 + 编辑器内边距 = 3 行。
+/// 超出终端预算时由 build_frame() 收缩截尾。
 fn preview_cap_for(state: &InteractiveState) -> usize {
     if state.status.is_busy()
         || !state.stream_text.is_empty()

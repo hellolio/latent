@@ -77,7 +77,7 @@ fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
         } else if pct > 70 {
             Style::new().fg(theme.warning)
         } else {
-            dim
+            Style::new().fg(theme.usage_ctx)
         };
         let auto = if data.auto_compact { " (auto)" } else { "" };
         if !spans.is_empty() {
@@ -185,7 +185,7 @@ pub fn turn_usage_line(
         }
         spans.push(Span::styled(
             format!("reasoning {}", format_tokens(reasoning)),
-            dim,
+            Style::new().fg(theme.usage_reasoning),
         ));
     }
     if spans.is_empty() {
@@ -230,7 +230,7 @@ pub fn ctx_segment(window: u64, tokens: u64, theme: &Theme) -> Option<Line<'stat
     } else if pct > 70 {
         Style::new().fg(theme.warning)
     } else {
-        Style::new().fg(theme.dim)
+        Style::new().fg(theme.usage_ctx)
     };
     Some(Line::from(Span::styled(format!("ctx {pct}%"), style)))
 }
@@ -352,9 +352,9 @@ mod tests {
         // >70% warning
         let line = ctx_segment(1000, 750, &theme).unwrap();
         assert_eq!(line.spans[0].style.fg, Some(theme.warning));
-        // 正常 dim
+        // 正常态:usage_ctx 彩色(不再用 dim)
         let line = ctx_segment(1000, 500, &theme).unwrap();
-        assert_eq!(line.spans[0].style.fg, Some(theme.dim));
+        assert_eq!(line.spans[0].style.fg, Some(theme.usage_ctx));
         // 未知窗口/无用量:不显示
         assert!(ctx_segment(0, 100, &theme).is_none());
         assert!(ctx_segment(1000, 0, &theme).is_none());
