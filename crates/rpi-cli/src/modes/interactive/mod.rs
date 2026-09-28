@@ -68,6 +68,8 @@ pub async fn run_interactive_mode(
         session,
         manager_holder,
         compaction_config,
+        subagent_registry,
+        subagent_factory,
         ..
     } = built;
     let (theme, theme_name) = resolve_theme(theme_override.as_deref());
@@ -109,11 +111,14 @@ pub async fn run_interactive_mode(
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let resolver = rpi_core::create_model_resolver_from_config(Some(&cwd), home.as_deref());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(session.clone());
     let ctx = InteractiveCtx {
-        session: &session,
+        session: &router,
+        subagent_factory: subagent_factory.as_ref(),
         manager_holder: Some(&manager_holder),
         resolver: &resolver,
         compaction_config: &compaction_config,
+        subagent_registry: subagent_registry.as_ref(),
         ui_tx: ui.tx.clone(),
     };
 
@@ -143,7 +148,7 @@ async fn event_loop(
     key_rx: &mut mpsc::UnboundedReceiver<Key>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
 ) -> Result<(), String> {
-    let partial = ctx.session.agent().partial_message();
+    let partial = ctx.session.current().agent().partial_message();
     render_tick(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
 
     loop {
@@ -155,7 +160,7 @@ async fn event_loop(
                 app.commit_lines(&pending).map_err(|e| e.to_string())?;
             }
             let transcript = full_redraw_lines(state);
-            let partial = ctx.session.agent().partial_message();
+            let partial = ctx.session.current().agent().partial_message();
             let cap = preview_cap_for(state)
                 .min(usize::from(app.viewport_height_cap().saturating_sub(8)));
             let frame = view::viewport(
@@ -170,7 +175,12 @@ async fn event_loop(
             continue;
         }
 
-        let partial = ctx.session.agent().partial_message();
+        // 后台 subagent 计数(footer 状态段;活跃时驱动 spinner 帧)
+        state.subagent_active = ctx
+            .subagent_registry
+            .map(|registry| registry.active_count())
+            .unwrap_or(0);
+        let partial = ctx.session.current().agent().partial_message();
         render_tick(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
 
         tokio::select! {
@@ -184,9 +194,10 @@ async fn event_loop(
                 let Some(event) = event else { break };
                 handlers::handle_ui_event(ctx, state, event).await;
             }
-            // busy 时驱动 spinner 动画(idle 时 pending 永不就绪,零开销)
+            // busy 或有后台 subagent 时驱动 spinner 动画(两者皆空闲时
+            // pending 永不就绪,零开销;14 文档 §4.3 进度可见)
             _ = async {
-                if state.status.is_busy() {
+                if state.status.is_busy() || state.subagent_active > 0 {
                     tokio::time::sleep(SPINNER_INTERVAL).await;
                 } else {
                     futures::future::pending::<()>().await;
@@ -199,8 +210,17 @@ async fn event_loop(
         state.width = app.width();
     }
 
-    ctx.session.abort();
-    ctx.session.wait_idle().await;
+    // 退出清理:停掉全部存活后台 subagent(抑制完成通知);当前会话与主
+    // 会话(平行会话可能仍在 run)一并中止
+    if let Some(registry) = ctx.subagent_registry {
+        registry.abort_all();
+    }
+    ctx.session.current().abort();
+    if !ctx.session.is_main() {
+        ctx.session.main().abort();
+        ctx.session.main().wait_idle().await;
+    }
+    ctx.session.current().wait_idle().await;
     Ok(())
 }
 
@@ -287,7 +307,7 @@ fn commit_startup(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
         state.width,
     ));
     let mut extensions: Vec<String> = Vec::new();
-    for diagnostic in ctx.session.extension_diagnostics() {
+    for diagnostic in ctx.session.main().extension_diagnostics() {
         extensions.push(format!(
             "{} (加载失败: {})",
             diagnostic.extension, diagnostic.message

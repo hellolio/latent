@@ -188,6 +188,36 @@ fn convert_messages(
                 }
                 index += 1;
             }
+            M::Developer { content, .. } => {
+                // Anthropic API 没有中途 developer/system 角色:降级为 user 文本
+                // (请求级就地提醒);与前一条 user 消息合并,避免连续同角色被拒
+                let text = content.trim().to_string();
+                if !text.is_empty() {
+                    let merged = match params.last_mut() {
+                        Some(last) if last.get("role").and_then(Value::as_str) == Some("user") => {
+                            match last.get_mut("content") {
+                                Some(Value::String(prev)) => {
+                                    *last.get_mut("content").unwrap() = json!([
+                                        {"type": "text", "text": prev.clone()},
+                                        {"type": "text", "text": text.clone()},
+                                    ]);
+                                    true
+                                }
+                                Some(Value::Array(blocks)) => {
+                                    blocks.push(json!({"type": "text", "text": text.clone()}));
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    };
+                    if !merged {
+                        params.push(json!({"role": "user", "content": text}));
+                    }
+                }
+                index += 1;
+            }
             M::User { content, .. } => {
                 match content {
                     crate::types::UserContent::Text(text) => {
@@ -994,6 +1024,36 @@ mod tests {
         let blocks = out[1]["content"].as_array().unwrap();
         assert_eq!(blocks[0]["type"], "thinking");
         assert_eq!(blocks[0]["signature"], "");
+    }
+
+    #[test]
+    fn developer_message_degrades_to_user_and_merges() {
+        // Anthropic 无中途 developer 角色:降级为 user 文本;与前一条 user
+        // 合并避免连续同角色;独立时也是 user 角色
+        let messages = vec![
+            Message::user_text("q"),
+            Message::developer("mode reminder"),
+        ];
+        let out = convert_messages(&messages, None, false);
+        assert_eq!(out.len(), 1, "应合并进前一条 user");
+        let blocks = out[0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "q");
+        assert_eq!(blocks[1]["text"], "mode reminder");
+
+        let mut assistant = AssistantMessage::pending(&Model::minimal(
+            "m", "anthropic-messages", "anthropic",
+        ));
+        assistant.content = vec![ContentBlock::text("a")];
+        let messages = vec![
+            Message::user_text("q"),
+            Message::assistant(assistant),
+            Message::developer("mode reminder"),
+        ];
+        let out = convert_messages(&messages, None, false);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[2]["role"], "user");
+        assert_eq!(out[2]["content"], "mode reminder");
     }
 
     #[test]

@@ -67,6 +67,86 @@ pub struct ApprovalHooks {
     subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>>,
 }
 
+/// 模式节 hooks(13 文档 §8.2 的迁移形态):把可切换的模式提示词作为请求级
+/// `Message::Developer` 追加在**每请求消息数组末尾**——系统提示词与工具数组
+/// 随模式恒定(保 KV 缓存前缀命中),模式切换只影响尾部一条小消息。
+/// `mode_text` cell 由 `AgentSession::apply_mode` 运行期写(None = 不追加);
+/// 子 agent 的 hooks 不包本层,避免父模式提示词误导子会话。
+pub struct ModeHooks {
+    inner: Arc<dyn LoopHooks>,
+    mode_text: Arc<Mutex<Option<String>>>,
+}
+
+impl ModeHooks {
+    pub fn new(inner: Arc<dyn LoopHooks>, mode_text: Arc<Mutex<Option<String>>>) -> Self {
+        ModeHooks { inner, mode_text }
+    }
+}
+
+#[async_trait]
+impl LoopHooks for ModeHooks {
+    fn convert_to_llm(&self, msgs: &[AgentMessage]) -> Vec<rpi_ai::Message> {
+        let mut out = self.inner.convert_to_llm(msgs);
+        if let Some(text) = self.mode_text.lock().unwrap().clone() {
+            // 插在最后一条用户输入之前(倒数第二):模型最后看到的是用户的
+            // 最新请求(保持专注);工具轮次(末尾是 toolResult)不受影响,
+            // 不破坏 tool_use→tool_result 相邻约束。位置随最新用户消息移动,
+            // 每轮缓存命中覆盖到上一轮交换之前 —— 已知情接受的取舍
+            let pos = out
+                .iter()
+                .rposition(|message| matches!(message, rpi_ai::Message::User { .. }))
+                .unwrap_or(out.len());
+            out.insert(pos, rpi_ai::Message::developer(text));
+        }
+        out
+    }
+
+    async fn transform_context(&self, msgs: Vec<AgentMessage>) -> Vec<AgentMessage> {
+        self.inner.transform_context(msgs).await
+    }
+
+    async fn get_api_key(&self, provider: &str) -> Option<String> {
+        self.inner.get_api_key(provider).await
+    }
+
+    async fn prepare_request(
+        &self,
+        model: &rpi_ai::Model,
+        thinking: Option<rpi_ai::ThinkingLevel>,
+    ) -> Option<rpi_agent::RequestUpdate> {
+        self.inner.prepare_request(model, thinking).await
+    }
+
+    async fn prepare_next_turn(
+        &self,
+        ctx: rpi_agent::TurnCtx,
+    ) -> Option<rpi_agent::TurnUpdate> {
+        self.inner.prepare_next_turn(ctx).await
+    }
+
+    async fn finish_turn(&self, ctx: rpi_agent::TurnCtx) -> Option<rpi_agent::TurnDecision> {
+        self.inner.finish_turn(ctx).await
+    }
+
+    async fn before_tool_call(
+        &self,
+        ctx: rpi_agent::ToolCallCtx,
+    ) -> Option<rpi_agent::ToolBlock> {
+        self.inner.before_tool_call(ctx).await
+    }
+
+    async fn after_tool_call(
+        &self,
+        ctx: rpi_agent::ToolResultCtx,
+    ) -> Option<rpi_agent::ToolPatch> {
+        self.inner.after_tool_call(ctx).await
+    }
+
+    fn tool_execution(&self) -> rpi_agent::ToolExecution {
+        self.inner.tool_execution()
+    }
+}
+
 impl ApprovalHooks {
     pub fn new(
         inner: Arc<dyn LoopHooks>,

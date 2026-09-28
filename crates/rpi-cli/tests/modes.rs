@@ -31,6 +31,7 @@ async fn build_with(provider: Arc<ScriptedProvider>) -> rpi_cli::assembly::Built
         default_session_mode: Default::default(),
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
@@ -566,6 +567,7 @@ async fn build_with_tools(
         default_session_mode: Default::default(),
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
@@ -809,6 +811,7 @@ async fn active_tools_narrows_installed_set() {
         default_session_mode: Default::default(),
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
@@ -999,6 +1002,7 @@ async fn bash_command_executes_through_sandbox_hook_in_confirm_mode() {
         default_session_mode: rpi_core::SessionMode::Confirm,
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: Some(Arc::new(rpi_core::HeadlessApprovalUi {
             policy: rpi_core::HeadlessApproval::AutoApprove,
         })),
@@ -1045,6 +1049,7 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         default_session_mode: rpi_core::SessionMode::Confirm,
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
@@ -1082,6 +1087,7 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         default_session_mode: rpi_core::SessionMode::Plan,
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
@@ -1112,23 +1118,36 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         default_session_mode: rpi_core::SessionMode::Plan,
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
     .await
     .expect("fresh");
     assert_eq!(fresh.session.mode(), rpi_core::SessionMode::Plan);
-    // Plan 模式系统提示词带 <mode> 节(sections 状态含 mode 节)
-    let sections = fresh.session.system_prompt_sections();
+    // 模式提示词已迁出系统提示词(改为每请求末尾 Developer 消息):
+    // sections 不含 mode 节,且切换模式不重建系统提示词、不过滤工具集
+    // (tools 数组恒定保 KV 缓存前缀命中)
+    let sections_before = fresh.session.system_prompt_sections();
+    let tool_count_before = fresh.session.agent().state_snapshot().tool_count;
     assert!(
-        sections.contains_key("mode"),
-        "Plan 模式应注入 <mode> 提示词节"
+        !sections_before.contains_key("mode"),
+        "模式节不应进系统提示词"
     );
-    // 切到 Confirm 后 mode 节移除
-    fresh.session.set_mode(rpi_core::SessionMode::Confirm).await.unwrap();
-    assert!(
-        !fresh.session.system_prompt_sections().contains_key("mode"),
-        "切出 Plan 后 <mode> 节应移除"
+    fresh
+        .session
+        .set_mode(rpi_core::SessionMode::Confirm)
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh.session.system_prompt_sections(),
+        sections_before,
+        "切模式不重建系统提示词"
+    );
+    assert_eq!(
+        fresh.session.agent().state_snapshot().tool_count,
+        tool_count_before,
+        "切模式不过滤工具集"
     );
 
     let _ = entries_after_resume;

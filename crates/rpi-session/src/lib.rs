@@ -138,13 +138,46 @@ mod tests {
     }
 
     #[test]
+    fn tagged_session_file_is_excluded_from_continue() {
+        let dir = std::env::temp_dir().join(format!(
+            "rpi-session-tag-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let cwd = "/Users/kin/Documents/10source/rpi";
+        // 主会话 + 两个带 tag 的子会话(子会话更新时间更晚)
+        let _main = create_session_in_dir(&dir, cwd, None, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let child_a = create_session_in_dir(&dir, cwd, None, Some("abc12345")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let child_b = create_session_in_dir(&dir, cwd, None, Some("reviewer")).unwrap();
+
+        let name_a = child_a.file_path().unwrap().file_name().unwrap().to_string_lossy().to_string();
+        let name_b = child_b.file_path().unwrap().file_name().unwrap().to_string_lossy().to_string();
+        assert!(name_a.contains("__abc12345__"), "{name_a}");
+        assert!(name_b.contains("__reviewer__"), "{name_b}");
+
+        // --continue 只选主会话(带 tag 的子会话文件被排除)
+        let latest = find_latest_session_file(&dir, Some(cwd)).unwrap();
+        let latest_name = latest.file_name().unwrap().to_string_lossy().to_string();
+        assert!(!latest_name.contains("__abc12345__") && !latest_name.contains("__reviewer__"), "{latest_name}");
+        // 无 cwd 过滤同样排除
+        let latest_any = find_latest_session_file(&dir, None).unwrap();
+        assert!(
+            !latest_any.file_name().unwrap().to_string_lossy().contains("__reviewer__"),
+            "{}",
+            latest_any.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn create_session_in_dir_uses_project_prefix_filename() {
         let dir = std::env::temp_dir().join(format!(
             "rpi-session-prefix-{}",
             uuid::Uuid::now_v7().simple()
         ));
         let cwd = "/Users/kin/Documents/10source/rpi";
-        let session = create_session_in_dir(&dir, cwd, None).unwrap();
+        let session = create_session_in_dir(&dir, cwd, None, None).unwrap();
         let file_name = session
             .file_path()
             .unwrap()

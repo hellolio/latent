@@ -61,6 +61,7 @@ pub async fn build_bare_session(
         default_session_mode: settings.session_mode,
         sandbox: settings.sandbox,
         approval: settings.approval,
+        subagent_async_approval: settings.subagent_async_approval,
         approval_ui,
         rpc_approval,
     })

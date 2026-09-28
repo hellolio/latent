@@ -136,7 +136,7 @@ async fn build_session(
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
-        mode_tool_ceiling: None,
+        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -312,7 +312,7 @@ async fn overflow_recovery_trims_and_retries() {
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
-        mode_tool_ceiling: None,
+        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -392,7 +392,7 @@ async fn extension_registered_tool_joins_session() {
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
-        mode_tool_ceiling: None,
+        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -487,7 +487,7 @@ async fn overflow_recovery_uses_unified_compactor() {
         compactor: Some(compactor.clone()),
         subscribers: None,
         permission: None,
-        mode_tool_ceiling: None,
+        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -551,7 +551,7 @@ async fn auto_compact_triggers_at_threshold_after_run() {
         compactor: Some(compactor.clone()),
         subscribers: None,
         permission: None,
-        mode_tool_ceiling: None,
+        mode_section_cell: None,
     })
     .await
     .unwrap();

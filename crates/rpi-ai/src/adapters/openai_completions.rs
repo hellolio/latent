@@ -263,6 +263,15 @@ fn convert_messages(model: &Model, messages: &[Message], compat: &ResolvedCompat
                 last_role = Some("system");
                 index += 1;
             }
+            Message::Developer { content, .. } => {
+                // 可切换模式节等请求级补充指令:保持在原位(消息数组末尾),
+                // reasoning 模型用 developer 角色,否则降级 system
+                if !content.is_empty() {
+                    params.push(json!({"role": instruction_role, "content": content}));
+                }
+                last_role = Some("system");
+                index += 1;
+            }
             Message::User { content, .. } => {
                 // 部分 provider 不允许 user 紧跟 tool 结果:插入合成 assistant 桥接
                 if compat.requires_assistant_after_tool_result && last_role == Some("toolResult") {
@@ -1092,6 +1101,26 @@ impl Default for OpenAICompletionsAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn developer_message_maps_to_instruction_role() {
+        // reasoning 模型 → developer 角色;非 reasoning → 降级 system
+        // 非 reasoning 模型 → 降级 system
+        let plain = Model::minimal("m", "openai-completions", "openai");
+        let compat = resolve_compat(&plain);
+        let out = convert_messages(&plain, &[Message::developer("mode reminder")], &compat);
+        assert_eq!(out[0]["role"], "system");
+
+        // reasoning 模型且 provider 支持 developer 角色 → developer
+        let reasoning = Model {
+            reasoning: true,
+            ..plain.clone()
+        };
+        let compat = resolve_compat(&reasoning);
+        let out = convert_messages(&reasoning, &[Message::developer("mode reminder")], &compat);
+        assert_eq!(out[0]["role"], "developer");
+        assert_eq!(out[0]["content"], "mode reminder");
+    }
 
     #[test]
     fn maps_finish_reasons() {

@@ -11,6 +11,7 @@ pub mod model;
 pub mod permission;
 pub mod retry;
 pub mod session;
+pub mod subagent;
 pub mod system_prompt;
 
 pub use config::{create_model_resolver_from_config, load_default_model_selection, load_theme_setting};
@@ -22,16 +23,22 @@ pub use extensions::{
 };
 pub use model::{create_model_resolver, default_model_for, ModelResolver};
 pub use permission::{
-    classify_tool, mode_baseline_tools, normalize_command, policy_for_mode, ApprovalDecision,
-    ApprovalHooks, ApprovalKey, ApprovalReason, ApprovalRequest, ApprovalUi, ApprovalRules,
-    HeadlessApproval, HeadlessApprovalUi, PermissionEngine, SandboxConfig, SandboxPolicy,
-    SessionMode, ToolRiskClass, Verdict,
+    classify_tool, mode_baseline_tools, mode_section, normalize_command, policy_for_mode,
+    ApprovalDecision, ApprovalHooks, ApprovalKey, ApprovalReason, ApprovalRequest, ApprovalUi,
+    ApprovalRules, HeadlessApproval, HeadlessApprovalUi, ModeHooks, PermissionEngine, SandboxConfig,
+    SandboxPolicy, SessionMode, ToolRiskClass, Verdict,
 };
 pub use retry::{create_retrying_provider, RetryHooks};
 pub use session::{
     create_agent_session, create_session_retry_hooks, AgentSession, AgentSessionConfig,
     AgentSessionEvent, ContextCompactor, CoreError, PromptOutcome, SessionSharedSubscriber,
-    SessionSink, SessionSubscriber,
+    SessionSink, SessionSubscriber, create_session_persistence_subscriber,
+};
+pub use subagent::{
+    discover_agent_defs, run_child, AgentDef, ChildOutcome, ChildSpec, RunGuard, RunStatus,
+    ChildStore, ChildStoreFactory, SubagentDeps, SubagentRegistry, SubagentSessionFactory,
+    SubagentTool, DEFAULT_TIMEOUT_MS, MAX_ACTIVE_ASYNC, MAX_OUTPUT_CHARS, MAX_RUN_HISTORY,
+    MAX_SYNC_CONCURRENCY, TOOL_NAME,
 };
 pub use system_prompt::{
     build_system_prompt_sections, build_system_prompt_state, sections_to_text,

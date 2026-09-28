@@ -73,6 +73,10 @@ pub enum ToolRiskClass {
 pub fn classify_tool(name: &str) -> ToolRiskClass {
     match name {
         "read" | "grep" | "find" | "ls" => ToolRiskClass::ReadOnly,
+        // subagent 引擎封壳:派发本身无副作用,且子 agent 的每次工具调用仍过
+        // 同一权限引擎(Plan 模式下子调用照常被只读约束),故按只读类放行 ——
+        // 否则 Plan 模式会把它当 External 工具整体拒绝
+        "subagent" => ToolRiskClass::ReadOnly,
         "edit" | "write" => ToolRiskClass::FileWrite,
         "bash" | "powershell" => ToolRiskClass::Shell,
         _ => ToolRiskClass::External,
@@ -270,6 +274,16 @@ When the plan is final, output it inside a single block:\n\
 </proposed_plan>\n\
 After the plan block, stop and end your turn. The user will review it and switch modes when ready.";
 
+/// 模式 → 请求级补充指令(独立 Developer 消息,追加在每请求消息数组末尾;
+/// 不并入系统提示词 —— 系统提示词与工具数组随模式恒定,保 KV 缓存前缀命中。
+/// None = 该模式无补充指令)。新增可切换模式节时在此扩展。
+pub fn mode_section(mode: SessionMode) -> Option<String> {
+    match mode {
+        SessionMode::Plan => Some(PLAN_MODE_SECTION.to_string()),
+        SessionMode::Confirm | SessionMode::FullAccess => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +313,7 @@ mod tests {
         assert_eq!(classify_tool("edit"), ToolRiskClass::FileWrite);
         assert_eq!(classify_tool("bash"), ToolRiskClass::Shell);
         assert_eq!(classify_tool("powershell"), ToolRiskClass::Shell);
+        assert_eq!(classify_tool("subagent"), ToolRiskClass::ReadOnly);
         assert_eq!(classify_tool("mcp__x__y"), ToolRiskClass::External);
         assert_eq!(classify_tool("unknown"), ToolRiskClass::External);
     }

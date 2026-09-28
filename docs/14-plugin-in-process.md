@@ -87,7 +87,7 @@ let result = tokio::time::timeout(timeout, child.prompt(task)).await;
 
 ### 4.1 工具面
 
-单一 `task` 工具(名字可再议),参数:
+单一 `subagent` 工具(2026-09-28 实现时由 `task` 改名;settings `tools` 白名单条目同名),参数:
 
 | 参数 | 类型 | 说明 |
 |---|---|---|

@@ -19,14 +19,65 @@ use super::usage::{context_tokens_of, usage_block};
 use super::view;
 
 /// 键盘/命令处理共用的会话上下文(状态 + TUI 之外的全部依赖)。
+/// 会话路由(/subagent 平行会话):`current()` 恒返回当前激活会话,主会话
+/// 为初值。切换只换指针 —— 各会话上下文完全隔离,平行会话按名缓存
+/// (切走再切回,上下文保留)。
+pub struct SessionRouter {
+    main: Arc<rpi_core::AgentSession>,
+    sessions: std::sync::Mutex<std::collections::HashMap<String, Arc<rpi_core::AgentSession>>>,
+    current: std::sync::RwLock<Arc<rpi_core::AgentSession>>,
+    active_agent: std::sync::Mutex<Option<String>>,
+}
+
+impl SessionRouter {
+    pub fn new(main: Arc<rpi_core::AgentSession>) -> Self {
+        SessionRouter {
+            current: std::sync::RwLock::new(main.clone()),
+            main,
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            active_agent: std::sync::Mutex::new(None),
+        }
+    }
+    pub fn current(&self) -> Arc<rpi_core::AgentSession> {
+        self.current.read().unwrap().clone()
+    }
+    pub fn main(&self) -> Arc<rpi_core::AgentSession> {
+        self.main.clone()
+    }
+    pub fn is_main(&self) -> bool {
+        self.active_agent.lock().unwrap().is_none()
+    }
+    pub fn active_agent(&self) -> Option<String> {
+        self.active_agent.lock().unwrap().clone()
+    }
+    pub fn cached(&self, name: &str) -> Option<Arc<rpi_core::AgentSession>> {
+        self.sessions.lock().unwrap().get(name).cloned()
+    }
+    pub fn switch(&self, name: Option<String>, session: Arc<rpi_core::AgentSession>) {
+        if let Some(name) = &name {
+            self.sessions
+                .lock()
+                .unwrap()
+                .insert(name.clone(), session.clone());
+        }
+        *self.active_agent.lock().unwrap() = name;
+        *self.current.write().unwrap() = session;
+    }
+}
+
 pub struct InteractiveCtx<'a> {
-    pub session: &'a Arc<rpi_core::AgentSession>,
+    /// 会话路由:经 `current()` 访问当前激活会话(主会话或平行子 agent 会话)
+    pub session: &'a SessionRouter,
+    /// /subagent 平行会话工厂(与主会话同源依赖;None = 未装配)
+    pub subagent_factory: Option<&'a Arc<rpi_core::SubagentSessionFactory>>,
     /// None = 内存会话(无 SessionManager);经 holder 读取当前值(/new 可切换)
     pub manager_holder: Option<&'a crate::assembly::SessionManagerHolder>,
     /// `/model` 的候选与解析(models.json + 内置 provider 默认表)
     pub resolver: &'a ModelResolver,
     /// 装配生效的压缩配置(/session 展示)
     pub compaction_config: &'a crate::assembly::CompactionConfig,
+    /// 后台 subagent 运行注册表(footer 计数与 /new、退出清理;None = 未装配)
+    pub subagent_registry: Option<&'a Arc<rpi_core::SubagentRegistry>>,
     /// prompt 错误兜底回 UI 通道(事件流之外的装配/并发错误)
     pub ui_tx: mpsc::UnboundedSender<UiEvent>,
 }
@@ -98,7 +149,7 @@ pub async fn handle_key(
     // Shift+Tab 循环 Plan → Confirm → FullAccess → Plan(13 文档 §10.2)
     if key == rpi_tui::Key::BackTab {
         state.last_ctrl_c = None;
-        let next = ctx.session.mode().next();
+        let next = ctx.session.current().mode().next();
         return cycle_mode(ctx, state, next).await;
     }
 
@@ -120,8 +171,8 @@ pub async fn handle_key(
             false
         }
         rpi_tui::Key::Ctrl('c') => {
-            if ctx.session.agent().is_streaming() {
-                ctx.session.abort();
+            if ctx.session.current().agent().is_streaming() {
+                ctx.session.current().abort();
                 state.status = Status::Aborted;
                 state.last_ctrl_c = None;
                 false
@@ -144,8 +195,8 @@ pub async fn handle_key(
         }
         rpi_tui::Key::Esc => {
             state.last_ctrl_c = None;
-            if ctx.session.agent().is_streaming() {
-                ctx.session.abort();
+            if ctx.session.current().agent().is_streaming() {
+                ctx.session.current().abort();
                 state.status = Status::Aborted;
             }
             false
@@ -217,9 +268,14 @@ async fn handle_select_key(
                     SelectKind::Select(responder) => {
                         let _ = responder.send(Some(index));
                     }
+                    SelectKind::SubagentAgent { defs } => {
+                        if let Some(def) = defs.get(index) {
+                            switch_to_subagent(ctx, state, def.clone()).await;
+                        }
+                    }
                     SelectKind::Model { models } => {
                         if let Some(model) = models.get(index) {
-                            ctx.session.set_model(model.clone()).await;
+                            ctx.session.current().set_model(model.clone()).await;
                             refresh_footer(ctx, state);
                             state.status = Status::Idle;
                             state.commit_ephemeral(warning_line_theme(
@@ -231,7 +287,7 @@ async fn handle_select_key(
                     SelectKind::Thinking => {
                         if let Some(name) = thinking_level_options().get(index) {
                             let level = crate::assembly::parse_thinking_level(name);
-                            ctx.session.set_thinking_level(level).await;
+                            ctx.session.current().set_thinking_level(level).await;
                             refresh_footer(ctx, state);
                             state.status = Status::Idle;
                         }
@@ -266,6 +322,7 @@ async fn handle_select_key(
                     SelectKind::Select(responder) => {
                         let _ = responder.send(None);
                     }
+                    SelectKind::SubagentAgent { .. } => {}
                     SelectKind::Model { .. } | SelectKind::Thinking => {}
                     SelectKind::Theme { .. } => {}
                     SelectKind::Approval { responder } => {
@@ -322,7 +379,7 @@ async fn submit_input(
             state.status = Status::Thinking;
             state.stream_text.clear();
             state.pending_thinking = None;
-            let session = ctx.session.clone();
+            let session = ctx.session.current();
             let ui_tx = ctx.ui_tx.clone();
             // prompt 任务在后台跑;事件经订阅者回流上屏,stdin 保持可响应
             // (run 期间的输入经 session.prompt 自动转 steer)
@@ -355,7 +412,7 @@ async fn cycle_mode(
     state: &mut InteractiveState,
     mode: rpi_core::SessionMode,
 ) -> bool {
-    match ctx.session.set_mode(mode).await {
+    match ctx.session.current().set_mode(mode).await {
         Ok(()) => {
             // 不打转录提示:footer 状态栏已显示当前模式标记
             refresh_footer(ctx, state);
@@ -369,6 +426,56 @@ async fn cycle_mode(
         }
     }
     false
+}
+
+/// 切换到平行子 agent 会话:已存在(按名缓存)直接切回,否则现场创建并挂
+/// TUI 事件订阅(转录/审批照常渲染)。
+async fn switch_to_subagent(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    def: rpi_core::AgentDef,
+) {
+    let Some(factory) = ctx.subagent_factory else {
+        return;
+    };
+    if let Some(existing) = ctx.session.cached(&def.name) {
+        ctx.session.switch(Some(def.name.clone()), existing);
+        state.active_agent = Some(def.name.clone());
+        refresh_footer(ctx, state);
+        state.commit_line(plain_dim(
+            &format!("切回 subagent: {}(上下文保留)", def.name),
+            &state.theme,
+        ));
+        return;
+    }
+    let Some(fallback_model) = ctx.session.current().agent().state_snapshot().model else {
+        state.commit_ephemeral(view::error_line("主会话无模型,无法创建子 agent 会话", &state.theme));
+        return;
+    };
+    let subscribers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    match factory.create(&def, fallback_model, subscribers).await {
+        Ok(session) => {
+            session.subscribe(Arc::new(crate::modes::interactive::events::SessionToUiSubscriber {
+                tx: ctx.ui_tx.clone(),
+            }));
+            ctx.session.switch(Some(def.name.clone()), session);
+            state.active_agent = Some(def.name.clone());
+            refresh_footer(ctx, state);
+            state.commit_line(plain_dim(
+                &format!(
+                    "已切换到 subagent: {}(上下文与主会话隔离;/subagent off 返回)",
+                    def.name
+                ),
+                &state.theme,
+            ));
+        }
+        Err(error) => {
+            state.commit_ephemeral(view::error_line(
+                &format!("subagent 会话创建失败: {error}"),
+                &state.theme,
+            ));
+        }
+    }
 }
 
 /// 斜杠命令执行(解析在 slash.rs)。
@@ -392,7 +499,7 @@ pub async fn execute_command(
         slash::SlashAction::Compact { arg } => {
             // 流式期间压缩会让 SessionCompactor 先落盘 Compaction entry、
             // 随后 set_messages 失败;摘要 LLM 调用内联 await 会冻结事件循环
-            if ctx.session.agent().is_streaming() {
+            if ctx.session.current().agent().is_streaming() {
                 state.commit_ephemeral(view::error_line(
                     "run 进行中不能压缩;等待 run 结束或 Esc 中止后再试",
                     &state.theme,
@@ -407,7 +514,7 @@ pub async fn execute_command(
                 ));
             }
             state.status = Status::Compacting;
-            let session = ctx.session.clone();
+            let session = ctx.session.current();
             let ui_tx = ctx.ui_tx.clone();
             tokio::spawn(async move {
                 let _ = ui_tx.send(UiEvent::CompactDone(session.compact().await));
@@ -426,7 +533,7 @@ pub async fn execute_command(
                 }
             },
             None => {
-                let mode = ctx.session.mode();
+                let mode = ctx.session.current().mode();
                 state.commit_ephemeral(warning_line_theme(
                     &format!(
                         "当前模式:{}(plan 只读 · confirm 确认 · full-access 全自动;/mode <模式> 或 Shift+Tab 切换)",
@@ -436,17 +543,102 @@ pub async fn execute_command(
                 ));
             }
         },
+        slash::SlashAction::Subagent { arg } => match arg.as_deref() {
+            Some("off") => {
+                if ctx.session.is_main() {
+                    state.commit_ephemeral(warning_line_theme("当前已是主会话", &state.theme));
+                } else {
+                    let name = ctx.session.active_agent();
+                    ctx.session.switch(None, ctx.session.main());
+                    state.active_agent = None;
+                    refresh_footer(ctx, state);
+                    state.commit_line(plain_dim(
+                        &format!(
+                            "已切回主会话({} 的上下文保留,可再次 /subagent 切回)",
+                            name.as_deref().unwrap_or("?")
+                        ),
+                        &state.theme,
+                    ));
+                }
+            }
+            Some(other) => {
+                state.commit_ephemeral(view::error_line(
+                    &format!("未知参数 /subagent {other}(off = 回主会话;无参数 = 选择 subagent)"),
+                    &state.theme,
+                ));
+            }
+            None => {
+                if ctx.session.current().agent().is_streaming() {
+                    state.commit_ephemeral(view::error_line(
+                        "run 进行中不能切换;等待 run 结束或 Esc 中止后再试",
+                        &state.theme,
+                    ));
+                    return false;
+                }
+                let Some(factory) = ctx.subagent_factory else {
+                    state.commit_ephemeral(view::error_line("subagent 会话工厂未装配", &state.theme));
+                    return false;
+                };
+                let defs = factory.discover();
+                if defs.is_empty() {
+                    state.commit_ephemeral(view::error_line(
+                        "没有可用的 subagent 定义(.rpi/agents/*.md)",
+                        &state.theme,
+                    ));
+                    return false;
+                }
+                let mut list = SelectList::new(
+                    defs.iter()
+                        .map(|d| {
+                            if d.description.is_empty() {
+                                d.name.clone()
+                            } else {
+                                format!("{} — {}", d.name, d.description)
+                            }
+                        })
+                        .collect(),
+                );
+                if let Some(current) = ctx.session.active_agent() {
+                    if let Some(index) = defs.iter().position(|d| d.name == current) {
+                        list.selected = index;
+                    }
+                }
+                state.select = Some(SelectRequest {
+                    prompt: "选择 subagent(平行会话,上下文与主会话完全隔离)".into(),
+                    list,
+                    kind: SelectKind::SubagentAgent { defs },
+                });
+            }
+        },
         slash::SlashAction::New => {
             // 流式期间切换会让进行中的 run 写入错误的 session 文件
-            if ctx.session.agent().is_streaming() {
+            if ctx.session.current().agent().is_streaming() {
                 state.commit_ephemeral(view::error_line(
                     "run 进行中不能新建会话;等待 run 结束或 Esc 中止后再试",
                     &state.theme,
                 ));
                 return false;
             }
+            // 平行子 agent 会话:纯内存,无文件,新建 = 清空其转录
+            if !ctx.session.is_main() {
+                let _ = ctx.session.current().agent().reset();
+                state.reset_for_new_session();
+                refresh_footer(ctx, state);
+                state.commit_line(plain_dim(
+                    &format!(
+                        "new session (subagent {} 内存会话,无文件)",
+                        ctx.session.active_agent().as_deref().unwrap_or("?")
+                    ),
+                    &state.theme,
+                ));
+                return false;
+            }
+            // 旧会话的后台 subagent 一并终止(抑制完成通知,不唤醒新会话)
+            if let Some(registry) = ctx.subagent_registry {
+                registry.abort_all();
+            }
             match ctx.manager_holder {
-                Some(holder) => match crate::assembly::switch_new_session(ctx.session, holder)
+                Some(holder) => match crate::assembly::switch_new_session(&ctx.session.current(), holder)
                     .await
                 {
                     Ok(path) => {
@@ -479,7 +671,7 @@ pub async fn execute_command(
         slash::SlashAction::Model { arg } => match arg {
             Some(spec) => match ctx.resolver.resolve(&spec) {
                 Ok(model) => {
-                    ctx.session.set_model(model).await;
+                    ctx.session.current().set_model(model).await;
                     refresh_footer(ctx, state);
                     state.status = Status::Idle;
                 }
@@ -507,7 +699,7 @@ pub async fn execute_command(
         slash::SlashAction::Thinking { arg } => match arg {
             Some(name) => match parse_thinking_input(&name) {
                 Some(level) => {
-                    ctx.session.set_thinking_level(level).await;
+                    ctx.session.current().set_thinking_level(level).await;
                     refresh_footer(ctx, state);
                     state.status = Status::Idle;
                 }
@@ -621,7 +813,7 @@ fn session_info_lines(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> Vec
     lines.push(format!("  thinking: {}", state.thinking_label));
     lines.push(format!(
         "  messages: {}",
-        ctx.session.agent().messages().len()
+        ctx.session.current().agent().messages().len()
     ));
     lines.push(format!(
         "  usage:    {} tok · ${:.6}",
@@ -650,7 +842,7 @@ fn session_info_lines(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> Vec
 
 /// 从 Agent 状态快照刷新 footer 的模型/thinking/窗口字段。
 pub fn refresh_footer(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
-    let snapshot = ctx.session.agent().state_snapshot();
+    let snapshot = ctx.session.current().agent().state_snapshot();
     if let Some(model) = snapshot.model {
         state.model_label = format!("{}/{}", model.provider, model.id);
         state.context_window = model.context_window;
@@ -659,7 +851,7 @@ pub fn refresh_footer(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
         .thinking_level
         .map(|level| level.as_str().to_string())
         .unwrap_or_else(|| "off".into());
-    state.mode_label = ctx.session.mode().label().to_string();
+    state.mode_label = ctx.session.current().mode().label().to_string();
 }
 
 /// /thinking 选择器选项("off" = 关闭,其后为 ThinkingLevel::ALL 顺序)。
@@ -728,7 +920,7 @@ pub async fn handle_ui_event(
         }
         UiEvent::Approval { request, responder } => {
             // 审批 overlay(13 文档 §10.3):原因文案 + 命令/路径详情 + 四决策
-            let mode = ctx.session.mode();
+            let mode = ctx.session.current().mode();
             state.select_queue.push_back(SelectRequest {
                 prompt: format!(
                     "审批 {} · {}\n{}",
@@ -784,6 +976,7 @@ pub async fn handle_ui_event(
                 // `!`(单感叹号):输出注入对话上下文(下一轮可见);`!!` 不注入
                 if let Err(error) = ctx
                     .session
+                    .current()
                     .record_bash_execution(command, output, None)
                     .await
                 {

@@ -38,6 +38,7 @@ async fn built_memory_session() -> crate::assembly::BuiltSession {
         default_session_mode: Default::default(),
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
@@ -48,12 +49,15 @@ async fn built_memory_session() -> crate::assembly::BuiltSession {
 fn ctx_of<'a>(
     built: &'a crate::assembly::BuiltSession,
     resolver: &'a rpi_core::ModelResolver,
+    router: &'a crate::modes::interactive::handlers::SessionRouter,
 ) -> InteractiveCtx<'a> {
     InteractiveCtx {
-        session: &built.session,
+        session: router,
+        subagent_factory: None,
         manager_holder: Some(&built.manager_holder),
         resolver,
         compaction_config: &built.compaction_config,
+        subagent_registry: None,
         ui_tx: {
             let (tx, _rx) = mpsc::unbounded_channel();
             tx
@@ -87,7 +91,8 @@ fn committed_text(state: &InteractiveState) -> String {
 async fn unknown_slash_input_is_local_warning_not_prompt() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     state.editor.set_text("/definitely-not-a-command");
@@ -110,7 +115,8 @@ async fn unknown_slash_input_is_local_warning_not_prompt() {
 async fn submit_resets_status_to_thinking() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     state.editor.set_text("你好");
     handle_key(&ctx, &mut state, Key::Enter).await;
@@ -126,7 +132,8 @@ async fn submit_resets_status_to_thinking() {
 async fn double_ctrl_c_exits_and_single_press_hints() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     let quit = handle_key(&ctx, &mut state, Key::Ctrl('c')).await;
@@ -158,7 +165,8 @@ async fn double_ctrl_c_exits_and_single_press_hints() {
 async fn ctrl_o_toggles_expansion_and_requests_full_redraw() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     assert!(!state.expanded);
@@ -211,7 +219,8 @@ fn assistant_start() -> rpi_agent::AgentEvent {
 async fn thinking_commits_into_transcript_when_text_starts() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     handle_ui_event(&ctx, &mut state, session_event(assistant_start())).await;
@@ -247,7 +256,8 @@ async fn thinking_commits_into_transcript_when_text_starts() {
 async fn assistant_message_finalizes_as_markdown_item() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     handle_ui_event(&ctx, &mut state, session_event(assistant_start())).await;
@@ -286,7 +296,8 @@ async fn assistant_message_finalizes_as_markdown_item() {
 async fn assistant_message_with_tool_call_not_boxed() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     handle_ui_event(&ctx, &mut state, session_event(assistant_start())).await;
@@ -339,7 +350,8 @@ fn error_assistant(message: &str) -> rpi_ai::AssistantMessage {
 async fn turn_end_error_renders_without_usage_line() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     let mut assistant = error_assistant("No API key for provider: anthropic");
     assistant.usage.total_tokens = 0;
@@ -374,7 +386,8 @@ async fn turn_end_error_renders_without_usage_line() {
 async fn turn_end_success_records_usage_and_context() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     let model = rpi_ai::Model::minimal("m", "mock", "mock");
     let mut assistant = rpi_ai::AssistantMessage::pending(&model);
@@ -408,7 +421,8 @@ async fn turn_end_success_records_usage_and_context() {
 async fn auto_retry_end_failure_renders_red() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     handle_ui_event(
         &ctx,
@@ -437,7 +451,8 @@ async fn auto_retry_end_failure_renders_red() {
 async fn tool_result_renders_title_and_collapsed_output() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     handle_ui_event(
@@ -493,7 +508,8 @@ async fn tool_result_renders_title_and_collapsed_output() {
 async fn agent_settled_commits_dangling_tool_title() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     handle_ui_event(
@@ -525,7 +541,8 @@ async fn agent_settled_commits_dangling_tool_title() {
 async fn concurrent_select_requests_queue_and_promote() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     let (tx1, _rx1) = tokio::sync::oneshot::channel();
     let (tx2, _rx2) = tokio::sync::oneshot::channel();
@@ -580,7 +597,8 @@ async fn concurrent_select_requests_queue_and_promote() {
 async fn bash_passthrough_runs_and_injects_context() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     state.editor.set_text("!echo passthrough-ok");
@@ -616,7 +634,8 @@ async fn bash_passthrough_runs_and_injects_context() {
 async fn bash_bang_bang_skips_context_injection() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     state.editor.set_text("!!echo secret");
@@ -665,6 +684,7 @@ async fn replay_renders_thinking_blocks() {
         default_session_mode: Default::default(),
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
@@ -690,7 +710,8 @@ async fn replay_renders_thinking_blocks() {
         .unwrap();
 
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     replay_history(&ctx, &mut state);
     assert!(committed_text(&state).contains("回放中的思考"));
@@ -716,6 +737,7 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
         default_session_mode: Default::default(),
         sandbox: Default::default(),
         approval: Default::default(),
+        subagent_async_approval: Default::default(),
         approval_ui: None,
         rpc_approval: None,
     })
@@ -744,7 +766,8 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
         .unwrap();
 
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     replay_history(&ctx, &mut state);
 
@@ -761,7 +784,8 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
 async fn execute_help_and_session_commit_lines() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     let quit = super::handlers::execute_command(&ctx, &mut state, slash::SlashAction::Help).await;
@@ -779,7 +803,8 @@ async fn execute_help_and_session_commit_lines() {
 async fn execute_thinking_with_arg_updates_footer() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     super::handlers::execute_command(
@@ -818,7 +843,8 @@ async fn execute_thinking_with_arg_updates_footer() {
 async fn execute_model_with_arg_updates_footer() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     super::handlers::execute_command(
@@ -847,7 +873,8 @@ async fn execute_model_with_arg_updates_footer() {
 async fn execute_model_without_arg_opens_selector_at_current_model() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     super::handlers::execute_command(
         &ctx,
@@ -883,7 +910,7 @@ async fn execute_model_without_arg_opens_selector_at_current_model() {
     match request.kind {
         SelectKind::Model { models } => {
             if let Some(model) = models.get(list.selected) {
-                ctx.session.set_model(model.clone()).await;
+                ctx.session.current().set_model(model.clone()).await;
                 super::handlers::refresh_footer(&ctx, &mut state);
             }
         }
@@ -899,7 +926,8 @@ async fn execute_model_without_arg_opens_selector_at_current_model() {
 async fn compact_done_resets_context_estimate_and_reports() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     state.context_tokens = 9000;
     state.status = Status::Compacting;
@@ -991,7 +1019,8 @@ async fn popup_state_with_input(input: &str) -> (crate::assembly::BuiltSession, 
     let built = built_memory_session().await;
     let mut state = test_state();
     for c in input.chars() {
-        handle_key(&ctx_of(&built, &rpi_core::create_model_resolver()), &mut state, Key::Char(c)).await;
+        let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+        handle_key(&ctx_of(&built, &rpi_core::create_model_resolver(), &router), &mut state, Key::Char(c)).await;
     }
     (built, state)
 }
@@ -1011,7 +1040,8 @@ async fn typing_slash_opens_filtered_popup() {
     // 继续输入到无匹配:弹窗退场
     let (built, mut state) = popup_state_with_input("/m").await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     for c in "zz".chars() {
         handle_key(&ctx, &mut state, Key::Char(c)).await;
     }
@@ -1023,7 +1053,8 @@ async fn slash_quit_via_enter_returns_quit_signal() {
     // 回归:submit_input 曾丢弃 execute_command 的退出信号,/quit 静默失效
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     for c in "/quit".chars() {
         handle_key(&ctx, &mut state, Key::Char(c)).await;
@@ -1036,7 +1067,8 @@ async fn slash_quit_via_enter_returns_quit_signal() {
 async fn enter_executes_partial_slash_directly() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     for c in "/think".chars() {
         handle_key(&ctx, &mut state, Key::Char(c)).await;
@@ -1051,7 +1083,8 @@ async fn enter_executes_partial_slash_directly() {
 async fn exact_slash_input_executes_directly_on_enter() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     for c in "/model".chars() {
         handle_key(&ctx, &mut state, Key::Char(c)).await;
@@ -1065,7 +1098,8 @@ async fn exact_slash_input_executes_directly_on_enter() {
 async fn tab_completes_and_esc_dismisses_popup() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
     for c in "/h".chars() {
         handle_key(&ctx, &mut state, Key::Char(c)).await;
@@ -1118,7 +1152,8 @@ fn approval_request() -> rpi_core::ApprovalRequest {
 async fn approval_overlay_digit_keys_resolve_decisions() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     // 审批请求入队 → overlay 渲染(四选项)
@@ -1150,7 +1185,8 @@ async fn approval_overlay_digit_keys_resolve_decisions() {
 async fn approval_overlay_esc_denies_and_ctrl_c_aborts() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1185,7 +1221,8 @@ async fn approval_overlay_esc_denies_and_ctrl_c_aborts() {
 async fn slash_mode_switches_session_mode() {
     let built = built_memory_session().await;
     let resolver = rpi_core::create_model_resolver();
-    let ctx = ctx_of(&built, &resolver);
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
 
     for c in "/mode confirm".chars() {

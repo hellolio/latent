@@ -47,6 +47,11 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "查看/切换会话模式(Shift+Tab 循环)",
     },
     SlashCommand {
+        name: "subagent",
+        args: "[off]",
+        description: "切换到平行子 agent 会话(上下文隔离);off = 回主会话",
+    },
+    SlashCommand {
         name: "session",
         args: "",
         description: "显示会话信息与统计",
@@ -68,6 +73,7 @@ pub enum SlashAction {
     Compact { arg: Option<String> },
     New,
     Mode { arg: Option<String> },
+    Subagent { arg: Option<String> },
     Session,
     Quit,
 }
@@ -79,6 +85,9 @@ pub const MODE_VARIANTS: &[(&str, &str)] = &[
     ("full-access", "全自动:无审批、无沙箱"),
 ];
 
+/// `/subagent` 的参数变体(补全弹窗;无参数 = 弹出 agent 选择器)。
+pub const SUBAGENT_VARIANTS: &[(&str, &str)] = &[("off", "退出子 agent,回到主会话")];
+
 /// 补全弹窗条目(静态命令表 + `/mode` 参数变体)。
 pub fn popup_entries() -> Vec<rpi_tui::CommandEntry> {
     COMMANDS
@@ -88,6 +97,13 @@ pub fn popup_entries() -> Vec<rpi_tui::CommandEntry> {
             if command.name == "mode" {
                 entry.with_variants(
                     MODE_VARIANTS
+                        .iter()
+                        .map(|(name, desc)| ((*name).to_string(), (*desc).to_string()))
+                        .collect(),
+                )
+            } else if command.name == "subagent" {
+                entry.with_variants(
+                    SUBAGENT_VARIANTS
                         .iter()
                         .map(|(name, desc)| ((*name).to_string(), (*desc).to_string()))
                         .collect(),
@@ -140,6 +156,9 @@ pub fn parse(input: &str) -> SlashInput {
             arg: arg.map(str::to_string),
         }),
         "new" => SlashInput::Command(SlashAction::New),
+        "subagent" => SlashInput::Command(SlashAction::Subagent {
+            arg: arg.map(str::to_string),
+        }),
         "mode" => SlashInput::Command(SlashAction::Mode {
             arg: arg.map(str::to_string),
         }),

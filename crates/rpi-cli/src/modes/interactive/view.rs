@@ -363,6 +363,8 @@ pub fn viewport(
         thinking: state.thinking_label.clone(),
         auto_compact: state.auto_compact,
         expanded: state.expanded,
+        active_agent: state.active_agent.clone(),
+        subagent_active: state.subagent_active,
         mode: Some(state.mode_label.clone()),
     };
     lines.extend(rpi_tui::footer::lines(&footer, width, theme));

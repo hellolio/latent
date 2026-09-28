@@ -1,0 +1,406 @@
+//! `/subagent` 平行会话工厂(14 文档扩展):按 agent 定义现场创建与主会话
+//! **平权**的独立 `AgentSession` —— 不是嵌套:独立 hooks 洋葱(含各自的
+//! mode cell 与 PermissionEngine)、系统提示词 = 定义 md 正文、工具 = 白名单、
+//! 转录纯内存。上下文与主会话及彼此完全隔离。
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use rpi_agent::{LoopHooks, PassthroughHooks, Tool};
+use rpi_ai::Model;
+
+use crate::permission::{
+    ApprovalHooks, ApprovalRules, ApprovalUi, HeadlessApproval, HeadlessApprovalUi, ModeHooks,
+    PermissionEngine, SandboxConfig,
+};
+use crate::session::{create_agent_session, AgentSession, SessionSharedSubscriber};
+
+use super::defs::{discover_agent_defs, AgentDef};
+
+/// 平行会话工厂:字段全部装配期注入(与 task 工具共用同一套依赖)。
+pub struct SubagentSessionFactory {
+    pub provider: Arc<dyn rpi_ai::Provider>,
+    pub approval_ui: Arc<dyn ApprovalUi>,
+    /// 初始会话模式与沙箱/审批规则的来源(每个会话独立引擎,模式互不影响)
+    pub engine: Arc<PermissionEngine>,
+    pub sandbox: SandboxConfig,
+    pub rules: ApprovalRules,
+    pub cwd: PathBuf,
+    pub sandbox_available: bool,
+    /// 白名单缺省集(装配层注入的只读集)
+    pub default_tools: Vec<Arc<dyn Tool>>,
+    /// 白名单候选池(与主会话同一份)
+    pub tool_pool: Vec<Arc<dyn Tool>>,
+    pub resolve_model: super::tool::ModelResolveFn,
+    /// 子会话落盘工厂(可选;tag = agent 名;None = 纯内存)
+    pub child_store_factory: Option<super::store::ChildStoreFactory>,
+}
+
+impl SubagentSessionFactory {
+    /// 发现可用 agent 定义(项目优先;每次调用重新扫描,数据化)。
+    pub fn discover(&self) -> Vec<AgentDef> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        discover_agent_defs(&self.cwd, home.as_deref()).0
+    }
+
+    /// 创建一个平行会话。
+    ///
+    /// - `fallback_model`:定义未指定 `model` 时使用(通常传主会话当前模型);
+    /// - `subscribers`:调用方提供的事件列表(TUI 渲染/审批弹窗经此到达);
+    /// - 创建后系统提示词整体替换为定义正文。
+    pub async fn create(
+        &self,
+        def: &AgentDef,
+        fallback_model: Model,
+        subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>>,
+    ) -> Result<Arc<AgentSession>, String> {
+        let tools = match &def.tools {
+            Some(names) => names
+                .iter()
+                // 防嵌套:平行会话不装 subagent 工具本身
+                .filter(|name| name.as_str() != super::tool::TOOL_NAME)
+                .filter_map(|name| {
+                    self.tool_pool
+                        .iter()
+                        .find(|tool| tool.name() == name)
+                        .cloned()
+                })
+                .collect::<Vec<_>>(),
+            None => self.default_tools.clone(),
+        };
+        let model = match &def.model {
+            Some(spec) => (self.resolve_model)(spec)?,
+            None => fallback_model,
+        };
+
+        // 独立引擎 + 独立 mode cell:模式/审批缓存/模式节随本会话走,
+        // 与主会话及其他平行会话互不影响(平权)
+        let mode_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let engine = Arc::new(PermissionEngine::new(
+            self.engine.mode(),
+            self.sandbox.clone(),
+            self.rules.clone(),
+            self.cwd.clone(),
+            self.sandbox_available,
+        ));
+        let hooks: Arc<dyn LoopHooks> = Arc::new(ApprovalHooks::new(
+            Arc::new(ModeHooks::new(
+                Arc::new(PassthroughHooks),
+                mode_cell.clone(),
+            )),
+            engine.clone(),
+            self.approval_ui.clone(),
+            subscribers.clone(),
+        ));
+
+        // 会话落盘:与主会话同一套 JSONL 机制,文件名 tag = agent 名
+        let store_was_persisted = self.child_store_factory.is_some();
+        let store = match &self.child_store_factory {
+            Some(factory) => Some(factory(&def.name)?),
+            None => None,
+        };
+        let session = Arc::new(
+            create_agent_session(crate::session::AgentSessionConfig {
+                provider: self.provider.clone(),
+                model,
+                hooks,
+                ui: Arc::new(crate::extensions::NoopUi),
+                extensions: crate::extensions::ExtensionRegistry::default(),
+                tools,
+                active_tool_names: None,
+                system_prompt: crate::system_prompt::SystemPromptOptions::default(),
+                limits: rpi_agent::TurnLimits::default(),
+                stream_options: store
+                    .as_ref()
+                    .map(|store| store.stream_options.clone())
+                    .unwrap_or_default(),
+                session_sink: store.map(|store| store.sink),
+                seed_messages: vec![],
+                compactor: None,
+                subscribers: Some(subscribers),
+                permission: Some(engine),
+                mode_section_cell: Some(mode_cell),
+            })
+            .await
+            .map_err(|e| e.to_string())?,
+        );
+        // 系统提示词 = 定义 md 正文(整体替换)
+        session
+            .agent()
+            .set_system_prompt(Some(def.system_prompt.clone()));
+        // 初始模式与主会话装配行为一致:应用当前模式(写自己的 mode cell,
+        // Plan 等模式节随本会话注入,位置同主会话 = 用户最新输入之前);
+        // 落盘会话写 ModeChange entry,纯内存会话不写
+        if store_was_persisted {
+            session
+                .set_mode(self.engine.mode())
+                .await
+                .map_err(|e| e.to_string())?;
+        } else {
+            session
+                .apply_mode_without_persist(self.engine.mode())
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(session)
+    }
+}
+
+/// 无 UI 通道时的兜底策略(与 print 模式同语义)。
+pub fn default_async_approval_ui(policy: HeadlessApproval) -> Arc<dyn ApprovalUi> {
+    Arc::new(HeadlessApprovalUi { policy })
+}
+
+#[cfg(test)]
+struct StubTool(&'static str);
+#[cfg(test)]
+#[async_trait::async_trait]
+impl Tool for StubTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}})
+    }
+    async fn execute(
+        &self,
+        _call: rpi_agent::ToolCall,
+        _cancel: tokio_util::sync::CancellationToken,
+        _updater: &dyn rpi_agent::ToolUpdater,
+    ) -> Result<rpi_agent::ToolOutput, rpi_agent::ToolError> {
+        Ok(rpi_agent::ToolOutput::text("stub"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permission::SandboxConfig;
+    use rpi_ai::{ScriptedProvider, ScriptedTurn};
+
+    fn model() -> Model {
+        Model::minimal("mock-1", "mock", "mock")
+    }
+
+    fn def(name: &str, body: &str, tools: Option<Vec<&str>>) -> AgentDef {
+        AgentDef {
+            name: name.into(),
+            description: String::new(),
+            model: None,
+            tools: tools.map(|list| list.into_iter().map(String::from).collect()),
+            system_prompt: body.into(),
+        }
+    }
+
+    /// 捕获记录:(system 提示词, 工具声明名单, 角色序列)
+    type Captured = Vec<(String, Vec<String>, Vec<String>)>;
+
+    /// 记录型 provider:捕获请求的 system 提示词、工具声明名单与角色序列。
+    struct RecordingProvider {
+        model: Model,
+        captured: Mutex<Captured>,
+    }
+
+    #[async_trait::async_trait]
+    impl rpi_ai::Provider for RecordingProvider {
+        async fn stream(
+            &self,
+            _model: &Model,
+            ctx: rpi_ai::TranscriptContext,
+            _opts: rpi_ai::StreamOptions,
+        ) -> rpi_ai::AssistantMessageEventStream {
+            // normalize_context 已把 system 提示词与工具声明折叠进首条 System
+            let (system, tools) = match ctx.messages.first() {
+                Some(rpi_ai::Message::System {
+                    content, tools_added, ..
+                }) => (
+                    content.clone(),
+                    tools_added.iter().map(|t| t.name.clone()).collect(),
+                ),
+                _ => (String::new(), Vec::new()),
+            };
+            let mut roles = Vec::new();
+            for message in &ctx.messages {
+                let (role, text) = match message {
+                    rpi_ai::Message::System { content, .. } => ("system", content.clone()),
+                    rpi_ai::Message::Developer { content, .. } => ("developer", content.clone()),
+                    rpi_ai::Message::User {
+                        content: rpi_ai::UserContent::Text(text),
+                        ..
+                    } => ("user", text.clone()),
+                    _ => ("other", String::new()),
+                };
+                roles.push(format!("{role}:{text}"));
+            }
+            self.captured
+                .lock()
+                .unwrap()
+                .push((system, tools, roles));
+            let model = self.model.clone();
+            Box::pin(async_stream::stream! {
+                yield rpi_ai::AssistantMessageEvent::Done(Box::new(
+                    rpi_ai::assistant_message(&model, vec![rpi_ai::ContentBlock::text("ok")], rpi_ai::StopReason::Stop),
+                ));
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn persisted_session_uses_agent_name_tag() {
+        use crate::session::SessionSink;
+        use rpi_agent::AgentMessage;
+
+        struct ManagerSink(Arc<rpi_session::SessionManager>);
+        #[async_trait::async_trait]
+        impl SessionSink for ManagerSink {
+            async fn append(&self, message: &AgentMessage) -> Result<(), String> {
+                self.0
+                    .append_message(message.clone())
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "rpi-subagent-factory-persist-{}",
+            std::process::id()
+        ));
+        let store_dir = dir.clone();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let provider = Arc::new(ScriptedProvider::new(
+            &model(),
+            vec![ScriptedTurn::text(&model(), "ok")],
+        ));
+        let factory = SubagentSessionFactory {
+            provider,
+            approval_ui: default_async_approval_ui(HeadlessApproval::Deny),
+            engine: Arc::new(PermissionEngine::new(
+                crate::SessionMode::FullAccess,
+                SandboxConfig::default(),
+                ApprovalRules::default(),
+                std::env::temp_dir(),
+                true,
+            )),
+            sandbox: SandboxConfig::default(),
+            rules: ApprovalRules::default(),
+            cwd: std::env::temp_dir(),
+            sandbox_available: true,
+            default_tools: vec![],
+            tool_pool: vec![],
+            resolve_model: Arc::new(|spec: &str| Ok(Model::minimal(spec, "mock", "mock"))),
+            child_store_factory: Some(Arc::new(move |tag: &str| {
+                let manager = rpi_session::create_session_in_dir(
+                    &store_dir,
+                    "/tmp/proj",
+                    None,
+                    Some(tag),
+                )
+                .map_err(|e| e.to_string())?;
+                let sink: Arc<dyn SessionSink> = Arc::new(ManagerSink(manager.into()));
+                Ok(crate::ChildStore {
+                    sink,
+                    stream_options: Default::default(),
+                })
+            })),
+        };
+
+        let session = factory
+            .create(&def("reviewer", "body", None), model(), Arc::new(Mutex::new(Vec::new())))
+            .await
+            .unwrap();
+        session.prompt("hi").await.unwrap();
+
+        // 会话文件存在,文件名带 agent 名 tag,含消息条目
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        let name = files[0].file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.contains("__reviewer__"), "{name}");
+        let content = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(content.contains("hi"), "应含用户消息");
+        assert!(content.contains("ok"), "应含 assistant 回复");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn creates_isolated_session_with_md_system_prompt_and_whitelist() {
+        let provider = Arc::new(RecordingProvider {
+            model: model(),
+            captured: Mutex::new(Vec::new()),
+        });
+        let read_tool: Arc<dyn Tool> = Arc::new(StubTool("read"));
+        let write_tool: Arc<dyn Tool> = Arc::new(StubTool("write"));
+        let engine = Arc::new(PermissionEngine::new(
+            crate::SessionMode::Plan,
+            SandboxConfig::default(),
+            ApprovalRules::default(),
+            std::env::temp_dir(),
+            true,
+        ));
+        let factory = SubagentSessionFactory {
+            provider: provider.clone(),
+            approval_ui: default_async_approval_ui(HeadlessApproval::Deny),
+            engine: engine.clone(),
+            sandbox: SandboxConfig::default(),
+            rules: ApprovalRules::default(),
+            cwd: std::env::temp_dir(),
+            sandbox_available: true,
+            default_tools: vec![read_tool.clone()],
+            tool_pool: vec![read_tool.clone(), write_tool.clone()],
+            resolve_model: Arc::new(|spec: &str| {
+                if spec == "mock/child" {
+                    Ok(Model::minimal("child", "mock", "mock"))
+                } else {
+                    Err(format!("unknown model: {spec}"))
+                }
+            }),
+            child_store_factory: None,
+        };
+
+        // 白名单 [write]:write 进工具面,嵌套用的 subagent 被过滤
+        let session = factory
+            .create(
+                &def("reviewer", "You are a reviewer.", Some(vec!["write", "subagent"])),
+                model(),
+                Arc::new(Mutex::new(Vec::new())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.agent().state_snapshot().tool_count, 1);
+
+        session.prompt("hi").await.unwrap();
+        let captured = provider.captured.lock().unwrap().clone();
+        let (system, tools, roles) = &captured[0];
+        assert_eq!(system, "You are a reviewer.", "系统提示词 = md 正文");
+        assert_eq!(tools, &vec!["write".to_string()]);
+        // 主引擎处于 Plan 模式:子会话与主会话行为一致 —— 模式节插在
+        // 用户最新输入之前(倒数第二),而非系统提示词里
+        assert_eq!(roles.len(), 3, "{roles:?}");
+        assert!(roles[0].starts_with("system:You are a reviewer."));
+        assert!(
+            roles[1].starts_with("developer:You are in Plan mode"),
+            "模式节应为完整 Plan 提示词:{roles:?}"
+        );
+        assert_eq!(roles[2], "user:hi", "用户输入应保持最后");
+        // 定义 model 缺省 → 继承 fallback(主会话模型)
+        assert_eq!(session.agent().state_snapshot().model.unwrap().id, "mock-1");
+
+        // def.model 指定时覆盖
+        let mut with_model = def("scoped", "s", None);
+        with_model.model = Some("mock/child".into());
+        let session2 = factory
+            .create(&with_model, model(), Arc::new(Mutex::new(Vec::new())))
+            .await
+            .unwrap();
+        assert_eq!(session2.agent().state_snapshot().model.unwrap().id, "child");
+    }
+
+}
+
+

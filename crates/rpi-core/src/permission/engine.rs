@@ -470,6 +470,28 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_allows_subagent_dispatch() {
+        // subagent 派发按只读类放行:子 agent 内部工具调用仍过同一引擎,
+        // Plan 的只读约束不变(14 文档)
+        let plan = engine(SessionMode::Plan);
+        assert!(matches!(
+            plan.evaluate(
+                &ctx("subagent", serde_json::json!({"task": "review"})),
+                ToolRiskClass::ReadOnly,
+            ),
+            Verdict::Allow
+        ));
+        // 对照:子 agent 内部的写调用在 Plan 下仍被拒
+        assert!(matches!(
+            plan.evaluate(
+                &ctx("write", serde_json::json!({"path": "a", "content": "x"})),
+                ToolRiskClass::FileWrite,
+            ),
+            Verdict::Deny(_)
+        ));
+    }
+
+    #[test]
     fn cache_key_from_decision_roundtrip() {
         // ApproveForSession 决策路径使用的键与 cache_hit 一致
         let engine = engine(SessionMode::Confirm);

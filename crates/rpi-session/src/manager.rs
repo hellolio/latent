@@ -139,15 +139,31 @@ pub fn project_prefix(cwd: &str) -> String {
 
 /// 工厂:在目录下创建 `<项目前缀>__<session-id>.jsonl` 会话文件(目录不存在则
 /// 创建),前缀由 cwd 编码(`project_prefix`)实现分项目管理,id 即 session id。
+/// 子会话文件名的 tag 净化:仅保留字母/数字/`_`/`-`,其余转 `_`。
+fn sanitize_session_tag(tag: &str) -> String {
+    tag.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' })
+        .collect()
+}
+
 pub fn create_session_in_dir(
     dir: impl AsRef<Path>,
     cwd: &str,
     parent_session: Option<&str>,
+    tag: Option<&str>,
 ) -> Result<Box<SessionManager>, SessionError> {
     let dir = dir.as_ref();
     std::fs::create_dir_all(dir)?;
     let id = new_session_id();
-    let path = dir.join(format!("{}__{id}.jsonl", project_prefix(cwd)));
+    // 带 tag 的子会话文件(`<prefix>__<tag>__<id>.jsonl`);tag 净化为文件名安全字符
+    let file_name = match tag.map(str::trim).filter(|tag| !tag.is_empty()) {
+        Some(tag) => {
+            let tag = sanitize_session_tag(tag);
+            format!("{}__{tag}__{id}.jsonl", project_prefix(cwd))
+        }
+        None => format!("{}__{id}.jsonl", project_prefix(cwd)),
+    };
+    let path = dir.join(file_name);
     // 先落首行 header(保证文件名与 session id 一致),再按既有文件打开
     let header = SessionHeader::new(id, cwd.to_string(), parent_session.map(str::to_string));
     {
@@ -170,6 +186,14 @@ pub fn find_latest_session_file(dir: impl AsRef<Path>, cwd: Option<&str>) -> Opt
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        // 带 tag 的子会话文件(文件名含两段 `__`)不参与 --continue 选取
+        if path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.matches("__").count() >= 2)
+        {
             continue;
         }
         let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {

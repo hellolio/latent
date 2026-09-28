@@ -15,7 +15,8 @@ use rpi_agent::{AgentEvent, RunStop};
 use rpi_core::{
     create_agent_session, create_extension_event_bus, ApprovalHooks, ApprovalRules, ApprovalUi,
     AgentSession, AgentSessionConfig, AgentSessionEvent, ExtensionHooks, ExtensionUi, HeadlessApproval,
-    HeadlessApprovalUi, McpServerSpec, NoopUi, PermissionEngine, SandboxConfig, SessionMode,
+    HeadlessApprovalUi, McpServerSpec, ModeHooks, NoopUi, PermissionEngine, SandboxConfig,
+    SessionMode,
     SessionSharedSubscriber, SessionSink, SessionSubscriber, SandboxPolicy as CoreSandboxPolicy,
     SystemPromptOptions,
 };
@@ -72,6 +73,14 @@ struct SettingsFile {
     /// headless(print/json)遇审批请求的策略:deny | auto-approve
     #[serde(rename = "headlessApproval", alias = "headless_approval", default)]
     headless_approval: Option<String>,
+    /// 后台 subagent 遇审批请求的策略(14 文档 §4.3,默认 deny):
+    /// deny | auto-approve
+    #[serde(
+        rename = "subagentAsyncApproval",
+        alias = "subagent_async_approval",
+        default
+    )]
+    subagent_async_approval: Option<String>,
     /// 沙箱细节(Confirm 模式 WorkspaceWrite;Plan 固定 ReadOnly,FullAccess 固定关)
     #[serde(rename = "sandbox", default)]
     sandbox: Option<SandboxConfig>,
@@ -228,6 +237,7 @@ fn system_prompt_override_from(cwd: Option<&Path>, home: Option<&Path>) -> Optio
 /// get_tree/get_entries/fork 命令查询会话树(rpi-session 是可选组件);
 /// `manager_holder` 是可切换指针 —— /new 运行期新建 session 时整体换目标,
 /// sink/compactor/PI_* 环境闭包每次使用都读当前值。
+/// `subagent_registry` 供 /new 与会话退出时 abort 全部存活 subagent 运行。
 pub struct BuiltSession {
     pub session: Arc<AgentSession>,
     pub session_manager: Option<Arc<rpi_session::SessionManager>>,
@@ -236,6 +246,10 @@ pub struct BuiltSession {
     pub compaction_config: CompactionConfig,
     /// rpc 审批通道(run_rpc_mode 路由 approval_response 用;其他模式 None)
     pub rpc_approval: Option<Arc<crate::modes::rpc::RpcApprovalUi>>,
+    /// 后台 subagent 运行注册表(14 文档 §4.3;None = 未装配)
+    pub subagent_registry: Option<Arc<rpi_core::SubagentRegistry>>,
+    /// /subagent 平行会话工厂(与主会话同源依赖;None = 未装配)
+    pub subagent_factory: Option<Arc<rpi_core::SubagentSessionFactory>>,
 }
 
 /// 可切换的会话存储句柄(内部 `Arc<RwLock<Option<Arc<SessionManager>>>>`)。
@@ -281,6 +295,7 @@ pub async fn switch_new_session(
                     dir,
                     &cwd.display().to_string(),
                     parent_session.as_deref(),
+                    None,
                 )
                 .map_err(|e| e.to_string())?
                 .into()
@@ -347,6 +362,9 @@ pub struct BuildOptions {
     pub sandbox: SandboxConfig,
     /// 审批规则(settings `approval`)
     pub approval: ApprovalRules,
+    /// 后台 subagent 审批策略(settings `subagentAsyncApproval`,默认 deny;
+    /// 14 文档 §4.3)
+    pub subagent_async_approval: HeadlessApproval,
     /// 审批 UI(接缝 #5:interactive 传 TuiApprovalUi,rpc 传 RpcApprovalUi,
     /// print/json 传 HeadlessApprovalUi;None = 按 deny 策略兜底)
     pub approval_ui: Option<Arc<dyn ApprovalUi>>,
@@ -431,6 +449,9 @@ pub struct SessionSettings {
     pub session_mode: SessionMode,
     /// settings `headlessApproval`:print/json 遇审批请求的策略(默认 deny)
     pub headless_approval: HeadlessApproval,
+    /// settings `subagentAsyncApproval`:后台 subagent 遇审批请求的策略
+    /// (默认 deny;14 文档 §4.3 fail-closed)
+    pub subagent_async_approval: HeadlessApproval,
     /// settings `sandbox`(Confirm 模式 WorkspaceWrite 细节;CLI --sandbox-*
     /// 在 main 合并)
     pub sandbox: SandboxConfig,
@@ -482,6 +503,7 @@ impl Default for SessionSettings {
             compaction: CompactionConfig::default(),
             session_mode: SessionMode::Plan,
             headless_approval: HeadlessApproval::Deny,
+            subagent_async_approval: HeadlessApproval::Deny,
             sandbox: SandboxConfig::default(),
             approval: ApprovalRules::default(),
         }
@@ -521,6 +543,9 @@ pub fn load_session_settings() -> SessionSettings {
     let headless_approval = files
         .iter()
         .find_map(|settings| settings.headless_approval.clone());
+    let subagent_async_approval = files
+        .iter()
+        .find_map(|settings| settings.subagent_async_approval.clone());
     let sandbox = files
         .iter()
         .find_map(|settings| settings.sandbox.clone())
@@ -540,6 +565,7 @@ pub fn load_session_settings() -> SessionSettings {
         compaction,
         session_mode: parse_session_mode(session_mode.as_ref()),
         headless_approval: parse_headless_approval(headless_approval.as_ref()),
+        subagent_async_approval: parse_headless_approval(subagent_async_approval.as_ref()),
         sandbox,
         approval,
     }
@@ -641,6 +667,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         default_session_mode,
         sandbox,
         approval,
+        subagent_async_approval,
         approval_ui,
         rpc_approval,
     } = options;
@@ -680,9 +707,12 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 共享订阅者(审批事件/重试事件/总线共用同一列表)
     let subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // 决策类埋点:Approval(最外)→ Extension(最内)→ Passthrough。
-    // 审批先问(便宜、人审),批准后才轮到扩展埋点(13 文档 §4.1)
-    let inner_hooks: Arc<dyn rpi_agent::LoopHooks> = if bus.is_empty() {
+    // 决策类埋点:Approval(最外)→ Mode → Extension(最内)→ Passthrough。
+    // 审批先问(便宜、人审),批准后才轮到扩展埋点(13 文档 §4.1)。
+    // 父链多一层 ModeHooks:可切换模式节(如 Plan)以 Developer 消息追加在
+    // 每请求消息末尾,系统提示词与工具数组随模式恒定(保 KV 缓存前缀);
+    // 子 agent 用不含 Mode 的链,避免父模式提示词误导子会话。
+    let base_inner_hooks: Arc<dyn rpi_agent::LoopHooks> = if bus.is_empty() {
         Arc::new(rpi_agent::PassthroughHooks)
     } else {
         Arc::new(ExtensionHooks::new(
@@ -690,10 +720,18 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             bus.clone(),
         ))
     };
+    let mode_section_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let approval_ui: Arc<dyn ApprovalUi> = approval_ui
         .unwrap_or_else(|| Arc::new(HeadlessApprovalUi { policy: HeadlessApproval::Deny }));
+    let approval_ui_for_factory = approval_ui.clone();
+    let child_hooks: Arc<dyn rpi_agent::LoopHooks> = Arc::new(ApprovalHooks::new(
+        base_inner_hooks.clone(),
+        engine.clone(),
+        approval_ui.clone(),
+        subscribers.clone(),
+    ));
     let hooks: Arc<dyn rpi_agent::LoopHooks> = Arc::new(ApprovalHooks::new(
-        inner_hooks,
+        Arc::new(ModeHooks::new(base_inner_hooks, mode_section_cell.clone())),
         engine.clone(),
         approval_ui,
         subscribers.clone(),
@@ -705,7 +743,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             .map_err(|e| e.to_string())?
             .into(),
         SessionStore::New { dir } => {
-            rpi_session::create_session_in_dir(dir, &cwd.display().to_string(), None)
+            rpi_session::create_session_in_dir(dir, &cwd.display().to_string(), None, None)
                 .map_err(|e| e.to_string())?
                 .into()
         }
@@ -790,6 +828,91 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         Some(retry_hooks),
     );
 
+    // 进程内 subagent 引擎(14 文档 §4):task 工具编译进二进制,agent 类型
+    // 定义是数据文件(.rpi/agents/*.md,项目优先);解析失败诊断打 stderr 跳过。
+    // 递归防护 = 子工具面裁剪;后台审批按 settings 策略(默认 deny,fail-closed)
+    let subagent_home = dirs_home();
+    let (agent_defs, subagent_diagnostics) =
+        rpi_core::discover_agent_defs(&cwd, subagent_home.as_deref());
+    for diagnostic in &subagent_diagnostics {
+        eprintln!("[rpi][subagent] {diagnostic}");
+    }
+    let subagent_parent_cell: Arc<Mutex<Weak<rpi_agent::Agent>>> = Arc::new(Mutex::new(Weak::new()));
+    // /model 同源的解析面(models.json + 内置 provider 默认表);父模型缺省
+    // 继承自父会话快照,显式 `model` 参数走本解析器
+    let subagent_resolver =
+        rpi_core::create_model_resolver_from_config(Some(&cwd), subagent_home.as_deref());
+    let factory_resolver =
+        rpi_core::create_model_resolver_from_config(Some(&cwd), subagent_home.as_deref());
+    let resolve_model: Arc<dyn Fn(&str) -> Result<rpi_ai::Model, String> + Send + Sync> =
+        Arc::new(move |spec: &str| subagent_resolver.resolve(spec));
+    let factory_resolve_model: Arc<dyn Fn(&str) -> Result<rpi_ai::Model, String> + Send + Sync> =
+        Arc::new(move |spec: &str| factory_resolver.resolve(spec));
+    let read_only_tool_set = rpi_tools::read_only_tools(&cwd);
+    // 子会话落盘工厂:与主会话同一套 rpi-session 机制(消息/usage/快照 entry
+    // 完全一致),文件名 `<项目前缀>__<tag>__<id>.jsonl`(tag = run id / agent 名);
+    // 纯内存会话不落盘。contextSnapshot 开启时子会话同样记录真实上下文
+    let child_store_factory: Option<rpi_core::ChildStoreFactory> = match &session_store {
+        SessionStore::Memory => None,
+        _ => {
+            let dir: std::path::PathBuf = match &session_store {
+                SessionStore::New { dir } => dir.clone(),
+                SessionStore::Resume { file } => file
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_default(),
+                SessionStore::Memory => unreachable!(),
+            };
+            let project = cwd.display().to_string();
+            let snapshot_enabled = context_snapshot.unwrap_or(false);
+            Some(Arc::new(move |tag: &str| {
+                let manager: Arc<rpi_session::SessionManager> = rpi_session::create_session_in_dir(
+                    &dir,
+                    &project,
+                    None,
+                    Some(tag),
+                )
+                .map_err(|e| e.to_string())?
+                .into();
+                let sink: Arc<dyn rpi_core::SessionSink> = Arc::new(SessionManagerSink(
+                    SessionManagerHolder::new(Some(manager.clone())),
+                ));
+                let mut stream_options = rpi_ai::StreamOptions::default();
+                if snapshot_enabled {
+                    let snapshot_manager = manager.clone();
+                    stream_options.on_payload =
+                        Some(Arc::new(move |body: &mut serde_json::Value| {
+                            if let Err(error) = snapshot_manager.append_context_snapshot(body) {
+                                eprintln!(
+                                    "[rpi][subagent] context snapshot append failed: {error}"
+                                );
+                            }
+                        }));
+                }
+                Ok(rpi_core::ChildStore {
+                    sink,
+                    stream_options,
+                })
+            }))
+        }
+    };
+    let subagent_tool = Arc::new(rpi_core::SubagentTool::new(rpi_core::SubagentDeps {
+        provider: provider.clone(),
+        hooks: child_hooks.clone(),
+        engine: engine.clone(),
+        subscribers: subscribers.clone(),
+        default_tools: read_only_tool_set.clone(),
+        tool_pool: tools.clone(),
+        resolve_model,
+        parent: subagent_parent_cell.clone(),
+        async_approval: subagent_async_approval,
+        cwd: cwd.clone(),
+        home: subagent_home.clone(),
+        agent_defs,
+        child_store_factory: child_store_factory.clone(),
+    }));
+    tools.push(subagent_tool.clone());
+
     let compaction_settings: rpi_session::CompactionSettings = compaction.clone().into();
     let compactor: Arc<dyn rpi_core::ContextCompactor> = Arc::new(SessionCompactor {
         manager_holder: manager_holder.clone(),
@@ -806,20 +929,14 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             Some(names) => Some(resolve_active_tools(names, &tools)?),
         },
     };
-    // 模式基线的工具上限(13 文档 §9.2):resume 用 seed_active_tools(模式
-    // 基线为底、seed 收紧交集),新会话用 settings `tools`
-    let mode_tool_ceiling = match &session_store {
-        SessionStore::Resume { .. } => seed_active_tools.clone().or(active_tools),
-        _ => active_tools,
-    };
     let session = Arc::new(
         create_agent_session(AgentSessionConfig {
-            provider,
+            provider: provider.clone(),
             model,
             hooks,
             ui,
             extensions: rpi_core::ExtensionRegistry::default(),
-            tools,
+            tools: tools.clone(),
             active_tool_names,
             system_prompt: SystemPromptOptions {
                 cwd: Some(cwd.display().to_string()),
@@ -836,15 +953,14 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             compactor: Some(compactor),
             subscribers: Some(subscribers.clone()),
             permission: Some(engine.clone()),
-            mode_tool_ceiling,
+            mode_section_cell: Some(mode_section_cell.clone()),
         })
         .await
         .map_err(|e| e.to_string())?,
     );
 
     // 会话模式应用(13 文档 §8.1/§9.3):新会话文件落 ModeChange entry 自描述;
-    // resume 只恢复不落盘(entry 已有)
-    session.set_default_mode(default_session_mode);
+    // resume 只恢复不落盘(entry 已有)    session.set_default_mode(default_session_mode);
     if matches!(session_store, SessionStore::New { .. }) {
         session.set_mode(effective_mode).await.map_err(|e| e.to_string())?;
     } else {
@@ -866,6 +982,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
 
     // T9:session 建好后回填共享 cell,PI_* 环境闭包此后可按需快照
     *session_cell.lock().unwrap() = Arc::downgrade(&session);
+    // subagent:回填父会话弱引(模型继承 + supervisor 唤醒),启动空闲唤醒任务
+    *subagent_parent_cell.lock().unwrap() = Arc::downgrade(session.agent());
+    subagent_tool.spawn_supervisor();
 
     // 装配期诊断(编译期扩展 init 失败跳过等)
     for diagnostic in session.extension_diagnostics() {
@@ -889,6 +1008,20 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         manager_holder,
         compaction_config: compaction,
         rpc_approval,
+        subagent_registry: Some(subagent_tool.registry()),
+        subagent_factory: Some(Arc::new(rpi_core::SubagentSessionFactory {
+            provider: provider.clone(),
+            approval_ui: approval_ui_for_factory,
+            engine: engine.clone(),
+            sandbox: sandbox.clone(),
+            rules: approval.clone(),
+            cwd: cwd.clone(),
+            sandbox_available,
+            default_tools: read_only_tool_set,
+            tool_pool: tools,
+            resolve_model: factory_resolve_model,
+            child_store_factory: child_store_factory,
+        })),
     })
 }
 
@@ -923,6 +1056,7 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         default_session_mode: request.settings.session_mode,
         sandbox: request.settings.sandbox,
         approval: request.settings.approval,
+        subagent_async_approval: request.settings.subagent_async_approval,
         approval_ui: Some(Arc::new(HeadlessApprovalUi {
             policy: request.settings.headless_approval,
         })),
@@ -943,6 +1077,10 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         .await
         .map_err(|e| e.to_string())?;
     built.session.wait_idle().await;
+    // print 模式跑完即退出:停掉仍在运行的后台 subagent(进程生命周期同父)
+    if let Some(registry) = &built.subagent_registry {
+        registry.abort_all();
+    }
     Ok(outcome.stop())
 }
 

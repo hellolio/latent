@@ -9,7 +9,7 @@ use super::state::{InteractiveState, ToolStatus, TranscriptItem};
 
 /// 回放当前转录(压缩感知的当前分支上下文)并初始化 ctx 估计。
 pub fn replay_history(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
-    let messages = ctx.session.agent().messages();
+    let messages = ctx.session.main().agent().messages();
     for message in &messages {
         state.commit_many(replay_message(message, &state.theme));
     }

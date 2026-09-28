@@ -37,6 +37,10 @@ pub struct FooterData {
     pub mode: Option<String>,
     /// ctrl+o 全局展开态(第一行追加 `· expanded` 提示)
     pub expanded: bool,
+    /// 存活的后台 subagent 运行数(0 = 不显示)
+    pub subagent_active: usize,
+    /// 当前激活的平行子 agent(/subagent 切换;None = 主会话)
+    pub active_agent: Option<String>,
 }
 
 /// 三行 footer。
@@ -71,6 +75,19 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
         // 模型行与 cwd 同色(此前 muted 过暗,与背景区分度不足)
         Style::new().fg(theme.footer_cwd),
     ));
+    if let Some(agent) = &data.active_agent {
+        line3_spans.push(Span::styled(
+            format!(" · agent:{agent}"),
+            Style::new().fg(theme.warning),
+        ));
+    }
+    if data.subagent_active > 0 {
+        // 后台 subagent 运行数(14 文档 §4.3 进度可见:footer 状态段,不做活组件)
+        line3_spans.push(Span::styled(
+            format!(" · ⏷{} subagent", data.subagent_active),
+            Style::new().fg(theme.warning),
+        ));
+    }
     let line3 = right_align(Line::from(line3_spans), width);
     vec![line1, line2, line3]
 }
@@ -288,6 +305,8 @@ mod tests {
             thinking: "high".into(),
             auto_compact: true,
             expanded: false,
+            subagent_active: 0,
+            active_agent: None,
             mode: Some("confirm".into()),
         }
     }

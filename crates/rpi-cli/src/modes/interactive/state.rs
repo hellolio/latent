@@ -100,6 +100,8 @@ pub enum SelectKind {
     Thinking,
     /// 内部选择器(/theme):携带候选主题枚举
     Theme { names: Vec<rpi_tui::ThemeName> },
+    /// 内部选择器(/subagent):候选 agent 定义
+    SubagentAgent { defs: Vec<rpi_core::AgentDef> },
     /// 权限审批(13 文档 §10.3):四决策经 oneshot 回传 ApprovalHooks
     Approval {
         responder: tokio::sync::oneshot::Sender<rpi_core::ApprovalDecision>,
@@ -138,6 +140,10 @@ pub struct InteractiveState {
     pub last_ctrl_c: Option<Instant>,
     /// ctrl+o 全局展开(工具输出 + 启动帮助/资源)
     pub expanded: bool,
+    /// 当前激活的平行子 agent(/subagent 切换;None = 主会话)
+    pub active_agent: Option<String>,
+    /// 存活后台 subagent 数(>0 时驱动 tick 并在 footer 显示)
+    pub subagent_active: usize,
     /// 全文重绘请求(ctrl+o 切换后由事件循环消费)
     pub needs_full_redraw: bool,
     /// 转录模型(redraw_full 重渲染的数据源)
@@ -168,6 +174,8 @@ impl InteractiveState {
             slash_popup: CommandPopup::new(crate::modes::slash::popup_entries()),
             status: Status::Idle,
             spin: 0,
+            active_agent: None,
+            subagent_active: 0,
             stream_text: String::new(),
             pending_thinking: None,
             usage: UsageTracker::default(),

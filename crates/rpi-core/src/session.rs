@@ -15,8 +15,7 @@ use rpi_ai::{is_context_overflow, Model, Provider, StreamOptions};
 
 use crate::extensions::{ExtensionActions, ExtensionDiagnostic, ExtensionRegistry, ExtensionUi};
 use crate::permission::{
-    mode_baseline_tools, classify_tool, ApprovalDecision, ApprovalRequest, PermissionEngine,
-    SessionMode, PLAN_MODE_SECTION,
+    ApprovalDecision, ApprovalRequest, PermissionEngine, SessionMode,
 };
 use crate::retry::RetryHooks;
 use crate::system_prompt::{
@@ -158,9 +157,11 @@ pub struct AgentSessionConfig {
     /// 权限引擎(可选):未装配 = 无权限行为(现状退化,可拆卸判据)。
     /// `set_mode` 经此触达引擎切档;ApprovalHooks 持有同一 Arc。
     pub permission: Option<Arc<PermissionEngine>>,
-    /// 模式的工具上限(settings `tools` 用户上限):模式基线与之取交集;
-    /// None = 无上限(仅模式基线约束)。
-    pub mode_tool_ceiling: Option<Vec<String>>,
+    /// 模式提示词共享 cell(可选;ModeHooks 持有同一 Arc):apply_mode 写入
+    /// 当前模式的请求级补充指令(如 Plan 节),每请求以 Developer 消息追加在
+    /// 消息数组末尾 —— 系统提示词与工具数组随模式恒定(保 KV 缓存前缀)。
+    /// None = 无模式提示词行为。
+    pub mode_section_cell: Option<Arc<Mutex<Option<String>>>>,
 }
 
 /// 运行期可变状态(锁保护;无全局状态)。
@@ -175,8 +176,6 @@ struct SessionRuntime {
     mode: SessionMode,
     /// 新会话默认模式(/new 与新建会话落盘用;装配期由 settings/CLI 决定)
     default_mode: SessionMode,
-    /// 模式基线的工具上限(settings `tools`)
-    mode_tool_ceiling: Option<Vec<String>>,
     /// 每次 run 只尝试一次 overflow 恢复(04 文档 _overflowRecoveryAttempted)
     overflow_recovery_attempted: bool,
 }
@@ -212,6 +211,8 @@ pub struct AgentSession {
     compactor: Option<Arc<dyn ContextCompactor>>,
     /// 权限引擎(可选;见 AgentSessionConfig.permission)
     permission: Option<Arc<PermissionEngine>>,
+    /// 模式提示词共享 cell(与 ModeHooks 共享;apply_mode 写)
+    mode_section_cell: Option<Arc<Mutex<Option<String>>>>,
     runtime: Mutex<SessionRuntime>,
     /// 装配期收集的扩展诊断(init 失败跳过等,07 §8.5),面向 mode 可见。
     extension_diagnostics: Vec<ExtensionDiagnostic>,
@@ -295,6 +296,7 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
         compactor: config.compactor,
         permission: config.permission,
         extension_diagnostics,
+        mode_section_cell: config.mode_section_cell,
         runtime: Mutex::new(SessionRuntime {
             system_prompt: state,
             system_prompt_options: options,
@@ -302,9 +304,20 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
             active_tool_names,
             mode: SessionMode::Plan,
             default_mode: SessionMode::Plan,
-            mode_tool_ceiling: config.mode_tool_ceiling,
             overflow_recovery_attempted: false,
         }),
+    })
+}
+
+/// 子 agent 转录持久化订阅者(裸 `rpi_agent::Agent` 用,SessionBridge 的
+/// 持久化半边):MessageEnd → sink.append + usage entry —— 子会话 JSONL
+/// 条目格式与主会话完全一致。
+pub fn create_session_persistence_subscriber(
+    sink: Arc<dyn SessionSink>,
+) -> rpi_agent::SharedSubscriber {
+    Arc::new(SessionBridge {
+        subscribers: Arc::new(Mutex::new(Vec::new())),
+        sink: Some(sink),
     })
 }
 
@@ -513,64 +526,19 @@ impl AgentSession {
         self.runtime.lock().unwrap().mode
     }
 
-    /// 当前系统提示词 sections(诊断/测试用;含 Plan 模式的 `<mode>` 节)。
+    /// 当前系统提示词 sections(诊断/测试用;模式节已迁出,不再含 `<mode>`)。
     pub fn system_prompt_sections(&self) -> SystemPromptSections {
         self.runtime.lock().unwrap().sections.clone()
     }
 
     async fn apply_mode(&self, mode: SessionMode, persist: bool) -> Result<(), CoreError> {
-        let (sandbox_available, ceiling) = {
-            let runtime = self.runtime.lock().unwrap();
-            (
-                self.permission
-                    .as_ref()
-                    .map(|engine| engine.sandbox_available())
-                    .unwrap_or(true),
-                runtime.mode_tool_ceiling.clone(),
-            )
-        };
-        // 模式基线 ∩ 会话可用工具 ∩ 用户上限(settings `tools`)
-        let mut names = mode_baseline_tools(mode, sandbox_available)
-            .into_iter()
-            .filter(|name| self.tools_all.iter().any(|tool| tool.name() == name))
-            .collect::<Vec<_>>();
-        if mode != SessionMode::Plan {
-            // Confirm/FullAccess:扩展工具(非内置)保持可用,受上限约束
-            for tool in &self.tools_all {
-                let name = tool.name();
-                if classify_tool(name) == crate::permission::ToolRiskClass::External
-                    && !names.iter().any(|existing| existing == name)
-                {
-                    names.push(name.to_string());
-                }
-            }
-        }
-        if let Some(ceiling) = &ceiling {
-            names.retain(|name| ceiling.contains(name));
-        }
-        self.set_active_tools_by_name(&names).await?;
-
-        // 系统提示词 mode 节(Plan 注入,其余移除);Forced 整 prompt 不参与重建
-        let options = {
-            let mut runtime = self.runtime.lock().unwrap();
-            runtime.mode = mode;
-            let mut options = runtime.system_prompt_options.clone();
-            if mode == SessionMode::Plan {
-                options
-                    .sections
-                    .insert("mode".into(), PLAN_MODE_SECTION.into());
-            } else {
-                options.sections.remove("mode");
-            }
-            runtime.system_prompt_options = options.clone();
-            options
-        };
-        {
-            let runtime = self.runtime.lock().unwrap();
-            if matches!(runtime.system_prompt, SystemPromptState::Sections(_)) {
-                drop(runtime);
-                self.update_system_prompt(options)?;
-            }
+        // 模式切换三件事:写模式提示词 cell、引擎切档、entry 落盘。
+        // 系统提示词与激活工具集**不随模式变化**(tools 数组恒定保 KV 缓存
+        // 前缀命中);Plan 的只读约束由权限引擎在运行时强制(bash 只读检查 /
+        // write Deny / 沙箱 ReadOnly 包装),拒绝原因进转录模型可自行换路径。
+        self.runtime.lock().unwrap().mode = mode;
+        if let Some(cell) = &self.mode_section_cell {
+            *cell.lock().unwrap() = crate::permission::mode_section(mode);
         }
 
         // 引擎切档(清审批缓存)
@@ -682,18 +650,6 @@ impl AgentSession {
             .set_messages(messages)
             .map_err(|e| e.to_string())?;
         Ok(count)
-    }
-
-    /// 更新系统提示词 options:重建 sections 状态(仅内存 + 请求级字段下发,
-    /// 不产生转录消息)。
-    pub fn update_system_prompt(&self, options: SystemPromptOptions) -> Result<(), CoreError> {
-        let new_sections = build_system_prompt_sections(&options)?;
-        let mut runtime = self.runtime.lock().unwrap();
-        runtime.sections = new_sections.clone();
-        runtime.system_prompt = SystemPromptState::Sections(new_sections);
-        self.agent
-            .set_system_prompt(Some(runtime.system_prompt.to_text()));
-        Ok(())
     }
 
     async fn emit_queue_update(&self) {
