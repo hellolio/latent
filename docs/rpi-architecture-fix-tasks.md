@@ -11,7 +11,8 @@
 > 3. **统一 Session / Agent Transcript**
 > 4. **统一 Overflow / Compaction**
 >
-> 暂时不要实现 Permission System、MCP 动态更新、TUI 跨平台、Unicode、Subagent、OAuth 等其他改造。
+> 暂时不要实现 Permission System、MCP 动态更新、TUI 跨平台、Unicode、OAuth 等其他改造。
+> （2026-09-28 更新：**Subagent 已立项**，设计见 `docs/14-plugin-in-process.md` §4，不再列入"不要做"。）
 
 ---
 
@@ -1255,7 +1256,7 @@ Persisted Session Entry
 - RPC Bash 重构
 - TUI 跨平台
 - Unicode width
-- Subagent
+- ~~Subagent~~（已立项，按 `docs/14-plugin-in-process.md` §4 设计实施）
 - OAuth
 - 完整 model catalog
 - 大量新 provider

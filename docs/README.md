@@ -21,6 +21,8 @@
 | [09-wiring-and-rust.md](09-wiring-and-rust.md) | **模块接线机制(依赖倒置点、调用链、状态所有权)与 Rust 实现映射** | 全仓 |
 | [10-implementation-policy.md](10-implementation-policy.md) | **总体实现方针:crate 拆分规则、模块契约(工厂+trait+类型)、六接缝纪律、开发流程** | 全仓 |
 | [12-testing-standard.md](12-testing-standard.md) | **测试标准:L0-L3 分层(L3 为 pexpect 真终端 + 本地 mock LLM 的 E2E)、改动→必补测试映射** | `tests/e2e`、`crates/rpi-tui` |
+| [14-plugin-in-process.md](14-plugin-in-process.md) | **插件路线 A(进程内编译期):trait 接缝、how-to、Subagent 专项设计(同步/异步)** | `crates/rpi-agent`、`crates/rpi-core` |
+| [15-plugin-mcp-extension.md](15-plugin-mcp-extension.md) | **插件路线 B(进程外 MCP):独立 server 开发、协议红线、错误语义** | `crates/rpi-core/src/extensions` |
 
 ## 建议阅读顺序
 
