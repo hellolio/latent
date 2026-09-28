@@ -1,6 +1,11 @@
-//! 斜杠命令自动补全弹窗(Codex CLI 风格):输入以 `/` 开头且尚无空白时,
-//! 在编辑器上方弹出命令列表;按查询过滤(前缀 > 子串 > 模糊子序列),
-//! ↑/↓ 选择、Tab/Enter 补全、Esc 关闭。
+//! 斜杠命令自动补全弹窗(Codex CLI 风格):输入以 `/` 开头时在编辑器上方
+//! 弹出命令列表;按查询过滤(前缀 > 子串 > 模糊子序列),↑/↓ 选择、
+//! Tab/Enter 补全、Esc 关闭。
+//!
+//! 参数变体:条目可声明 `variants`(通用机制,组件不感知语义)—— 查询
+//! 首词精确命中带变体的命令时,列表替换为 `命令 参数` 子项(按声明序),
+//! 参数前缀继续过滤(如 `/mode c` 只剩 confirm)。Tab/Enter 补全后进入
+//! 单项精确态,再次 Enter 执行。
 //!
 //! 组件不感知命令语义:命令表由上层注入(依赖方向约束:不知道 agent 的
 //! 存在)。状态(过滤/选中/关闭)与渲染分离,可纯单测。
@@ -17,6 +22,9 @@ use crate::width::{display_width, truncate_to_width};
 pub struct CommandEntry {
     pub name: String,
     pub description: String,
+    /// 参数变体(变体名, 语义描述):声明后,查询首词精确命中本命令时
+    /// 列表展开为 `name 变体` 子项(声明序,不重排)
+    pub variants: Vec<(String, String)>,
 }
 
 impl CommandEntry {
@@ -24,7 +32,14 @@ impl CommandEntry {
         CommandEntry {
             name: name.into(),
             description: description.into(),
+            variants: Vec::new(),
         }
+    }
+
+    /// 声明参数变体(builder)。
+    pub fn with_variants(mut self, variants: Vec<(String, String)>) -> Self {
+        self.variants = variants;
+        self
     }
 }
 
@@ -34,11 +49,12 @@ pub const MAX_VISIBLE_ROWS: usize = 8;
 /// 补全弹窗状态。
 #[derive(Debug, Clone, Default)]
 pub struct CommandPopup {
+    /// 静态命令表(变体展开不修改本表;匹配结果存克隆)
     entries: Vec<CommandEntry>,
     /// 当前查询(去掉前导 `/` 后的输入)
     query: String,
-    /// 匹配条目下标(按匹配质量排序)
-    matches: Vec<usize>,
+    /// 匹配条目(静态命中或 `命令 参数` 变体展开)
+    matches: Vec<CommandEntry>,
     /// 选中项在 `matches` 中的下标
     selected: usize,
     /// Esc 显式关闭;查询再次变化时重新打开
@@ -58,9 +74,7 @@ impl CommandPopup {
     /// 编辑器内容变化后调用:重算查询、过滤与可见性。返回是否可见。
     pub fn sync(&mut self, input: &str) -> bool {
         let query = input.strip_prefix('/').unwrap_or("").to_string();
-        // 输入以 `/` 开头即激活(裸 `/` 列出全部);命令名后一旦出现空白
-        // (开始输参数),弹窗即退场
-        let active = input.starts_with('/') && !query.contains(char::is_whitespace);
+        let active = input.starts_with('/');
         if query != self.query {
             self.dismissed = false;
             self.selected = 0;
@@ -94,18 +108,25 @@ impl CommandPopup {
     }
 
     pub fn selected_entry(&self) -> Option<&CommandEntry> {
-        self.matches.get(self.selected).map(|&i| &self.entries[i])
+        self.matches.get(self.selected)
     }
 
-    /// 查询与某命令名完全一致:Enter 语义为执行而非补全。
+    /// 查询与某条目名完全一致:Enter 语义为执行而非补全。
     pub fn is_exact_match(&self) -> bool {
-        self.matches.iter().any(|&i| self.entries[i].name == self.query)
+        let query = self.query.trim_end();
+        self.matches.iter().any(|entry| entry.name == query)
     }
 
-    /// 选中项的补全文本(带尾随空格,补全后弹窗自然退场)。
+    /// 选中项的补全文本:静态命令带尾随空格(补全后弹窗退场);变体子项
+    /// (`命令 参数`)不带 —— 补全后进入单项精确态,再次 Enter 执行。
     pub fn complete_text(&self) -> Option<String> {
-        self.selected_entry()
-            .map(|entry| format!("/{name} ", name = entry.name))
+        self.selected_entry().map(|entry| {
+            if entry.name.contains(char::is_whitespace) {
+                format!("/{}", entry.name)
+            } else {
+                format!("/{name} ", name = entry.name)
+            }
+        })
     }
 
     pub fn dismiss(&mut self) {
@@ -120,10 +141,10 @@ impl CommandPopup {
         let width = width.max(4);
         let rows = self.matches.len().min(max_rows.max(1));
         let start = self.selected.saturating_sub(rows - 1);
-        let window: Vec<usize> = self.matches[start..start + rows].to_vec();
+        let window: &[CommandEntry] = &self.matches[start..start + rows];
         let name_w = window
             .iter()
-            .map(|&i| display_width(&self.entries[i].name) + 1)
+            .map(|entry| display_width(&entry.name) + 1)
             .max()
             .unwrap_or(0);
         // 内容量:两侧边框各占 2 列
@@ -134,8 +155,7 @@ impl CommandPopup {
             format!("╭{}", "─".repeat(width.saturating_sub(2))),
             border,
         ))];
-        for (row, &entry_index) in window.iter().enumerate() {
-            let entry = &self.entries[entry_index];
+        for (row, entry) in window.iter().enumerate() {
             let is_selected = start + row == self.selected;
             let marker = if is_selected { "❯ " } else { "  " };
             let name_style = if is_selected {
@@ -179,13 +199,34 @@ impl CommandPopup {
     }
 
     /// 匹配打分:前缀(0)> 子串(1)> 模糊子序列(2);同级按名字排序。
-    fn filtered(&self, query: &str) -> Vec<usize> {
+    /// 查询首词精确命中带变体的命令时,列表展开为变体子项(声明序)。
+    fn filtered(&self, query: &str) -> Vec<CommandEntry> {
         let q = query.to_ascii_lowercase();
-        let mut scored: Vec<(u8, &str, usize)> = self
+        // 查询首词精确命中带变体的命令(带或不带参数)→ 展开变体子项
+        let (first, arg) = match q.split_once(char::is_whitespace) {
+            Some((first, arg)) => (first, Some(arg.trim())),
+            None => (q.as_str(), None),
+        };
+        if let Some(entry) = self.entries.iter().find(|entry| {
+            entry.name.to_ascii_lowercase() == first && !entry.variants.is_empty()
+        }) {
+            return entry
+                .variants
+                .iter()
+                .filter(|(variant, _)| arg.is_none_or(|arg| variant.starts_with(arg)))
+                .map(|(variant, desc)| {
+                    CommandEntry::new(format!("{} {}", entry.name, variant), desc.clone())
+                })
+                .collect();
+        }
+        if arg.is_some() {
+            // 命令名后出现空白且命令无变体:弹窗退场(开始输自由参数)
+            return Vec::new();
+        }
+        let mut scored: Vec<(u8, &str, CommandEntry)> = self
             .entries
             .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| {
+            .filter_map(|entry| {
                 let name = entry.name.to_ascii_lowercase();
                 let score = if name.starts_with(&q) {
                     0
@@ -196,11 +237,11 @@ impl CommandPopup {
                 } else {
                     return None;
                 };
-                Some((score, entry.name.as_str(), i))
+                Some((score, entry.name.as_str(), entry.clone()))
             })
             .collect();
         scored.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
-        scored.into_iter().map(|(_, _, i)| i).collect()
+        scored.into_iter().map(|(_, _, entry)| entry).collect()
     }
 }
 
@@ -310,6 +351,44 @@ mod tests {
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         assert!(texts.iter().any(|t| t.contains("cmd08")), "{texts:?}");
         assert!(!texts.iter().any(|t| t.contains("cmd00")));
+    }
+
+    #[test]
+    fn variants_expand_on_exact_command_and_filter_by_arg_prefix() {
+        let mut p = CommandPopup::new(vec![CommandEntry::new("mode", "切换模式").with_variants(
+            vec![
+                ("plan".into(), "只读".into()),
+                ("confirm".into(), "确认".into()),
+                ("full-access".into(), "全自动".into()),
+            ],
+        )]);
+        // 输入 /mode:直接展开三个子项(声明序,不按字母重排)
+        assert!(p.sync("/mode"));
+        let names: Vec<&str> = (0..p.match_count())
+            .map(|i| p.matches[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["mode plan", "mode confirm", "mode full-access"]);
+        // 参数前缀继续过滤
+        assert!(p.sync("/mode c"));
+        assert_eq!(p.match_count(), 1);
+        assert_eq!(
+            p.selected_entry().map(|e| e.name.as_str()),
+            Some("mode confirm")
+        );
+        // 补全不带尾随空格 → 单项精确态 → Enter 语义为执行
+        assert_eq!(p.complete_text().as_deref(), Some("/mode confirm"));
+        assert!(p.sync("/mode confirm"));
+        assert!(p.is_exact_match(), "补全后应为精确匹配(Enter 执行)");
+    }
+
+    #[test]
+    fn trailing_space_after_variant_arg_stays_exact() {
+        let mut p = CommandPopup::new(vec![CommandEntry::new("mode", "切换模式").with_variants(
+            vec![("plan".into(), "只读".into()), ("confirm".into(), "确认".into())],
+        )]);
+        p.sync("/mode confirm ");
+        assert!(p.is_exact_match(), "尾随空格不影响精确匹配判定");
+        assert_eq!(p.match_count(), 1);
     }
 
     #[test]

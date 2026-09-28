@@ -14,6 +14,10 @@ use rpi_agent::{AgentError, AgentEvent, AgentMessage, LoopHooks, Subscriber, Too
 use rpi_ai::{is_context_overflow, Model, Provider, StreamOptions};
 
 use crate::extensions::{ExtensionActions, ExtensionDiagnostic, ExtensionRegistry, ExtensionUi};
+use crate::permission::{
+    mode_baseline_tools, classify_tool, ApprovalDecision, ApprovalRequest, PermissionEngine,
+    SessionMode, PLAN_MODE_SECTION,
+};
 use crate::retry::RetryHooks;
 use crate::system_prompt::{
     build_system_prompt_sections, build_system_prompt_state, SystemPromptOptions,
@@ -50,6 +54,11 @@ pub trait SessionSink: Send + Sync {
 
     /// 激活工具集变更(元数据 entry,不进模型上下文;恢复时按此重建激活集)
     async fn append_tool_set_change(&self, _tools: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 会话模式变更(元数据 entry,不进模型上下文;恢复时按此重建模式)
+    async fn append_mode_change(&self, _mode: &str) -> Result<(), String> {
         Ok(())
     }
 
@@ -100,6 +109,15 @@ pub enum AgentSessionEvent {
         success: bool,
         reason: String,
     },
+    /// 审批请求已弹出(hook 内广播;UI 据此绘制弹窗/压队列)
+    ApprovalRequested {
+        request: ApprovalRequest,
+    },
+    /// 审批已决策(含会话缓存命中自动批准的,decision 照发)
+    ApprovalResolved {
+        tool_call_id: String,
+        decision: ApprovalDecision,
+    },
 }
 
 /// session 事件订阅者(mode/持久化/扩展 UI)。
@@ -137,6 +155,12 @@ pub struct AgentSessionConfig {
     /// 外部预建的订阅者列表(可选):装配方需要把同一列表交给多个事件源
     /// (如 SessionBridge 与 retry hooks)时传入;缺省内部新建。
     pub subscribers: Option<Arc<Mutex<Vec<SessionSharedSubscriber>>>>,
+    /// 权限引擎(可选):未装配 = 无权限行为(现状退化,可拆卸判据)。
+    /// `set_mode` 经此触达引擎切档;ApprovalHooks 持有同一 Arc。
+    pub permission: Option<Arc<PermissionEngine>>,
+    /// 模式的工具上限(settings `tools` 用户上限):模式基线与之取交集;
+    /// None = 无上限(仅模式基线约束)。
+    pub mode_tool_ceiling: Option<Vec<String>>,
 }
 
 /// 运行期可变状态(锁保护;无全局状态)。
@@ -147,6 +171,12 @@ struct SessionRuntime {
     /// 避免丢 custom_prompt/context_files/append 等用户配置
     system_prompt_options: SystemPromptOptions,
     active_tool_names: Vec<String>,
+    /// 当前会话模式(与 PermissionEngine 同步;未装配引擎时也是唯一事实源)
+    mode: SessionMode,
+    /// 新会话默认模式(/new 与新建会话落盘用;装配期由 settings/CLI 决定)
+    default_mode: SessionMode,
+    /// 模式基线的工具上限(settings `tools`)
+    mode_tool_ceiling: Option<Vec<String>>,
     /// 每次 run 只尝试一次 overflow 恢复(04 文档 _overflowRecoveryAttempted)
     overflow_recovery_attempted: bool,
 }
@@ -180,6 +210,8 @@ pub struct AgentSession {
     /// transcript 统一:模型/思考级别/usage 变更经同一 sink 落盘
     session_sink: Option<Arc<dyn SessionSink>>,
     compactor: Option<Arc<dyn ContextCompactor>>,
+    /// 权限引擎(可选;见 AgentSessionConfig.permission)
+    permission: Option<Arc<PermissionEngine>>,
     runtime: Mutex<SessionRuntime>,
     /// 装配期收集的扩展诊断(init 失败跳过等,07 §8.5),面向 mode 可见。
     extension_diagnostics: Vec<ExtensionDiagnostic>,
@@ -261,12 +293,16 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
         subscribers,
         session_sink: config.session_sink,
         compactor: config.compactor,
+        permission: config.permission,
         extension_diagnostics,
         runtime: Mutex::new(SessionRuntime {
             system_prompt: state,
             system_prompt_options: options,
             sections,
             active_tool_names,
+            mode: SessionMode::Plan,
+            default_mode: SessionMode::Plan,
+            mode_tool_ceiling: config.mode_tool_ceiling,
             overflow_recovery_attempted: false,
         }),
     })
@@ -447,6 +483,106 @@ impl AgentSession {
             sink.append(&message).await.map_err(|error| {
                 CoreError::SystemPrompt(format!("session sink append: {error}"))
             })?;
+        }
+        Ok(())
+    }
+
+    /// 切换会话模式(13 文档 §8.4,模式切换的唯一入口):工具集 + 系统提示词
+    /// mode 节 + 引擎切档 + entry 落盘,一次完成。落盘内联 await(理由同
+    /// set_model:spawn 异步写会让 entry 排在后续消息之后)。
+    pub async fn set_mode(&self, mode: SessionMode) -> Result<(), CoreError> {
+        self.apply_mode(mode, true).await
+    }
+
+    /// 恢复场景的 mode 应用(不落 entry;resume 回填用)。
+    pub async fn apply_mode_without_persist(&self, mode: SessionMode) -> Result<(), CoreError> {
+        self.apply_mode(mode, false).await
+    }
+
+    /// 新会话默认模式(/new 落盘用)。
+    pub fn default_mode(&self) -> SessionMode {
+        self.runtime.lock().unwrap().default_mode
+    }
+
+    pub fn set_default_mode(&self, mode: SessionMode) {
+        self.runtime.lock().unwrap().default_mode = mode;
+    }
+
+    /// 当前会话模式(footer 状态栏/交互展示用)。
+    pub fn mode(&self) -> SessionMode {
+        self.runtime.lock().unwrap().mode
+    }
+
+    /// 当前系统提示词 sections(诊断/测试用;含 Plan 模式的 `<mode>` 节)。
+    pub fn system_prompt_sections(&self) -> SystemPromptSections {
+        self.runtime.lock().unwrap().sections.clone()
+    }
+
+    async fn apply_mode(&self, mode: SessionMode, persist: bool) -> Result<(), CoreError> {
+        let (sandbox_available, ceiling) = {
+            let runtime = self.runtime.lock().unwrap();
+            (
+                self.permission
+                    .as_ref()
+                    .map(|engine| engine.sandbox_available())
+                    .unwrap_or(true),
+                runtime.mode_tool_ceiling.clone(),
+            )
+        };
+        // 模式基线 ∩ 会话可用工具 ∩ 用户上限(settings `tools`)
+        let mut names = mode_baseline_tools(mode, sandbox_available)
+            .into_iter()
+            .filter(|name| self.tools_all.iter().any(|tool| tool.name() == name))
+            .collect::<Vec<_>>();
+        if mode != SessionMode::Plan {
+            // Confirm/FullAccess:扩展工具(非内置)保持可用,受上限约束
+            for tool in &self.tools_all {
+                let name = tool.name();
+                if classify_tool(name) == crate::permission::ToolRiskClass::External
+                    && !names.iter().any(|existing| existing == name)
+                {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        if let Some(ceiling) = &ceiling {
+            names.retain(|name| ceiling.contains(name));
+        }
+        self.set_active_tools_by_name(&names).await?;
+
+        // 系统提示词 mode 节(Plan 注入,其余移除);Forced 整 prompt 不参与重建
+        let options = {
+            let mut runtime = self.runtime.lock().unwrap();
+            runtime.mode = mode;
+            let mut options = runtime.system_prompt_options.clone();
+            if mode == SessionMode::Plan {
+                options
+                    .sections
+                    .insert("mode".into(), PLAN_MODE_SECTION.into());
+            } else {
+                options.sections.remove("mode");
+            }
+            runtime.system_prompt_options = options.clone();
+            options
+        };
+        {
+            let runtime = self.runtime.lock().unwrap();
+            if matches!(runtime.system_prompt, SystemPromptState::Sections(_)) {
+                drop(runtime);
+                self.update_system_prompt(options)?;
+            }
+        }
+
+        // 引擎切档(清审批缓存)
+        if let Some(engine) = &self.permission {
+            engine.set_mode(mode);
+        }
+        if persist {
+            if let Some(sink) = &self.session_sink {
+                if let Err(error) = sink.append_mode_change(mode.as_str()).await {
+                    eprintln!("[rpi] session sink mode change append failed: {error}");
+                }
+            }
         }
         Ok(())
     }

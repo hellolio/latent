@@ -35,7 +35,7 @@ use rpi_ai::{
 use crate::agent::QueueMode;
 use crate::event::{AgentEvent, MessageDeltaPayload, SharedPartial, Subscriber};
 use crate::hooks::{
-    LoopHooks, ToolCallCtx, ToolPatch, ToolResultCtx, TurnCtx, TurnDecision, TurnUpdate,
+    LoopHooks, ToolBlock, ToolCallCtx, ToolPatch, ToolResultCtx, TurnCtx, TurnDecision, TurnUpdate,
 };
 use crate::message::{now_ms, AgentMessage};
 use crate::tool::{Tool, ToolCall, ToolError, ToolExecution, ToolOutput, ToolUpdater};
@@ -1335,7 +1335,7 @@ async fn execute_batch_sequential(
             outcomes.push(outcome);
             continue;
         }
-        let outcome = match prepare_call(call, tools, hooks).await {
+        let outcome = match prepare_call(call, tools, hooks, cancel).await {
             Prepared::Immediate(outcome) => outcome,
             Prepared::Ready(tool, effective) => {
                 execute_and_finalize(
@@ -1382,7 +1382,7 @@ async fn execute_batch_parallel(
             slots[index] = Some(ToolOutcome::Cancelled { call: call.clone() });
             continue;
         }
-        match prepare_call(call, tools, hooks).await {
+        match prepare_call(call, tools, hooks, cancel).await {
             Prepared::Immediate(outcome) => {
                 emit_tool_end_for_outcome(sink, &outcome).await;
                 slots[index] = Some(outcome);
@@ -1462,10 +1462,13 @@ enum Prepared {
 
 /// prepare 阶段(03 文档 §5.4.1):按名找工具 → 参数校验 → beforeToolCall。
 /// immediate 失败/拦截直接落定;成功返回待执行工具 + 生效参数(改参后重新校验)。
+/// beforeToolCall 可能 await 人工审批(13 文档 §4.2),与 cancel token
+/// `select!` 使审批等待可被 abort 打断(打断 = Blocked + "已中止")。
 async fn prepare_call(
     call: &ToolCall,
     tools: &[Arc<dyn Tool>],
     hooks: &Arc<dyn LoopHooks>,
+    cancel: &CancellationToken,
 ) -> Prepared {
     let Some(tool) = tools.iter().find(|tool| tool.name() == call.name) else {
         return Prepared::Immediate(ToolOutcome::Completed {
@@ -1487,16 +1490,22 @@ async fn prepare_call(
     }
 
     // beforeToolCall 钩子:block=true → 错误结果(可带 terminate);
-    // block=false 且 args=Some → 以改参后的参数继续执行(07 §8.6)
+    // block=false 且 args=Some → 以改参后的参数继续执行(07 §8.6)。
+    // 审批等待与 abort 竞速:cancel 先触发则不再等人工应答
     let mut effective = call.clone();
-    if let Some(decision) = hooks
-        .before_tool_call(ToolCallCtx {
+    let hook_decision = tokio::select! {
+        _ = cancel.cancelled() => Some(ToolBlock {
+            block: true,
+            reason: "已中止".into(),
+            ..Default::default()
+        }),
+        decision = hooks.before_tool_call(ToolCallCtx {
             tool_call_id: call.id.clone(),
             name: call.name.clone(),
             args: call.args.clone(),
-        })
-        .await
-    {
+        }) => decision,
+    };
+    if let Some(decision) = hook_decision {
         if decision.block {
             return Prepared::Immediate(ToolOutcome::Blocked {
                 call: call.clone(),

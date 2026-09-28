@@ -23,7 +23,7 @@ use rpi_tui::{Key, Theme, TuiApp};
 use tokio::sync::mpsc;
 
 use crate::assembly::BuiltSession;
-pub use events::{create_tui_ui, TuiUi, UiEvent};
+pub use events::{create_tui_ui, TuiApprovalUi, TuiUi, UiEvent};
 
 use handlers::InteractiveCtx;
 use state::InteractiveState;

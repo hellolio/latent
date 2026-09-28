@@ -72,6 +72,8 @@ impl EventLog {
 impl SessionSubscriber for EventLog {
     async fn on_session_event(&self, event: &AgentSessionEvent) {
         match event {
+            AgentSessionEvent::ApprovalRequested { .. }
+            | AgentSessionEvent::ApprovalResolved { .. } => {}
             AgentSessionEvent::Agent(agent_event) => {
                 if let AgentEvent::MessageDelta {
                     delta: rpi_agent::MessageDeltaPayload::Text { delta },
@@ -133,6 +135,8 @@ async fn build_session(
         session_sink: Some(sink.clone()),
         seed_messages: Vec::new(),
         compactor: None,
+        permission: None,
+        mode_tool_ceiling: None,
     })
     .await
     .unwrap();
@@ -307,6 +311,8 @@ async fn overflow_recovery_trims_and_retries() {
         session_sink: Some(sink.clone()),
         seed_messages: Vec::new(),
         compactor: None,
+        permission: None,
+        mode_tool_ceiling: None,
     })
     .await
     .unwrap();
@@ -385,6 +391,8 @@ async fn extension_registered_tool_joins_session() {
         session_sink: None,
         seed_messages: Vec::new(),
         compactor: None,
+        permission: None,
+        mode_tool_ceiling: None,
     })
     .await
     .unwrap();
@@ -478,6 +486,8 @@ async fn overflow_recovery_uses_unified_compactor() {
         seed_messages: Vec::new(),
         compactor: Some(compactor.clone()),
         subscribers: None,
+        permission: None,
+        mode_tool_ceiling: None,
     })
     .await
     .unwrap();
@@ -540,6 +550,8 @@ async fn auto_compact_triggers_at_threshold_after_run() {
         seed_messages: Vec::new(),
         compactor: Some(compactor.clone()),
         subscribers: None,
+        permission: None,
+        mode_tool_ceiling: None,
     })
     .await
     .unwrap();

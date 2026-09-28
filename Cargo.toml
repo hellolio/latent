@@ -7,6 +7,7 @@ members = [
     "crates/rpi-tools",
     "crates/rpi-core",
     "crates/rpi-tui",
+    "crates/rpi-sandbox",
     "crates/rpi-cli",
 ]
 
@@ -23,6 +24,7 @@ rpi-session = { path = "crates/rpi-session" }
 rpi-tools = { path = "crates/rpi-tools" }
 rpi-core = { path = "crates/rpi-core" }
 rpi-tui = { path = "crates/rpi-tui" }
+rpi-sandbox = { path = "crates/rpi-sandbox" }
 
 async-trait = "0.1"
 futures = "0.3"

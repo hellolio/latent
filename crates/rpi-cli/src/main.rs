@@ -37,12 +37,17 @@ enum Mode {
 
 enum Args {
     MockExtensionServer,
+    /// landlock 沙箱 helper(内部使用,不由用户直接调用;13 文档 §7.4)
+    LandlockHelper(Vec<String>),
     Run {
         mode: Mode,
         provider: Option<String>,
         model: Option<String>,
         theme: Option<String>,
         cont: bool,
+        session_mode: Option<String>,
+        sandbox_writes: Vec<String>,
+        sandbox_network: bool,
         prompt: Option<String>,
     },
     Invalid(String),
@@ -52,12 +57,20 @@ fn parse_args(args: &[String]) -> Args {
     if args.iter().any(|a| a == "--mcp-mock-server") {
         return Args::MockExtensionServer;
     }
+    // landlock helper:沙箱包装产物以本可执行文件为 helper,先落 Landlock/
+    // seccomp 限制再 exec 真命令(参数由 rpi-sandbox wrap_command 生成)
+    if let Some(pos) = args.iter().position(|a| a == rpi_sandbox::landlock::HELPER_FLAG) {
+        return Args::LandlockHelper(args[pos + 1..].to_vec());
+    }
     let mut mode: Option<Mode> = None;
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
     let mut theme: Option<String> = None;
     let mut mock = false;
     let mut cont = false;
+    let mut session_mode: Option<String> = None;
+    let mut sandbox_writes: Vec<String> = Vec::new();
+    let mut sandbox_network = false;
     let mut prompt_parts: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -92,6 +105,27 @@ fn parse_args(args: &[String]) -> Args {
                 cont = true;
                 i += 1;
             }
+            "--session-mode" if i + 1 < args.len() => {
+                session_mode = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--plan" => {
+                session_mode = Some("plan".into());
+                i += 1;
+            }
+            "--yolo" => {
+                // 对标 Codex --dangerously-bypass-approvals-and-sandbox:全自动
+                session_mode = Some("full-access".into());
+                i += 1;
+            }
+            "--sandbox-write" if i + 1 < args.len() => {
+                sandbox_writes.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--sandbox-network" => {
+                sandbox_network = true;
+                i += 1;
+            }
             arg if arg.starts_with("--") => return Args::Invalid(format!("未知参数: {arg}")),
             arg => {
                 prompt_parts.push(arg.to_string());
@@ -111,12 +145,23 @@ fn parse_args(args: &[String]) -> Args {
         }
     });
     let prompt = (!prompt_parts.is_empty()).then(|| prompt_parts.join(" "));
+    // 组合约束(13 文档 §10.1):FullAccess 与沙箱参数互斥
+    if session_mode.as_deref() == Some("full-access")
+        && (!sandbox_writes.is_empty() || sandbox_network)
+    {
+        return Args::Invalid(
+            "--yolo/--session-mode full-access 与 --sandbox-write/--sandbox-network 互斥".into(),
+        );
+    }
     Args::Run {
         mode,
         provider,
         model,
         theme,
         cont,
+        session_mode,
+        sandbox_writes,
+        sandbox_network,
         prompt,
     }
 }
@@ -124,6 +169,8 @@ fn parse_args(args: &[String]) -> Args {
 async fn run(args: &[String]) -> Result<(), String> {
     match parse_args(args) {
         Args::MockExtensionServer => rpi_cli::mcp_mock::run_mock_server().await,
+        Args::LandlockHelper(args) => rpi_sandbox::landlock::run_helper(&args)
+            .map_err(|error| format!("landlock helper: {error}")),
         Args::Invalid(message) => {
             eprintln!("{message}");
             print_help();
@@ -135,13 +182,30 @@ async fn run(args: &[String]) -> Result<(), String> {
             model,
             theme,
             cont,
+            session_mode,
+            sandbox_writes,
+            sandbox_network,
             prompt,
         } => {
             let (provider, model) = resolve_provider_and_model(provider, model)?;
             let extension_specs = load_mcp_server_specs();
             let session_store = resolve_session_store(cont)?;
             // settings 运行期开关在入口解析一次,装配层不读用户配置文件
-            let settings = rpi_cli::assembly::load_session_settings();
+            let mut settings = rpi_cli::assembly::load_session_settings();
+            // CLI flag > settings(13 文档 §12 优先级)
+            if let Some(name) = &session_mode {
+                settings.session_mode = rpi_core::SessionMode::parse(name)
+                    .ok_or_else(|| format!("未知会话模式: {name}(plan|confirm|full-access)"))?;
+            }
+            for dir in sandbox_writes {
+                settings.sandbox.writable_roots.push(dir);
+            }
+            if sandbox_network {
+                settings.sandbox.network_access = true;
+            }
+            // 会话模式 CLI 解析结果作为显式覆盖传入装配(resume 时优先于 entry)
+            let cli_session_mode =
+                session_mode.as_deref().and_then(rpi_core::SessionMode::parse);
             match mode {
                 Mode::Print => {
                     let prompt = require_prompt(prompt).await?;
@@ -152,6 +216,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                         extension_specs,
                         session_store,
                         settings,
+                        cli_session_mode,
                     )
                     .await?;
                     println!("== 完成(stop: {stop:?})==");
@@ -168,6 +233,9 @@ async fn run(args: &[String]) -> Result<(), String> {
                         extension_specs,
                         session_store,
                         settings,
+                        None,
+                        None,
+                        cli_session_mode,
                     )
                     .await?;
                     modes::json::run_json_mode(built, prompt, out).await?;
@@ -178,6 +246,9 @@ async fn run(args: &[String]) -> Result<(), String> {
                     let writer: modes::rpc::SharedRpcWriter =
                         Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
                     let ui = Arc::new(modes::rpc::RpcUi::new(writer.clone()));
+                    // 审批反向通道:与 RpcUi 同一 writer;run_rpc_mode 路由应答
+                    let rpc_approval =
+                        Arc::new(modes::rpc::RpcApprovalUi::new(writer.clone()));
                     let built = modes::print_mode::build_bare_session(
                         provider,
                         model,
@@ -185,6 +256,9 @@ async fn run(args: &[String]) -> Result<(), String> {
                         extension_specs,
                         session_store,
                         settings,
+                        None,
+                        Some(rpc_approval),
+                        cli_session_mode,
                     )
                     .await?;
                     modes::rpc::run_rpc_mode(built, tokio::io::stdin(), writer).await
@@ -192,6 +266,8 @@ async fn run(args: &[String]) -> Result<(), String> {
                 Mode::Interactive => {
                     // UI 通道在装配期创建(扩展 init 可能就会调 UI)
                     let (ui, ui_rx) = modes::interactive::create_tui_ui();
+                    let approval_ui: Arc<dyn rpi_core::ApprovalUi> =
+                        Arc::new(ui.approval_ui());
                     let built = modes::print_mode::build_bare_session(
                         provider,
                         model,
@@ -199,6 +275,9 @@ async fn run(args: &[String]) -> Result<(), String> {
                         extension_specs,
                         session_store,
                         settings,
+                        Some(approval_ui),
+                        None,
+                        cli_session_mode,
                     )
                     .await?;
                     modes::interactive::run_interactive_mode(built, ui, ui_rx, theme).await

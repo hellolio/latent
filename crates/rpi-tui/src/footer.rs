@@ -33,6 +33,8 @@ pub struct FooterData {
     pub thinking: String,
     /// auto-compact 开启标记(ctx% 后缀 `(auto)`)
     pub auto_compact: bool,
+    /// 会话模式标记(13 文档 §10.3:plan 黄 / confirm 默认 / full-access 红)
+    pub mode: Option<String>,
     /// ctrl+o 全局展开态(第一行追加 `· expanded` 提示)
     pub expanded: bool,
 }
@@ -54,14 +56,22 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
     let line1 = truncate_line(Line::from(first), width);
 
     let line2 = right_align(usage_line(data, theme), width);
-    let line3 = right_align(
-        Line::from(Span::styled(
-            format!("{} · t:{}", data.model, data.thinking),
-            // 模型行与 cwd 同色(此前 muted 过暗,与背景区分度不足)
-            Style::new().fg(theme.footer_cwd),
-        )),
-        width,
-    );
+    let mut line3_spans: Vec<Span<'static>> = Vec::new();
+    if let Some(mode) = &data.mode {
+        // 模式标记:full-access 红色警示,plan 黄色提醒只读
+        let style = match mode.as_str() {
+            "full-access" => Style::new().fg(theme.error),
+            "plan" => Style::new().fg(theme.warning),
+            _ => Style::new().fg(theme.dim),
+        };
+        line3_spans.push(Span::styled(format!("[{mode}] "), style));
+    }
+    line3_spans.push(Span::styled(
+        format!("{} · t:{}", data.model, data.thinking),
+        // 模型行与 cwd 同色(此前 muted 过暗,与背景区分度不足)
+        Style::new().fg(theme.footer_cwd),
+    ));
+    let line3 = right_align(Line::from(line3_spans), width);
     vec![line1, line2, line3]
 }
 
@@ -278,6 +288,7 @@ mod tests {
             thinking: "high".into(),
             auto_compact: true,
             expanded: false,
+            mode: Some("confirm".into()),
         }
     }
 
@@ -312,6 +323,36 @@ mod tests {
         let third = line_text(&out[2]);
         assert!(third.ends_with("mock/m1 · t:high"), "{third}");
         assert_eq!(display_width(&third), 80);
+    }
+
+    #[test]
+    fn mode_marker_renders_with_distinct_colors() {
+        let theme = theme();
+        // plan 标记(黄色提醒只读)
+        let mut plan = data();
+        plan.mode = Some("plan".into());
+        let out = lines(&plan, 80, &theme);
+        let plan_span = out[2]
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with("[plan]"))
+            .unwrap_or_else(|| panic!("plan 标记应出现在第三行"));
+        assert_eq!(plan_span.style.fg, Some(theme.warning));
+        // full-access 标记(红色警示)
+        let mut yolo = data();
+        yolo.mode = Some("full-access".into());
+        let out = lines(&yolo, 80, &theme);
+        let yolo_span = out[2]
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with("[full-access]"))
+            .unwrap_or_else(|| panic!("full-access 标记应出现在第三行"));
+        assert_eq!(yolo_span.style.fg, Some(theme.error));
+        // 无模式标记时不渲染
+        let mut no_mode = data();
+        no_mode.mode = None;
+        let out = lines(&no_mode, 80, &theme);
+        assert!(!line_text(&out[2]).contains("["));
     }
 
     #[test]

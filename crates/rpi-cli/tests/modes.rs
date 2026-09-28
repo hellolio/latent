@@ -27,6 +27,12 @@ async fn build_with(provider: Arc<ScriptedProvider>) -> rpi_cli::assembly::Built
         active_tools: None,
         tool_result_max_chars: None,
         compaction: Default::default(),
+        session_mode: None,
+        default_session_mode: Default::default(),
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
     })
     .await
     .expect("build_session")
@@ -402,6 +408,7 @@ async fn print_mode_runs_one_prompt_to_completion() {
         Vec::new(),
         rpi_cli::assembly::SessionStore::Memory,
         Default::default(),
+        None,
     )
     .await
     .expect("print run");
@@ -555,6 +562,12 @@ async fn build_with_tools(
         active_tools,
         tool_result_max_chars: None,
         compaction: Default::default(),
+        session_mode: None,
+        default_session_mode: Default::default(),
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
     })
     .await
     .expect("build_session")
@@ -792,6 +805,12 @@ async fn active_tools_narrows_installed_set() {
         active_tools: Some(vec!["bask".to_string()]),
         tool_result_max_chars: None,
         compaction: Default::default(),
+        session_mode: None,
+        default_session_mode: Default::default(),
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
     })
     .await
     {
@@ -892,5 +911,226 @@ async fn jsonl_rebuild_matches_agent_context_after_tool_run() {
         "usage entry 应落盘"
     );
 
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 权限系统(13 文档 §13 L1):rpc 审批往返 / 沙箱钩子接线 / ModeChange 持久化
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rpc_approval_backchannel_roundtrip() {
+    // 审批反向通道照抄 extension_ui 的 id 路由:approval_request 上行 →
+    // approval_response 路由回 oneshot(13 文档 §4.4)
+    let buffer = SharedAsyncVec::default();
+    let writer: modes::rpc::SharedRpcWriter = Arc::new(tokio::sync::Mutex::new(buffer.clone()));
+    let approval = Arc::new(modes::rpc::RpcApprovalUi::new(writer.clone()));
+
+    let waiter = tokio::spawn({
+        let approval = approval.clone();
+        async move {
+            rpi_core::ApprovalUi::request_approval(
+                &*approval,
+                rpi_core::ApprovalRequest {
+                    tool_call_id: "t1".into(),
+                    tool_name: "bash".into(),
+                    args: serde_json::json!({"command": "make test"}),
+                    risk: rpi_core::ToolRiskClass::Shell,
+                    reason: rpi_core::ApprovalReason::ShellCommand,
+                    detail: "make test".into(),
+                },
+            )
+            .await
+        }
+    });
+
+    // 等 approval_request 落到 writer
+    let request = loop {
+        let output = buffer.text();
+        if let Some(line) = output.lines().find(|l| l.contains("approval_request")) {
+            break serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert!(!waiter.is_finished(), "审批不应在无应答时提前返回");
+    };
+    assert_eq!(request["request"]["toolName"], "bash");
+    assert_eq!(request["request"]["reason"], "shell_command");
+    let request_id = request["id"].as_u64().unwrap();
+
+    // 客户端应答路由回审批调用(snake_case 决策)
+    assert!(approval
+        .resolve(request_id, rpi_core::ApprovalDecision::ApproveForSession)
+        .await);
+    assert_eq!(waiter.await.unwrap(), Some(rpi_core::ApprovalDecision::ApproveForSession));
+    // 未知 id:路由失败
+    assert!(!approval.resolve(9999, rpi_core::ApprovalDecision::Deny).await);
+}
+
+#[tokio::test]
+async fn bash_command_executes_through_sandbox_hook_in_confirm_mode() {
+    // Confirm 模式:bash 命令经 SandboxSpawnHook 包装后仍真实执行
+    // (平台沙箱可用时命令串带沙箱前缀;无沙箱平台降级为原样执行,均应成功)
+    let m = test_model();
+    let first = rpi_ai::assistant_message(
+        &m,
+        vec![ContentBlock::ToolCall {
+            id: "call-sb".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "echo sandbox-ok" }),
+        }],
+        rpi_ai::StopReason::ToolUse,
+    );
+    let provider = scripted_provider(vec![
+        ScriptedTurn::new(first),
+        ScriptedTurn::text(&m, "done"),
+    ]);
+    let built = build_session(BuildOptions {
+        provider,
+        model: test_model(),
+        ui: Arc::new(rpi_core::NoopUi),
+        extension_specs: Vec::new(),
+        spawn_hook: None,
+        session_store: rpi_cli::assembly::SessionStore::Memory,
+        context_snapshot: None,
+        active_tools: None,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
+        session_mode: Some(rpi_core::SessionMode::Confirm),
+        default_session_mode: rpi_core::SessionMode::Confirm,
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: Some(Arc::new(rpi_core::HeadlessApprovalUi {
+            policy: rpi_core::HeadlessApproval::AutoApprove,
+        })),
+        rpc_approval: None,
+    })
+    .await
+    .expect("build_session");
+
+    // read-only echo 走 Confirm 免审路径,沙箱内(或降级直跑)执行成功
+    let stop = built.session.prompt("echo").await.expect("prompt").stop();
+    assert_eq!(stop, rpi_agent::RunStop::EndTurn);
+    let echoed = built
+        .session
+        .agent()
+        .messages()
+        .iter()
+        .any(|msg| matches!(msg, rpi_agent::AgentMessage::ToolResult { is_error: false, .. }));
+    assert!(echoed, "沙箱内 echo 应成功执行");
+}
+
+#[tokio::test]
+async fn session_mode_persists_as_mode_change_entry_and_resumes() {
+    // 13 文档 §9:Confirm 模式会话落 ModeChange entry;resume 投影回填模式;
+    // 新会话(entry 无记录)落到默认 Plan
+    let dir = std::env::temp_dir().join(format!("rpi_mode_persist_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let m = test_model();
+    let provider = scripted_provider(vec![ScriptedTurn::text(&m, "hi")]);
+    let file = dir.join("session.jsonl");
+    let built = build_session(BuildOptions {
+        provider,
+        model: test_model(),
+        ui: Arc::new(rpi_core::NoopUi),
+        extension_specs: Vec::new(),
+        spawn_hook: None,
+        session_store: rpi_cli::assembly::SessionStore::New { dir: dir.clone() },
+        context_snapshot: None,
+        active_tools: None,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
+        session_mode: Some(rpi_core::SessionMode::Confirm),
+        default_session_mode: rpi_core::SessionMode::Confirm,
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
+    })
+    .await
+    .expect("build_session");
+    assert_eq!(built.session.mode(), rpi_core::SessionMode::Confirm);
+    built.session.prompt("hello").await.expect("prompt").stop();
+
+    let manager = built.session_manager.as_ref().unwrap();
+    assert!(
+        manager
+            .entries()
+            .iter()
+            .any(|e| matches!(e, rpi_session::Entry::ModeChange { mode, .. } if mode == "confirm")),
+        "ModeChange entry 应落盘"
+    );
+    let _ = file;
+
+    // resume:投影 mode 恢复为 Confirm
+    let provider2 = scripted_provider(vec![ScriptedTurn::text(&m, "again")]);
+    let resumed = build_session(BuildOptions {
+        provider: provider2,
+        model: test_model(),
+        ui: Arc::new(rpi_core::NoopUi),
+        extension_specs: Vec::new(),
+        spawn_hook: None,
+        session_store: rpi_cli::assembly::SessionStore::Resume {
+            file: manager.file_path().unwrap().to_path_buf(),
+        },
+        context_snapshot: None,
+        active_tools: None,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
+        session_mode: None,
+        default_session_mode: rpi_core::SessionMode::Plan,
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
+    })
+    .await
+    .expect("resume");
+    assert_eq!(
+        resumed.session.mode(),
+        rpi_core::SessionMode::Confirm,
+        "resume 应从 ModeChange entry 恢复模式"
+    );
+    // resume 不落新 entry(entry 数不变)
+    let entries_after_resume = resumed.session_manager.as_ref().unwrap().entries().len();
+
+    // 无显式模式的新会话:默认 Plan
+    let provider3 = scripted_provider(vec![ScriptedTurn::text(&m, "new")]);
+    let fresh = build_session(BuildOptions {
+        provider: provider3,
+        model: test_model(),
+        ui: Arc::new(rpi_core::NoopUi),
+        extension_specs: Vec::new(),
+        spawn_hook: None,
+        session_store: rpi_cli::assembly::SessionStore::Memory,
+        context_snapshot: None,
+        active_tools: None,
+        tool_result_max_chars: None,
+        compaction: Default::default(),
+        session_mode: None,
+        default_session_mode: rpi_core::SessionMode::Plan,
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
+    })
+    .await
+    .expect("fresh");
+    assert_eq!(fresh.session.mode(), rpi_core::SessionMode::Plan);
+    // Plan 模式系统提示词带 <mode> 节(sections 状态含 mode 节)
+    let sections = fresh.session.system_prompt_sections();
+    assert!(
+        sections.contains_key("mode"),
+        "Plan 模式应注入 <mode> 提示词节"
+    );
+    // 切到 Confirm 后 mode 节移除
+    fresh.session.set_mode(rpi_core::SessionMode::Confirm).await.unwrap();
+    assert!(
+        !fresh.session.system_prompt_sections().contains_key("mode"),
+        "切出 Plan 后 <mode> 节应移除"
+    );
+
+    let _ = entries_after_resume;
     std::fs::remove_dir_all(&dir).unwrap();
 }

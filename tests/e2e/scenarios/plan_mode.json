@@ -1,0 +1,24 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {"command": "rm -rf build"}
+      }
+    ]
+  },
+  {
+    "text": "<proposed_plan>\n- 第一步:阅读现有实现\n- 第二步:按计划修改文件\n</proposed_plan>"
+  },
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {"command": "echo written after approval > e2e-plan-mode.txt"}
+      }
+    ]
+  },
+  {
+    "text": "文件已写入"
+  }
+]

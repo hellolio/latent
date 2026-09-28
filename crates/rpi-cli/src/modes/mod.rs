@@ -42,6 +42,24 @@ pub fn session_event_to_json(event: &AgentSessionEvent) -> Option<Value> {
             "success": success,
             "reason": reason,
         })),
+        AgentSessionEvent::ApprovalRequested { request } => {
+            // 审批载荷整体序列化(ApprovalRequest 自带 serde 形态)
+            match serde_json::to_value(request) {
+                Ok(request) => Some(json!({
+                    "type": "approval_requested",
+                    "request": request,
+                })),
+                Err(_) => None,
+            }
+        }
+        AgentSessionEvent::ApprovalResolved {
+            tool_call_id,
+            decision,
+        } => Some(json!({
+            "type": "approval_resolved",
+            "toolCallId": tool_call_id,
+            "decision": decision,
+        })),
     }
 }
 

@@ -46,6 +46,26 @@ pub fn render_item(
         TranscriptItem::Thinking { text } => {
             thinking_block(text, theme, width, expanded)
         }
+        TranscriptItem::Plan { markdown } => {
+            // 计划模式产出的 <proposed_plan> 块:边框卡片 + 标题 + 引导行
+            // (13 文档 §8.3/§10.4;原始文本仍按普通消息入转录)
+            let inner = width.saturating_sub(4).max(1);
+            let rendered = assistant_markdown(markdown, theme, inner);
+            let mut card = vec![rpi_tui::UiLine::from(ratatui::text::Line::from(
+                ratatui::text::Span::styled(
+                    "实施计划(计划模式产出)".to_string(),
+                    Style::new().fg(theme.warning).add_modifier(Modifier::BOLD),
+                ),
+            ))];
+            card.extend(tool_card::box_around(rendered, width, theme.warning));
+            card.push(rpi_tui::UiLine::from(ratatui::text::Line::from(
+                ratatui::text::Span::styled(
+                    "确认后 /mode confirm 并让模型开始实现".to_string(),
+                    Style::new().fg(theme.dim),
+                ),
+            )));
+            card
+        }
         TranscriptItem::ToolCall { name, args, status } => {
             tool_card::tool_box_top(name, args, (*status).into(), expanded, width, theme)
         }
@@ -343,6 +363,7 @@ pub fn viewport(
         thinking: state.thinking_label.clone(),
         auto_compact: state.auto_compact,
         expanded: state.expanded,
+        mode: Some(state.mode_label.clone()),
     };
     lines.extend(rpi_tui::footer::lines(&footer, width, theme));
 
@@ -450,11 +471,26 @@ fn toolcall_args_preview(partial: &rpi_ai::AssistantMessage) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modes::interactive::state::{InteractiveState, ToolStatus};
+    use crate::modes::interactive::state::{InteractiveState, ToolStatus, TranscriptItem};
     use rpi_tui::text::line_text;
 
     fn theme() -> Theme {
         Theme::dark_ansi()
+    }
+
+    #[test]
+    fn plan_item_renders_as_bordered_card_with_hint() {
+        let item = TranscriptItem::Plan {
+            markdown: "- step 1".into(),
+        };
+        let text = render_item(&item, &theme(), 80, false)
+            .iter()
+            .map(|line| line_text(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("实施计划"), "{text}");
+        assert!(text.contains("step 1"), "{text}");
+        assert!(text.contains("/mode confirm"), "应带切换引导行: {text}");
     }
 
     fn state() -> InteractiveState {
@@ -691,18 +727,18 @@ mod tests {
     #[test]
     fn viewport_shows_slash_popup_above_composer() {
         let mut state = state();
-        state.editor.set_text("/mod");
+        state.editor.set_text("/theme");
         state.sync_slash_popup();
         assert!(state.slash_popup.visible());
         let frame = viewport(&state, None, 0, 6, 8);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        // 弹窗(边框 + 1 个 /model 匹配行)紧贴编辑器区上方
+        // 弹窗(边框 + 1 个 /theme 匹配行)紧贴编辑器区上方
         let popup_top = texts.iter().position(|t| t.starts_with('╭')).unwrap();
-        assert!(texts[popup_top + 1].contains("/model"), "{texts:?}");
+        assert!(texts[popup_top + 1].contains("/theme"), "{texts:?}");
         assert!(texts[popup_top + 2].starts_with('╰'), "{texts:?}");
         // 弹窗下方是编辑器区顶部内边距行(空),再往下才是 ❯ 行
         assert!(texts[popup_top + 3].trim().is_empty(), "{texts:?}");
-        assert!(texts[popup_top + 4].starts_with("❯ /mod"), "{texts:?}");
+        assert!(texts[popup_top + 4].starts_with("❯ /theme"), "{texts:?}");
     }
 
     #[test]

@@ -34,6 +34,12 @@ async fn built_memory_session() -> crate::assembly::BuiltSession {
         active_tools: None,
         tool_result_max_chars: None,
         compaction: Default::default(),
+        session_mode: None,
+        default_session_mode: Default::default(),
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
     })
     .await
     .unwrap()
@@ -655,6 +661,12 @@ async fn replay_renders_thinking_blocks() {
         active_tools: None,
         tool_result_max_chars: None,
         compaction: Default::default(),
+        session_mode: None,
+        default_session_mode: Default::default(),
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
     })
     .await
     .unwrap();
@@ -700,6 +712,12 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
         active_tools: None,
         tool_result_max_chars: None,
         compaction: Default::default(),
+        session_mode: None,
+        default_session_mode: Default::default(),
+        sandbox: Default::default(),
+        approval: Default::default(),
+        approval_ui: None,
+        rpc_approval: None,
     })
     .await
     .unwrap();
@@ -982,12 +1000,12 @@ async fn popup_state_with_input(input: &str) -> (crate::assembly::BuiltSession, 
 async fn typing_slash_opens_filtered_popup() {
     let (_built, state) = popup_state_with_input("/m").await;
     assert!(state.slash_popup.visible(), "输入 /m 应弹出补全");
-    // 前缀(/model)优先,模糊子序列(compact/theme 含 m)次之
-    assert_eq!(state.slash_popup.match_count(), 3);
+    // 前缀(/mode、/model)优先,模糊子序列(compact/theme 含 m)次之
+    assert_eq!(state.slash_popup.match_count(), 4);
     assert_eq!(
         state.slash_popup.selected_entry().map(|e| e.name.as_str()),
-        Some("model"),
-        "前缀匹配应排首位"
+        Some("mode"),
+        "前缀匹配应排首位(COMMANDS 表序)"
     );
 
     // 继续输入到无匹配:弹窗退场
@@ -1020,12 +1038,12 @@ async fn enter_executes_partial_slash_directly() {
     let resolver = rpi_core::create_model_resolver();
     let ctx = ctx_of(&built, &resolver);
     let mut state = test_state();
-    for c in "/mod".chars() {
+    for c in "/think".chars() {
         handle_key(&ctx, &mut state, Key::Char(c)).await;
     }
     // Enter(非完全匹配):补全为完整命令并立即执行,一次回车直达
     handle_key(&ctx, &mut state, Key::Enter).await;
-    assert!(state.select.is_some(), "Enter 应直接执行 /model 打开选择器");
+    assert!(state.select.is_some(), "Enter 应直接执行 /thinking 打开选择器");
     assert!(state.editor.text().is_empty(), "执行后编辑器应清空");
 }
 
@@ -1079,4 +1097,108 @@ async fn arrows_navigate_popup_while_visible() {
         state.slash_popup.selected_entry().map(|e| e.name.clone()),
         first
     );
+}
+
+// ---------------------------------------------------------------------------
+// 审批 overlay(13 文档 §10.3)
+// ---------------------------------------------------------------------------
+
+fn approval_request() -> rpi_core::ApprovalRequest {
+    rpi_core::ApprovalRequest {
+        tool_call_id: "t1".into(),
+        tool_name: "bash".into(),
+        args: serde_json::json!({"command": "make test"}),
+        risk: rpi_core::ToolRiskClass::Shell,
+        reason: rpi_core::ApprovalReason::ShellCommand,
+        detail: "make test".into(),
+    }
+}
+
+#[tokio::test]
+async fn approval_overlay_digit_keys_resolve_decisions() {
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    let mut state = test_state();
+
+    // 审批请求入队 → overlay 渲染(四选项)
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle_ui_event(
+        &ctx,
+        &mut state,
+        UiEvent::Approval {
+            request: approval_request(),
+            responder: tx,
+        },
+    )
+    .await;
+    assert!(state.select.is_some(), "审批请求应打开 overlay");
+    assert!(state
+        .select
+        .as_ref()
+        .unwrap()
+        .prompt
+        .contains("make test"), "overlay 应展示命令详情");
+
+    // 数字键 1 = 批准一次
+    handle_key(&ctx, &mut state, rpi_tui::Key::Char('1')).await;
+    assert_eq!(rx.await.unwrap(), rpi_core::ApprovalDecision::Approve);
+    assert!(state.select.is_none(), "决策后 overlay 关闭");
+}
+
+#[tokio::test]
+async fn approval_overlay_esc_denies_and_ctrl_c_aborts() {
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    let mut state = test_state();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle_ui_event(
+        &ctx,
+        &mut state,
+        UiEvent::Approval {
+            request: approval_request(),
+            responder: tx,
+        },
+    )
+    .await;
+    handle_key(&ctx, &mut state, rpi_tui::Key::Esc).await;
+    assert_eq!(rx.await.unwrap(), rpi_core::ApprovalDecision::Deny);
+
+    // Ctrl+C = 中止本次任务
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle_ui_event(
+        &ctx,
+        &mut state,
+        UiEvent::Approval {
+            request: approval_request(),
+            responder: tx,
+        },
+    )
+    .await;
+    handle_key(&ctx, &mut state, rpi_tui::Key::Ctrl('c')).await;
+    assert_eq!(rx.await.unwrap(), rpi_core::ApprovalDecision::Abort);
+}
+
+#[tokio::test]
+async fn slash_mode_switches_session_mode() {
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let ctx = ctx_of(&built, &resolver);
+    let mut state = test_state();
+
+    for c in "/mode confirm".chars() {
+        handle_key(&ctx, &mut state, rpi_tui::Key::Char(c)).await;
+    }
+    handle_key(&ctx, &mut state, rpi_tui::Key::Enter).await;
+    assert_eq!(built.session.mode(), rpi_core::SessionMode::Confirm);
+    // 不打转录提示(footer 状态栏已显示模式标记)
+    assert_eq!(state.mode_label, "confirm");
+
+    // Shift+Tab 循环:confirm → full-access
+    handle_key(&ctx, &mut state, rpi_tui::Key::BackTab).await;
+    assert_eq!(built.session.mode(), rpi_core::SessionMode::FullAccess);
+    handle_key(&ctx, &mut state, rpi_tui::Key::BackTab).await;
+    assert_eq!(built.session.mode(), rpi_core::SessionMode::Plan);
 }

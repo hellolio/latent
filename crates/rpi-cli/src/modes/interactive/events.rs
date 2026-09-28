@@ -2,7 +2,10 @@
 //! `mpsc` 通道,由事件循环统一消费渲染(接缝 #5 的 interactive 侧)。
 
 use async_trait::async_trait;
-use rpi_core::{AgentSessionEvent, ExtensionUi, SessionSubscriber};
+use rpi_core::{
+    ApprovalDecision, ApprovalRequest, ApprovalUi, AgentSessionEvent, ExtensionUi,
+    SessionSubscriber,
+};
 use tokio::sync::{mpsc, oneshot};
 
 pub enum UiEvent {
@@ -29,6 +32,11 @@ pub enum UiEvent {
         options: Vec<String>,
         responder: oneshot::Sender<Option<usize>>,
     },
+    /// 权限审批请求(13 文档 §10.3):选择列表承载四决策
+    Approval {
+        request: ApprovalRequest,
+        responder: oneshot::Sender<ApprovalDecision>,
+    },
 }
 
 /// interactive 模式的 `ExtensionUi` 真实现:把 UI 调用发进主循环渲染。
@@ -43,6 +51,15 @@ pub struct TuiUi {
 pub fn create_tui_ui() -> (TuiUi, mpsc::UnboundedReceiver<UiEvent>) {
     let (tx, rx) = mpsc::unbounded_channel();
     (TuiUi { tx }, rx)
+}
+
+impl TuiUi {
+    /// 同通道的审批 UI(13 文档 §4.4):审批请求走同一事件循环渲染。
+    pub fn approval_ui(&self) -> TuiApprovalUi {
+        TuiApprovalUi {
+            tx: self.tx.clone(),
+        }
+    }
 }
 
 #[async_trait]
@@ -81,6 +98,29 @@ impl ExtensionUi for TuiUi {
 
 pub(crate) struct SessionToUiSubscriber {
     pub tx: mpsc::UnboundedSender<UiEvent>,
+}
+
+/// interactive 模式的审批 UI(13 文档 §4.4):审批请求进主循环渲染为
+/// 选择列表,用户按键后经 oneshot 回传决策。
+#[derive(Clone)]
+pub struct TuiApprovalUi {
+    pub(crate) tx: mpsc::UnboundedSender<UiEvent>,
+}
+
+impl TuiApprovalUi {
+    pub fn new(tx: mpsc::UnboundedSender<UiEvent>) -> Self {
+        TuiApprovalUi { tx }
+    }
+}
+
+#[async_trait]
+impl ApprovalUi for TuiApprovalUi {
+    async fn request_approval(&self, request: ApprovalRequest) -> Option<ApprovalDecision> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(UiEvent::Approval { request, responder: tx });
+        // 通道关闭(run 已被 abort/退出)= 未获批准 → Deny,不 fail-open
+        rx.await.ok()
+    }
 }
 
 #[async_trait]

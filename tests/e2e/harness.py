@@ -93,6 +93,7 @@ class RpiApp:
         rpi_bin: str | None = None,
         extra_args: list | None = None,
         home: str | None = None,
+        session_mode: str | None = "full-access",
     ):
         self.mock = MockLLM(turns).start()
         self.timeout = timeout
@@ -126,7 +127,12 @@ class RpiApp:
         env["HOME"] = self.home
         env["TERM"] = "xterm-256color"
         bin_path = rpi_bin or _default_rpi_bin()
-        args = ["--mode", "interactive", "--provider", PROVIDER_ID] + (extra_args or [])
+        args = ["--mode", "interactive", "--provider", PROVIDER_ID]
+        # 既有场景按旧全自动语义编写:默认 --session-mode full-access;
+        # 计划模式/审批流场景传 session_mode=None(走默认 Plan)或显式指定
+        if session_mode:
+            args += ["--session-mode", session_mode]
+        args += extra_args or []
         self.child = pexpect.spawn(
             bin_path,
             args,

@@ -86,6 +86,8 @@ async fn failing_extension_is_skipped_with_diagnostic_and_partial_tools_dropped(
         limits: rpi_agent::TurnLimits::default(),
         stream_options: Default::default(),
         subscribers: None,
+        permission: None,
+        mode_tool_ceiling: None,
         session_sink: None,
         compactor: None,
         seed_messages: Vec::new(),

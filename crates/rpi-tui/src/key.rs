@@ -21,6 +21,8 @@ pub enum Key {
     PageUp,
     PageDown,
     Tab,
+    /// Shift+Tab(会话模式循环,13 文档 §10.2)
+    BackTab,
     Esc,
     /// Ctrl+字母(小写归一)
     Ctrl(char),
@@ -66,6 +68,10 @@ pub fn from_key_event(key: &KeyEvent) -> Key {
         KeyCode::End => Key::End,
         KeyCode::PageUp => Key::PageUp,
         KeyCode::PageDown => Key::PageDown,
+        // crossterm 把 CSI Z(\x1b[Z)解析为独立的 KeyCode::BackTab(自带 SHIFT),
+        // 不是 Tab+SHIFT 组合 —— 必须单独映射
+        KeyCode::BackTab => Key::BackTab,
+        KeyCode::Tab if shift => Key::BackTab,
         KeyCode::Tab => Key::Tab,
         KeyCode::Esc => Key::Esc,
         _ => Key::Other,
@@ -92,6 +98,18 @@ mod tests {
         assert_eq!(key(K::Enter, KeyModifiers::empty()), Key::Enter);
         assert_eq!(key(K::Enter, KeyModifiers::SHIFT), Key::ShiftEnter);
         assert_eq!(key(K::Enter, KeyModifiers::ALT), Key::AltEnter);
+    }
+
+    #[test]
+    fn shift_tab_maps_to_back_tab() {
+        // 真实终端发送 CSI Z,crossterm 解析为 KeyCode::BackTab + SHIFT
+        assert_eq!(
+            from_key_event(&KeyEvent::new(K::BackTab, KeyModifiers::SHIFT)),
+            Key::BackTab
+        );
+        // 兜底:部分终端把 Shift+Tab 报成 Tab+SHIFT
+        assert_eq!(key(K::Tab, KeyModifiers::SHIFT), Key::BackTab);
+        assert_eq!(key(K::Tab, KeyModifiers::empty()), Key::Tab);
     }
 
     #[test]

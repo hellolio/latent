@@ -91,7 +91,10 @@ async fn e2e_mock_extension_registers_tool_blocks_bash_and_confirms_via_elicitat
         extension_specs: vec![mock_spec()],
         extra_subscriber: Some(subscriber),
         session_store: rpi_cli::assembly::SessionStore::Memory,
+        // Plan 模式默认收掉 MCP 扩展工具(13 文档 §5),此用例测扩展全链路
+        // → 显式 FullAccess 保持旧行为
         settings: Default::default(),
+        session_mode_override: Some(rpi_core::SessionMode::FullAccess),
     })
     .await
     .expect("E2E session 应成功");

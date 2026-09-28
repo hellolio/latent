@@ -712,6 +712,9 @@ impl SessionSubscriber for ExtensionEventBus {
                 ExtensionEvent::AutoRetryEnd,
                 json!({ "success": success, "reason": reason }),
             ),
+            // 审批是宿主侧业务(13 文档 §4.3),不向扩展分发
+            AgentSessionEvent::ApprovalRequested { .. }
+            | AgentSessionEvent::ApprovalResolved { .. } => return,
         };
         if !self.has_subscriber(event) {
             return;

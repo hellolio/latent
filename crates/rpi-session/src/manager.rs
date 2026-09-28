@@ -335,6 +335,11 @@ impl SessionManager {
                 timestamp,
                 ..
             }
+            | Entry::ModeChange {
+                id: entry_id,
+                timestamp,
+                ..
+            }
             | Entry::BranchSummary {
                 id: entry_id,
                 timestamp,
@@ -481,6 +486,16 @@ impl SessionManager {
             id: String::new(),
             parent_id: None,
             tools: tools.to_vec(),
+            timestamp: 0,
+        })
+    }
+
+    /// 追加会话模式变更 entry(元数据,不进模型上下文;恢复时按此重建模式)。
+    pub fn append_mode_change(&self, mode: impl Into<String>) -> Result<String, SessionError> {
+        self.append_entry(Entry::ModeChange {
+            id: String::new(),
+            parent_id: None,
+            mode: mode.into(),
             timestamp: 0,
         })
     }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use rpi_agent::{AgentMessage, Usage};
 
-pub const CURRENT_SESSION_VERSION: u32 = 5;
+pub const CURRENT_SESSION_VERSION: u32 = 6;
 
 /// 文件首行(06 文档 §1.1):`{"type":"session", ...}`。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -127,6 +127,17 @@ pub enum Entry {
         #[serde(default)]
         timestamp: i64,
     },
+    /// 会话模式变更(元数据,**不进**模型上下文):恢复时按此重建模式,
+    /// 再由模式推导基线工具集(13 文档 §9.1)
+    #[serde(rename_all = "camelCase")]
+    ModeChange {
+        id: String,
+        #[serde(default)]
+        parent_id: Option<String>,
+        mode: String,
+        #[serde(default)]
+        timestamp: i64,
+    },
     /// 树导航离开分支时生成的摘要;**进**模型上下文
     #[serde(rename_all = "camelCase")]
     BranchSummary {
@@ -228,6 +239,7 @@ impl Entry {
             | Entry::Usage { id, .. }
             | Entry::Compaction { id, .. }
             | Entry::ToolSetChange { id, .. }
+            | Entry::ModeChange { id, .. }
             | Entry::BranchSummary { id, .. }
             | Entry::Custom { id, .. }
             | Entry::CustomMessage { id, .. }
@@ -246,6 +258,7 @@ impl Entry {
             | Entry::Usage { parent_id, .. }
             | Entry::Compaction { parent_id, .. }
             | Entry::ToolSetChange { parent_id, .. }
+            | Entry::ModeChange { parent_id, .. }
             | Entry::BranchSummary { parent_id, .. }
             | Entry::Custom { parent_id, .. }
             | Entry::CustomMessage { parent_id, .. }
@@ -264,6 +277,7 @@ impl Entry {
             | Entry::Usage { timestamp, .. }
             | Entry::Compaction { timestamp, .. }
             | Entry::ToolSetChange { timestamp, .. }
+            | Entry::ModeChange { timestamp, .. }
             | Entry::BranchSummary { timestamp, .. }
             | Entry::Custom { timestamp, .. }
             | Entry::CustomMessage { timestamp, .. }
@@ -282,6 +296,7 @@ impl Entry {
             | Entry::Usage { parent_id: p, .. }
             | Entry::Compaction { parent_id: p, .. }
             | Entry::ToolSetChange { parent_id: p, .. }
+            | Entry::ModeChange { parent_id: p, .. }
             | Entry::BranchSummary { parent_id: p, .. }
             | Entry::Custom { parent_id: p, .. }
             | Entry::CustomMessage { parent_id: p, .. }
@@ -469,7 +484,7 @@ mod tests {
         let header = SessionHeader::new("sid".into(), "/tmp".into(), Some("parent".into()));
         let value = serde_json::to_value(&header).unwrap();
         assert_eq!(value["type"], "session");
-        assert_eq!(value["version"], 5);
+        assert_eq!(value["version"], CURRENT_SESSION_VERSION);
         assert_eq!(value["parentSession"], "parent");
         let back: SessionHeader = serde_json::from_value(value).unwrap();
         assert_eq!(back, header);

@@ -61,6 +61,8 @@ pub enum TranscriptItem {
         output: String,
         is_error: bool,
     },
+    /// 计划模式产出的 `<proposed_plan>` 块(边框卡片,13 文档 §8.3)
+    Plan { markdown: String },
     Blank,
 }
 
@@ -98,6 +100,10 @@ pub enum SelectKind {
     Thinking,
     /// 内部选择器(/theme):携带候选主题枚举
     Theme { names: Vec<rpi_tui::ThemeName> },
+    /// 权限审批(13 文档 §10.3):四决策经 oneshot 回传 ApprovalHooks
+    Approval {
+        responder: tokio::sync::oneshot::Sender<rpi_core::ApprovalDecision>,
+    },
 }
 
 pub struct InteractiveState {
@@ -124,6 +130,8 @@ pub struct InteractiveState {
     pub select_queue: VecDeque<SelectRequest>,
     pub model_label: String,
     pub thinking_label: String,
+    /// footer:会话模式标记(13 文档 §10.3)
+    pub mode_label: String,
     pub context_window: u64,
     pub context_tokens: u64,
     /// 双击 Ctrl+C 退出:上一次 Ctrl+C 时刻(非流式期间)
@@ -157,12 +165,7 @@ impl InteractiveState {
             theme_name: None,
             width,
             editor: Editor::new(),
-            slash_popup: CommandPopup::new(
-                crate::modes::slash::COMMANDS
-                    .iter()
-                    .map(|command| CommandEntry::new(command.name, command.description))
-                    .collect(),
-            ),
+            slash_popup: CommandPopup::new(crate::modes::slash::popup_entries()),
             status: Status::Idle,
             spin: 0,
             stream_text: String::new(),
@@ -172,6 +175,7 @@ impl InteractiveState {
             select_queue: VecDeque::new(),
             model_label: "—".into(),
             thinking_label: "off".into(),
+            mode_label: "plan".into(),
             context_window: 0,
             context_tokens: 0,
             last_ctrl_c: None,

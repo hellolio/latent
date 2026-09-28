@@ -95,6 +95,13 @@ pub async fn handle_key(
         }
     }
 
+    // Shift+Tab 循环 Plan → Confirm → FullAccess → Plan(13 文档 §10.2)
+    if key == rpi_tui::Key::BackTab {
+        state.last_ctrl_c = None;
+        let next = ctx.session.mode().next();
+        return cycle_mode(ctx, state, next).await;
+    }
+
     match key {
         rpi_tui::Key::Enter => {
             // Enter 与 Ctrl+O 同普通键:重置双击 Ctrl+C 窗口
@@ -159,6 +166,36 @@ async fn handle_select_key(
     state: &mut InteractiveState,
     key: rpi_tui::Key,
 ) {
+    // 审批 overlay 的数字快捷键:1/2/3/4 直达决策(13 文档 §10.3)
+    if let Some(select) = state.select.as_ref() {
+        if matches!(select.kind, SelectKind::Approval { .. }) {
+            let index = match key {
+                rpi_tui::Key::Char('1') => Some(0usize),
+                rpi_tui::Key::Char('2') => Some(1),
+                rpi_tui::Key::Char('3') => Some(2),
+                rpi_tui::Key::Char('4') => Some(3),
+                _ => None,
+            };
+            if let Some(index) = index {
+                if let Some(request) = state.select.take() {
+                    if let SelectKind::Approval { responder } = request.kind {
+                        let decision = match index {
+                            0 => rpi_core::ApprovalDecision::Approve,
+                            1 => rpi_core::ApprovalDecision::ApproveForSession,
+                            2 => rpi_core::ApprovalDecision::Deny,
+                            _ => rpi_core::ApprovalDecision::Abort,
+                        };
+                        let _ = responder.send(decision);
+                        state.status = Status::Idle;
+                    }
+                }
+                state.promote_next_select();
+            }
+            if matches!(key, rpi_tui::Key::Char('1'..='4')) {
+                return;
+            }
+        }
+    }
     match key {
         rpi_tui::Key::Up => {
             if let Some(select) = state.select.as_mut() {
@@ -204,6 +241,17 @@ async fn handle_select_key(
                             apply_theme(state, *name);
                         }
                     }
+                    SelectKind::Approval { responder } => {
+                        // 13 文档 §10.3:1=批准一次 2=本会话批准 3=拒绝 4=中止
+                        let decision = match index {
+                            0 => rpi_core::ApprovalDecision::Approve,
+                            1 => rpi_core::ApprovalDecision::ApproveForSession,
+                            2 => rpi_core::ApprovalDecision::Deny,
+                            _ => rpi_core::ApprovalDecision::Abort,
+                        };
+                        let _ = responder.send(decision);
+                        state.status = Status::Idle;
+                    }
                 }
             }
             state.promote_next_select();
@@ -220,6 +268,15 @@ async fn handle_select_key(
                     }
                     SelectKind::Model { .. } | SelectKind::Thinking => {}
                     SelectKind::Theme { .. } => {}
+                    SelectKind::Approval { responder } => {
+                        // Esc = 拒绝;Ctrl+C = 中止本次任务(13 文档 §10.3)
+                        let decision = if matches!(key, rpi_tui::Key::Ctrl('c')) {
+                            rpi_core::ApprovalDecision::Abort
+                        } else {
+                            rpi_core::ApprovalDecision::Deny
+                        };
+                        let _ = responder.send(decision);
+                    }
                 }
             }
             state.promote_next_select();
@@ -291,6 +348,29 @@ async fn submit_input(
     }
 }
 
+/// 切换会话模式:set_mode + footer 刷新 + 系统提示(13 文档 §10.2)。
+/// 流式期间允许(下一工具调用生效;正在流式的 turn 不打断)。
+async fn cycle_mode(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    mode: rpi_core::SessionMode,
+) -> bool {
+    match ctx.session.set_mode(mode).await {
+        Ok(()) => {
+            // 不打转录提示:footer 状态栏已显示当前模式标记
+            refresh_footer(ctx, state);
+            state.status = Status::Idle;
+        }
+        Err(error) => {
+            state.commit_ephemeral(view::error_line(
+                &format!("模式切换失败: {error}"),
+                &state.theme,
+            ));
+        }
+    }
+    false
+}
+
 /// 斜杠命令执行(解析在 slash.rs)。
 pub async fn execute_command(
     ctx: &InteractiveCtx<'_>,
@@ -333,6 +413,29 @@ pub async fn execute_command(
                 let _ = ui_tx.send(UiEvent::CompactDone(session.compact().await));
             });
         }
+        slash::SlashAction::Mode { arg } => match arg {
+            Some(name) => match rpi_core::SessionMode::parse(&name) {
+                Some(mode) => {
+                    cycle_mode(ctx, state, mode).await;
+                }
+                None => {
+                    state.commit_ephemeral(view::error_line(
+                        &format!("未知模式: {name}(plan|confirm|full-access)"),
+                        &state.theme,
+                    ));
+                }
+            },
+            None => {
+                let mode = ctx.session.mode();
+                state.commit_ephemeral(warning_line_theme(
+                    &format!(
+                        "当前模式:{}(plan 只读 · confirm 确认 · full-access 全自动;/mode <模式> 或 Shift+Tab 切换)",
+                        mode.label()
+                    ),
+                    &state.theme,
+                ));
+            }
+        },
         slash::SlashAction::New => {
             // 流式期间切换会让进行中的 run 写入错误的 session 文件
             if ctx.session.agent().is_streaming() {
@@ -556,6 +659,7 @@ pub fn refresh_footer(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
         .thinking_level
         .map(|level| level.as_str().to_string())
         .unwrap_or_else(|| "off".into());
+    state.mode_label = ctx.session.mode().label().to_string();
 }
 
 /// /thinking 选择器选项("off" = 关闭,其后为 ThinkingLevel::ALL 顺序)。
@@ -619,6 +723,26 @@ pub async fn handle_ui_event(
                 prompt: message,
                 list: SelectList::new(options),
                 kind: SelectKind::Select(responder),
+            });
+            state.promote_next_select();
+        }
+        UiEvent::Approval { request, responder } => {
+            // 审批 overlay(13 文档 §10.3):原因文案 + 命令/路径详情 + 四决策
+            let mode = ctx.session.mode();
+            state.select_queue.push_back(SelectRequest {
+                prompt: format!(
+                    "审批 {} · {}\n{}",
+                    request.tool_name,
+                    request.reason.message(mode),
+                    request.detail
+                ),
+                list: rpi_tui::SelectList::new(vec![
+                    "批准一次            (Enter/1)".into(),
+                    "本会话批准同类      (2)".into(),
+                    "拒绝                (Esc/3)".into(),
+                    "中止本次任务        (Ctrl+C/4)".into(),
+                ]),
+                kind: SelectKind::Approval { responder },
             });
             state.promote_next_select();
         }
@@ -866,7 +990,13 @@ async fn handle_session_event(
 fn flush_stream(state: &mut InteractiveState, boxed: bool) {
     if !state.stream_text.trim().is_empty() {
         let markdown = std::mem::take(&mut state.stream_text);
-        state.commit(TranscriptItem::Assistant { markdown, boxed });
+        // 计划模式产出的 <proposed_plan> 块渲染为边框卡片(13 文档 §8.3);
+        // 渲染只是展示层,原始文本仍按普通 assistant 消息入转录
+        if markdown.contains("<proposed_plan>") {
+            state.commit(TranscriptItem::Plan { markdown });
+        } else {
+            state.commit(TranscriptItem::Assistant { markdown, boxed });
+        }
     } else {
         state.stream_text.clear();
     }

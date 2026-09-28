@@ -8,6 +8,7 @@
 pub mod config;
 pub mod extensions;
 pub mod model;
+pub mod permission;
 pub mod retry;
 pub mod session;
 pub mod system_prompt;
@@ -20,6 +21,12 @@ pub use extensions::{
     McpConnection, McpServerSpec, NoopUi,
 };
 pub use model::{create_model_resolver, default_model_for, ModelResolver};
+pub use permission::{
+    classify_tool, mode_baseline_tools, normalize_command, policy_for_mode, ApprovalDecision,
+    ApprovalHooks, ApprovalKey, ApprovalReason, ApprovalRequest, ApprovalUi, ApprovalRules,
+    HeadlessApproval, HeadlessApprovalUi, PermissionEngine, SandboxConfig, SandboxPolicy,
+    SessionMode, ToolRiskClass, Verdict,
+};
 pub use retry::{create_retrying_provider, RetryHooks};
 pub use session::{
     create_agent_session, create_session_retry_hooks, AgentSession, AgentSessionConfig,

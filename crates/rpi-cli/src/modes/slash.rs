@@ -42,6 +42,11 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "新建会话(当前会话已保存,原样保留在原文件)",
     },
     SlashCommand {
+        name: "mode",
+        args: "[plan|confirm|full-access]",
+        description: "查看/切换会话模式(Shift+Tab 循环)",
+    },
+    SlashCommand {
         name: "session",
         args: "",
         description: "显示会话信息与统计",
@@ -62,8 +67,36 @@ pub enum SlashAction {
     Theme { arg: Option<String> },
     Compact { arg: Option<String> },
     New,
+    Mode { arg: Option<String> },
     Session,
     Quit,
+}
+
+/// `/mode` 的参数变体(声明序即弹窗展示序;通用 variants 机制,见 command_popup)。
+pub const MODE_VARIANTS: &[(&str, &str)] = &[
+    ("plan", "只读:先列计划,不修改任何文件"),
+    ("confirm", "全工具:文件写入与命令执行前需确认"),
+    ("full-access", "全自动:无审批、无沙箱"),
+];
+
+/// 补全弹窗条目(静态命令表 + `/mode` 参数变体)。
+pub fn popup_entries() -> Vec<rpi_tui::CommandEntry> {
+    COMMANDS
+        .iter()
+        .map(|command| {
+            let entry = rpi_tui::CommandEntry::new(command.name, command.description);
+            if command.name == "mode" {
+                entry.with_variants(
+                    MODE_VARIANTS
+                        .iter()
+                        .map(|(name, desc)| ((*name).to_string(), (*desc).to_string()))
+                        .collect(),
+                )
+            } else {
+                entry
+            }
+        })
+        .collect()
 }
 
 /// 一行输入的解析结果。
@@ -107,6 +140,9 @@ pub fn parse(input: &str) -> SlashInput {
             arg: arg.map(str::to_string),
         }),
         "new" => SlashInput::Command(SlashAction::New),
+        "mode" => SlashInput::Command(SlashAction::Mode {
+            arg: arg.map(str::to_string),
+        }),
         _ => SlashInput::Unknown(format!("/{name}")),
     }
 }
@@ -126,6 +162,7 @@ pub fn help_lines() -> Vec<String> {
     lines.push(
         "  输入 / 弹出命令补全(↑/↓ 选择 · Tab/Enter 补全 · Esc 关闭)".to_string(),
     );
+    lines.push("  Shift+Tab 循环切换会话模式(plan → confirm → full-access)".to_string());
     lines.push("  Enter 发送 · Esc 中止当前 run · Ctrl+C 中断/双击退出 · Ctrl+D 退出".to_string());
     lines
 }

@@ -6,15 +6,18 @@
 //! (08 文档:模式只是同一业务核的不同 I/O 壳);`run_session` 是 print
 //! 模式旧行为的便捷封装,端到端测试复用。
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use rpi_agent::{AgentEvent, RunStop};
 use rpi_core::{
-    create_agent_session, create_extension_event_bus, AgentSession, AgentSessionConfig,
-    AgentSessionEvent, ExtensionHooks, ExtensionUi, McpServerSpec, NoopUi, SessionSharedSubscriber,
-    SessionSink, SessionSubscriber, SystemPromptOptions,
+    create_agent_session, create_extension_event_bus, ApprovalHooks, ApprovalRules, ApprovalUi,
+    AgentSession, AgentSessionConfig, AgentSessionEvent, ExtensionHooks, ExtensionUi, HeadlessApproval,
+    HeadlessApprovalUi, McpServerSpec, NoopUi, PermissionEngine, SandboxConfig, SessionMode,
+    SessionSharedSubscriber, SessionSink, SessionSubscriber, SandboxPolicy as CoreSandboxPolicy,
+    SystemPromptOptions,
 };
 
 /// 读取扩展进程声明:项目 `.rpi/settings.json` → 全局 `~/.rpi/settings.json`,
@@ -63,6 +66,26 @@ struct SettingsFile {
     /// 自动压缩阈值(`compaction` 节)
     #[serde(rename = "compaction", alias = "auto_compact", default)]
     compaction: Option<CompactionConfig>,
+    /// 会话模式(13 文档 §12):plan | confirm | full-access
+    #[serde(rename = "sessionMode", alias = "session_mode", default)]
+    session_mode: Option<String>,
+    /// headless(print/json)遇审批请求的策略:deny | auto-approve
+    #[serde(rename = "headlessApproval", alias = "headless_approval", default)]
+    headless_approval: Option<String>,
+    /// 沙箱细节(Confirm 模式 WorkspaceWrite;Plan 固定 ReadOnly,FullAccess 固定关)
+    #[serde(rename = "sandbox", default)]
+    sandbox: Option<SandboxConfig>,
+    /// 审批规则(Confirm 模式下免审/必禁)
+    #[serde(rename = "approval", default)]
+    approval: Option<ApprovalSettings>,
+}
+
+/// settings `approval` 节。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ApprovalSettings {
+    allow_commands: Option<Vec<String>>,
+    deny_commands: Option<Vec<String>>,
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
@@ -211,6 +234,8 @@ pub struct BuiltSession {
     pub manager_holder: SessionManagerHolder,
     /// 装配生效的压缩配置(/session 展示用)
     pub compaction_config: CompactionConfig,
+    /// rpc 审批通道(run_rpc_mode 路由 approval_response 用;其他模式 None)
+    pub rpc_approval: Option<Arc<crate::modes::rpc::RpcApprovalUi>>,
 }
 
 /// 可切换的会话存储句柄(内部 `Arc<RwLock<Option<Arc<SessionManager>>>>`)。
@@ -267,13 +292,15 @@ pub async fn switch_new_session(
     let new_path = new_manager.file_path().map(|p| p.to_path_buf());
     holder.set(Some(new_manager));
 
-    // 清空转录与队列(错误状态一并复位);模型/思考级别随新文件落设置态 entry
+    // 清空转录与队列(错误状态一并复位);模型/思考级别/会话模式随新文件落
+    // 设置态 entry,保持新会话自描述
     session.agent().reset().map_err(|e| e.to_string())?;
     let snapshot = session.agent().state_snapshot();
     if let Some(model) = snapshot.model {
         session.set_model(model).await;
     }
     session.set_thinking_level(snapshot.thinking_level).await;
+    session.set_mode(session.default_mode()).await.map_err(|e| e.to_string())?;
     Ok(new_path)
 }
 
@@ -311,6 +338,21 @@ pub struct BuildOptions {
     pub tool_result_max_chars: Option<usize>,
     /// 自动压缩阈值(默认 = CompactionSettings::default)。
     pub compaction: CompactionConfig,
+    /// CLI 显式会话模式(--session-mode/--plan/--yolo;None = 未显式指定,
+    /// resume 走 entry 恢复,新会话走 default_session_mode)。
+    pub session_mode: Option<SessionMode>,
+    /// 新会话默认模式(settings `sessionMode` → CLI 覆盖 → Plan)。
+    pub default_session_mode: SessionMode,
+    /// 沙箱细节(Confirm 模式 WorkspaceWrite;CLI --sandbox-* 已在 main 合并)
+    pub sandbox: SandboxConfig,
+    /// 审批规则(settings `approval`)
+    pub approval: ApprovalRules,
+    /// 审批 UI(接缝 #5:interactive 传 TuiApprovalUi,rpc 传 RpcApprovalUi,
+    /// print/json 传 HeadlessApprovalUi;None = 按 deny 策略兜底)
+    pub approval_ui: Option<Arc<dyn ApprovalUi>>,
+    /// rpc 审批通道(供 run_rpc_mode 路由 approval_response;与 approval_ui
+    /// 指向同一实例)
+    pub rpc_approval: Option<Arc<crate::modes::rpc::RpcApprovalUi>>,
 }
 
 /// T9:PI_* 会话环境快照闭包。装配期建共享 cell(`Weak<AgentSession>`),
@@ -374,7 +416,7 @@ pub fn parse_thinking_level(name: &str) -> Option<rpi_ai::ThinkingLevel> {
 /// 从用户 settings 解析出的会话运行期开关。装配层(`build_session`)不直接读
 /// 用户 settings —— CLI 入口(main)解析一次后显式传入,测试/嵌入方自行构造,
 /// 行为不依赖本机配置文件。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SessionSettings {
     /// settings `contextSnapshot`(默认关)
     pub context_snapshot: bool,
@@ -385,6 +427,15 @@ pub struct SessionSettings {
     pub tool_result_max_chars: Option<usize>,
     /// settings 压缩配置(自动压缩阈值,见 `CompactionConfig`)
     pub compaction: CompactionConfig,
+    /// settings `sessionMode`:新会话初始档位(默认 Plan;13 文档 §12)
+    pub session_mode: SessionMode,
+    /// settings `headlessApproval`:print/json 遇审批请求的策略(默认 deny)
+    pub headless_approval: HeadlessApproval,
+    /// settings `sandbox`(Confirm 模式 WorkspaceWrite 细节;CLI --sandbox-*
+    /// 在 main 合并)
+    pub sandbox: SandboxConfig,
+    /// settings `approval`(allow/deny 前缀规则)
+    pub approval: ApprovalRules,
 }
 
 /// 压缩设置(settings `compaction` 节;自动压缩阈值可配置)。
@@ -422,6 +473,35 @@ impl From<CompactionConfig> for rpi_session::CompactionSettings {
     }
 }
 
+impl Default for SessionSettings {
+    fn default() -> Self {
+        SessionSettings {
+            context_snapshot: false,
+            active_tools: None,
+            tool_result_max_chars: None,
+            compaction: CompactionConfig::default(),
+            session_mode: SessionMode::Plan,
+            headless_approval: HeadlessApproval::Deny,
+            sandbox: SandboxConfig::default(),
+            approval: ApprovalRules::default(),
+        }
+    }
+}
+
+/// 会话模式与 headless 审批策略的 settings 解析(纯函数,可测)。
+fn parse_session_mode(name: Option<&String>) -> SessionMode {
+    name.and_then(|value| SessionMode::parse(value)).unwrap_or(SessionMode::Plan)
+}
+
+fn parse_headless_approval(name: Option<&String>) -> HeadlessApproval {
+    match name.map(|value| value.trim()) {
+        Some("auto-approve") | Some("auto_approve") | Some("autoApprove") => {
+            HeadlessApproval::AutoApprove
+        }
+        _ => HeadlessApproval::Deny,
+    }
+}
+
 /// CLI 入口用:按 项目 → 全局 顺序解析 settings 的运行期开关(项目优先,
 /// 各键独立回退全局)。
 pub fn load_session_settings() -> SessionSettings {
@@ -435,11 +515,111 @@ pub fn load_session_settings() -> SessionSettings {
         .iter()
         .find_map(|settings| settings.compaction.clone())
         .unwrap_or_default();
+    let session_mode = files
+        .iter()
+        .find_map(|settings| settings.session_mode.clone());
+    let headless_approval = files
+        .iter()
+        .find_map(|settings| settings.headless_approval.clone());
+    let sandbox = files
+        .iter()
+        .find_map(|settings| settings.sandbox.clone())
+        .unwrap_or_default();
+    let approval = files
+        .iter()
+        .find_map(|settings| settings.approval.clone())
+        .map(|approval| ApprovalRules {
+            allow_commands: approval.allow_commands.unwrap_or_default(),
+            deny_commands: approval.deny_commands.unwrap_or_default(),
+        })
+        .unwrap_or_default();
     SessionSettings {
         context_snapshot: load_context_snapshot_enabled(),
         active_tools: load_active_tool_names(),
         tool_result_max_chars,
         compaction,
+        session_mode: parse_session_mode(session_mode.as_ref()),
+        headless_approval: parse_headless_approval(headless_approval.as_ref()),
+        sandbox,
+        approval,
+    }
+}
+
+/// rpi-sandbox 平台后端 → rpi-core 策略类型的映射(装配层职责:core 不依赖
+/// rpi-sandbox,可拆卸判据)。
+fn map_policy(policy: &CoreSandboxPolicy) -> rpi_sandbox::SandboxPolicy {
+    match policy {
+        CoreSandboxPolicy::ReadOnly => rpi_sandbox::SandboxPolicy::ReadOnly,
+        CoreSandboxPolicy::WorkspaceWrite {
+            writable_roots,
+            network_access,
+        } => rpi_sandbox::SandboxPolicy::WorkspaceWrite {
+            writable_roots: writable_roots.clone(),
+            network_access: *network_access,
+        },
+        CoreSandboxPolicy::DangerFullAccess => rpi_sandbox::SandboxPolicy::DangerFullAccess,
+    }
+}
+
+/// 沙箱包装钩子(13 文档 §7.6):按当前模式取 SandboxPolicy 包装 shell 命令。
+/// 只做纯包装,不拒绝 —— 拒绝是权限引擎的事;平台无沙箱时原样返回
+/// (Confirm 已升级为逐命令审批,Plan 已剔除 bash,降级矩阵 §7.5)。
+struct SandboxSpawnHook {
+    engine: Arc<PermissionEngine>,
+    cwd: std::path::PathBuf,
+    sandbox_cache: Mutex<HashMap<SessionMode, Option<Arc<dyn rpi_sandbox::Sandbox>>>>,
+}
+
+impl SandboxSpawnHook {
+    fn sandbox_for_current_mode(&self) -> Option<Arc<dyn rpi_sandbox::Sandbox>> {
+        let mode = self.engine.mode();
+        if !self.engine.sandbox_available() {
+            return None;
+        }
+        let cached = self.sandbox_cache.lock().unwrap().get(&mode).cloned();
+        if let Some(cached) = cached {
+            return cached;
+        }
+        let policy = self.engine.policy();
+        if matches!(policy, CoreSandboxPolicy::DangerFullAccess) {
+            self.sandbox_cache.lock().unwrap().insert(mode, None);
+            return None;
+        }
+        let helper_exe = std::env::current_exe().ok();
+        let created = rpi_sandbox::create_sandbox(&map_policy(&policy), helper_exe.as_deref())
+            .map_err(|error| format!("沙箱构造失败: {error}"))
+            .ok()
+            .flatten();
+        self.sandbox_cache.lock().unwrap().insert(mode, created.clone());
+        created
+    }
+}
+
+#[async_trait]
+impl rpi_tools::ShellSpawnHook for SandboxSpawnHook {
+    async fn rewrite(&self, command: String) -> Result<String, String> {
+        match self.sandbox_for_current_mode() {
+            None => Ok(command),
+            Some(sandbox) => sandbox.wrap_command(&command, &self.cwd),
+        }
+    }
+}
+
+/// 外部 spawn 钩子与沙箱钩子的串联:外部先改写(检查的是用户命令),
+/// 沙箱最后包整条命令(13 文档 §7.6)。
+struct ChainedSpawnHook {
+    first: Option<Arc<dyn rpi_tools::ShellSpawnHook>>,
+    second: Arc<dyn rpi_tools::ShellSpawnHook>,
+}
+
+#[async_trait]
+impl rpi_tools::ShellSpawnHook for ChainedSpawnHook {
+    async fn rewrite(&self, command: String) -> Result<String, String> {
+        let command = match &self.first {
+            Some(first) => first.rewrite(command).await?,
+            None => command,
+        };
+        self.second.rewrite(command).await
     }
 }
 
@@ -451,12 +631,18 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         model,
         ui,
         extension_specs,
-        spawn_hook,
+        spawn_hook: external_spawn_hook,
         session_store,
         context_snapshot,
         active_tools,
         tool_result_max_chars,
         compaction,
+        session_mode,
+        default_session_mode,
+        sandbox,
+        approval,
+        approval_ui,
+        rpc_approval,
     } = options;
 
     // 扩展:settings → spawn → 总线;连接失败 = 诊断 + 跳过(绝不击穿宿主)
@@ -473,8 +659,30 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 运行期诊断可见:后台 drain 打 stderr(07 §8.5 面向 mode 可见)
     rpi_core::spawn_diagnostics_printer(diagnostics.clone());
 
-    // 决策类埋点:ExtensionHooks 包装内层 hooks(先问扩展再透传)
-    let hooks: Arc<dyn rpi_agent::LoopHooks> = if bus.is_empty() {
+    // 权限系统(13 文档):平台沙箱探测 → 引擎 → 审批钩子(洋葱最外层)。
+    // 降级矩阵 §7.5:无沙箱平台 Plan 剔除 bash,Confirm 逐命令审批,绝不静默裸跑
+    let availability = rpi_sandbox::detect_availability();
+    let sandbox_available = !matches!(availability, rpi_sandbox::SandboxAvailability::None);
+    let engine = Arc::new(PermissionEngine::new(
+        default_session_mode,
+        sandbox.clone(),
+        approval.clone(),
+        cwd.clone(),
+        sandbox_available,
+    ));
+    if default_session_mode != SessionMode::FullAccess && !sandbox_available {
+        eprintln!(
+            "[rpi][sandbox] 未检测到可用沙箱({:?}),Confirm 模式将逐命令请求批准,Plan 模式 bash 被禁用",
+            availability
+        );
+    }
+
+    // 共享订阅者(审批事件/重试事件/总线共用同一列表)
+    let subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // 决策类埋点:Approval(最外)→ Extension(最内)→ Passthrough。
+    // 审批先问(便宜、人审),批准后才轮到扩展埋点(13 文档 §4.1)
+    let inner_hooks: Arc<dyn rpi_agent::LoopHooks> = if bus.is_empty() {
         Arc::new(rpi_agent::PassthroughHooks)
     } else {
         Arc::new(ExtensionHooks::new(
@@ -482,6 +690,14 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             bus.clone(),
         ))
     };
+    let approval_ui: Arc<dyn ApprovalUi> = approval_ui
+        .unwrap_or_else(|| Arc::new(HeadlessApprovalUi { policy: HeadlessApproval::Deny }));
+    let hooks: Arc<dyn rpi_agent::LoopHooks> = Arc::new(ApprovalHooks::new(
+        inner_hooks,
+        engine.clone(),
+        approval_ui,
+        subscribers.clone(),
+    ));
     // 会话树管理器先于工具装配创建:T9 的 PI_* 环境闭包需要读 session id/file。
     // 默认文件持久化(`~/.rpi/sessions/<项目前缀>__<session-id>.jsonl`),Memory 仅测试用
     let session_manager: Arc<rpi_session::SessionManager> = match &session_store {
@@ -516,27 +732,48 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     };
 
     // transcript 统一:resume 时从 Session projection 回填初始转录(source of
-    // truth → context);设置态(thinking level、激活工具集)一并恢复
-    let (seed_messages, seed_thinking_level, seed_active_tools) = match &session_store {
+    // truth → context);设置态(thinking level、激活工具集、会话模式)一并恢复
+    let (seed_messages, seed_thinking_level, seed_active_tools, seed_mode) = match &session_store {
         SessionStore::Resume { .. } => {
             let context = rpi_session::build_session_context(
                 &session_manager.branch_entries(),
                 session_manager.get_leaf_id().as_deref(),
             );
-            (context.messages, context.thinking_level, context.active_tools)
+            let mode = context.mode.as_deref().and_then(SessionMode::parse);
+            (context.messages, context.thinking_level, context.active_tools, mode)
         }
-        _ => (Vec::new(), "off".to_string(), None),
+        _ => (Vec::new(), "off".to_string(), None, None),
     };
+    // 模式优先级(13 文档 §8.1):CLI 显式 > resume 的 ModeChange entry > 默认
+    let resume_or_default = match &session_store {
+        SessionStore::Resume { .. } => seed_mode.unwrap_or(default_session_mode),
+        _ => default_session_mode,
+    };
+    let effective_mode = session_mode.unwrap_or(resume_or_default);
+    engine.set_mode(effective_mode);
 
-    // T9/T10:shell 工具装配选项 —— PI_* 会话环境 + settings 命令前缀 + spawn 钩子
+    // T9/T10:shell 工具装配选项 —— PI_* 会话环境 + settings 命令前缀 +
+    // 沙箱包装钩子(13 文档 §7.6;外部 spawn 钩子先改写,沙箱最后包整条命令)
     let session_cell: Arc<Mutex<Weak<AgentSession>>> = Arc::new(Mutex::new(Weak::new()));
+    let sandbox_hook: Arc<dyn rpi_tools::ShellSpawnHook> = Arc::new(SandboxSpawnHook {
+        engine: engine.clone(),
+        cwd: cwd.clone(),
+        sandbox_cache: Mutex::new(HashMap::new()),
+    });
+    let spawn_hook: Arc<dyn rpi_tools::ShellSpawnHook> = match external_spawn_hook {
+        Some(external) => Arc::new(ChainedSpawnHook {
+            first: Some(external),
+            second: sandbox_hook,
+        }),
+        None => sandbox_hook,
+    };
     let shell = rpi_tools::ShellSpawnOptions {
         session_env: Some(session_env_fn(
             session_cell.clone(),
             manager_holder.clone(),
         )),
         command_prefix: load_shell_command_prefix(),
-        spawn_hook,
+        spawn_hook: Some(spawn_hook),
     };
 
     // 内置工具 + 扩展注册工具(McpTool,名字带扩展前缀)
@@ -546,7 +783,6 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     tools.extend(extension_tools);
 
     // 重试装饰器(pi 的 retryAssistantCall 注入点)+ AutoRetry 事件面
-    let subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>> = Arc::new(Mutex::new(Vec::new()));
     let retry_hooks = rpi_core::create_session_retry_hooks(subscribers.clone());
     let provider = rpi_core::create_retrying_provider(
         provider,
@@ -563,12 +799,18 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 激活工具集:会话内切换过(ToolSetChange entry)则按记录恢复并校验;
     // 否则用调用方显式传入(main 从 settings `tools` 解析),未传 = 全部;
     // 配置了未知工具名直接报错(配置错误要显式暴露)
-    let active_tool_names = match seed_active_tools {
-        Some(names) => Some(resolve_active_tools(&names, &tools)?),
-        None => match active_tools {
+    let active_tool_names = match &seed_active_tools {
+        Some(names) => Some(resolve_active_tools(names, &tools)?),
+        None => match &active_tools {
             None => None,
-            Some(names) => Some(resolve_active_tools(&names, &tools)?),
+            Some(names) => Some(resolve_active_tools(names, &tools)?),
         },
+    };
+    // 模式基线的工具上限(13 文档 §9.2):resume 用 seed_active_tools(模式
+    // 基线为底、seed 收紧交集),新会话用 settings `tools`
+    let mode_tool_ceiling = match &session_store {
+        SessionStore::Resume { .. } => seed_active_tools.clone().or(active_tools),
+        _ => active_tools,
     };
     let session = Arc::new(
         create_agent_session(AgentSessionConfig {
@@ -593,10 +835,24 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             seed_messages,
             compactor: Some(compactor),
             subscribers: Some(subscribers.clone()),
+            permission: Some(engine.clone()),
+            mode_tool_ceiling,
         })
         .await
         .map_err(|e| e.to_string())?,
     );
+
+    // 会话模式应用(13 文档 §8.1/§9.3):新会话文件落 ModeChange entry 自描述;
+    // resume 只恢复不落盘(entry 已有)
+    session.set_default_mode(default_session_mode);
+    if matches!(session_store, SessionStore::New { .. }) {
+        session.set_mode(effective_mode).await.map_err(|e| e.to_string())?;
+    } else {
+        session
+            .apply_mode_without_persist(effective_mode)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
     // resume 设置态恢复:直接回填 Agent 状态(不再落 thinking_level_change entry)
     if let Some(level) = parse_thinking_level(&seed_thinking_level) {
@@ -632,6 +888,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         session_manager: Some(session_manager),
         manager_holder,
         compaction_config: compaction,
+        rpc_approval,
     })
 }
 
@@ -646,6 +903,8 @@ pub struct SessionRequest {
     pub session_store: SessionStore,
     /// 运行期开关(main 从 settings 解析;测试用 Default)
     pub settings: SessionSettings,
+    /// CLI 显式会话模式(--session-mode/--plan/--yolo;resume 时优先于 entry)
+    pub session_mode_override: Option<SessionMode>,
 }
 
 pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
@@ -660,6 +919,14 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         active_tools: request.settings.active_tools,
         tool_result_max_chars: request.settings.tool_result_max_chars,
         compaction: request.settings.compaction,
+        session_mode: request.session_mode_override,
+        default_session_mode: request.settings.session_mode,
+        sandbox: request.settings.sandbox,
+        approval: request.settings.approval,
+        approval_ui: Some(Arc::new(HeadlessApprovalUi {
+            policy: request.settings.headless_approval,
+        })),
+        rpc_approval: None,
     })
     .await?;
 
@@ -722,6 +989,16 @@ impl SessionSink for SessionManagerSink {
         };
         manager
             .append_tool_set_change(tools)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn append_mode_change(&self, mode: &str) -> Result<(), String> {
+        let Some(manager) = self.0.get() else {
+            return Ok(());
+        };
+        manager
+            .append_mode_change(mode)
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
@@ -918,6 +1195,15 @@ impl SessionSubscriber for PrintSubscriber {
                 eprintln!("[retry #{attempt} in {delay_ms}ms] {reason}");
             }
             AgentSessionEvent::AutoRetryEnd { .. } => {}
+            AgentSessionEvent::ApprovalRequested { request } => {
+                eprintln!(
+                    "[approval] {} {}({})",
+                    request.tool_name,
+                    request.detail,
+                    request.reason.message(rpi_core::SessionMode::Confirm)
+                );
+            }
+            AgentSessionEvent::ApprovalResolved { .. } => {}
         }
     }
 }
@@ -1259,5 +1545,53 @@ mod tests {
                 AgentMessage::Assistant(a) if matches!(a.stop_reason, rpi_ai::StopReason::Error))),
             "触发溢出的错误 assistant 应被 ContextEdit 剔除"
         );
+    }
+
+    // ---- 权限系统 settings 新键(13 文档 §12) ----
+
+    #[test]
+    fn permission_settings_keys_parse_with_project_priority() {
+        let project = TempDir::new("perm_unset");
+        let files = read_settings_files(Some(&project.0), None);
+        assert!(files.is_empty());
+
+        // 新键整体反序列化
+        project.write_settings(
+            r#"{"sessionMode": "confirm", "headlessApproval": "auto-approve",
+                "sandbox": {"writableRoots": ["../shared"], "networkAccess": true},
+                "approval": {"allowCommands": ["make test"], "denyCommands": ["git push"]}}"#,
+        );
+        let files = read_settings_files(Some(&project.0), None);
+        assert_eq!(files.len(), 1);
+        assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Confirm);
+        assert_eq!(
+            parse_headless_approval(files[0].headless_approval.as_ref()),
+            HeadlessApproval::AutoApprove
+        );
+        let sandbox = files[0].sandbox.clone().unwrap();
+        assert_eq!(sandbox.writable_roots, vec!["../shared".to_string()]);
+        assert!(sandbox.network_access);
+        let approval = files[0].approval.clone().unwrap();
+        assert_eq!(approval.allow_commands.unwrap(), vec!["make test".to_string()]);
+        assert_eq!(approval.deny_commands.unwrap(), vec!["git push".to_string()]);
+
+        // 未知模式回退 Plan;未配置 headless 回退 Deny
+        project.write_settings(r#"{"sessionMode": "yolo-mode"}"#);
+        let files = read_settings_files(Some(&project.0), None);
+        assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Plan);
+        assert_eq!(
+            parse_headless_approval(files[0].headless_approval.as_ref()),
+            HeadlessApproval::Deny
+        );
+
+        // 项目优先:项目未配置时回退全局
+        let project2 = TempDir::new("perm_prio");
+        let global = TempDir::new("perm_prio_global");
+        global.write_settings(r#"{"sessionMode": "full-access"}"#);
+        let files = read_settings_files(Some(&project2.0), Some(&global.0));
+        assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::FullAccess);
+        project2.write_settings(r#"{"sessionMode": "plan"}"#);
+        let files = read_settings_files(Some(&project2.0), Some(&global.0));
+        assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Plan);
     }
 }

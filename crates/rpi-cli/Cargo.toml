@@ -15,6 +15,7 @@ rpi-core.workspace = true
 rpi-session.workspace = true
 rpi-tools.workspace = true
 rpi-tui.workspace = true
+rpi-sandbox.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 rmcp.workspace = true

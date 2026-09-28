@@ -22,7 +22,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Mutex};
 
 use rpi_agent::RunStop;
-use rpi_core::{AgentSession, ExtensionUi, SessionSharedSubscriber, SessionSubscriber};
+use rpi_core::{
+    ApprovalDecision, ApprovalRequest, ApprovalUi, AgentSession, ExtensionUi,
+    SessionSharedSubscriber, SessionSubscriber,
+};
 
 use crate::assembly::BuiltSession;
 use crate::modes::session_event_to_json;
@@ -44,6 +47,11 @@ pub enum RpcCommand {
     GetCommands,
     Bash { command: String },
     ExtensionUiResponse { id: u64, value: Value },
+    /// 审批反向通道应答(13 文档 §4.4)
+    ApprovalResponse {
+        id: u64,
+        decision: ApprovalDecision,
+    },
 }
 
 /// stdout 应答:`{"type":"response","id":N,"ok":true,"result":…}`。
@@ -193,6 +201,73 @@ impl ExtensionUi for RpcUi {
     }
 }
 
+/// rpc 模式的审批 UI(13 文档 §4.4):完全照抄 `RpcUi` 的 id 路由 ——
+/// 上行 `{"type":"approval_request","id":N,"request":{...}}`,等客户端
+/// `{"type":"approval_response","id":N,"decision":"approve"}`。
+pub struct RpcApprovalUi {
+    writer: SharedRpcWriter,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ApprovalDecision>>>>,
+    next_id: AtomicU64,
+}
+
+impl RpcApprovalUi {
+    pub fn new(writer: SharedRpcWriter) -> Self {
+        Self {
+            writer,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    async fn emit(&self, value: Value) {
+        let mut writer = self.writer.lock().await;
+        writer.write_line(&value.to_string()).await;
+        writer.flush().await;
+    }
+
+    /// 客户端应答路由(命令循环里调用)。
+    pub async fn resolve(&self, id: u64, decision: ApprovalDecision) -> bool {
+        match self.pending.lock().await.remove(&id) {
+            Some(tx) => {
+                let _ = tx.send(decision);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 客户端断开(stdin EOF):清掉全部未决审批,等待中的请求按 Deny 兜底。
+    pub async fn close_all(&self) {
+        self.pending.lock().await.clear();
+    }
+}
+
+#[async_trait]
+impl ApprovalUi for RpcApprovalUi {
+    async fn request_approval(&self, request: ApprovalRequest) -> Option<ApprovalDecision> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+        let payload = match serde_json::to_value(&request) {
+            Ok(payload) => payload,
+            Err(_) => return Some(ApprovalDecision::Deny),
+        };
+        self.emit(json!({
+            "type": "approval_request",
+            "id": id,
+            "request": payload,
+        }))
+        .await;
+        match rx.await {
+            Ok(decision) => Some(decision),
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                None
+            }
+        }
+    }
+}
+
 /// rpc 模式入口:订阅事件流 → 读 stdin 命令循环。返回时进程退出码语义
 /// 交由 main 处理。
 pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
@@ -203,6 +278,7 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
     let BuiltSession {
         session,
         session_manager,
+        rpc_approval,
         ..
     } = built;
 
@@ -240,6 +316,7 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
             &session,
             session_manager.as_deref(),
             &ui,
+            rpc_approval.as_ref(),
             &writer,
             command_id,
             command,
@@ -249,9 +326,12 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
             in_flight.push(task);
         }
     }
-    // stdin 关闭:先释放全部未决的 extension_ui 请求(编辑器可能已断连,
-    // 不释放则扩展 UI 调用永不返回,wait_idle 挂死),再等在途 run 结算
+    // stdin 关闭:先释放全部未决的 extension_ui / approval 请求(编辑器可能已
+    // 断连,不释放则扩展 UI/审批调用永不返回,wait_idle 挂死),再等在途 run 结算
     ui.close_all().await;
+    if let Some(approval) = rpc_approval {
+        approval.close_all().await;
+    }
     for task in in_flight {
         let _ = task.await;
     }
@@ -274,6 +354,7 @@ async fn dispatch(
     session: &Arc<AgentSession>,
     session_manager: Option<&rpi_session::SessionManager>,
     ui: &Arc<RpcUi>,
+    approval_ui: Option<&Arc<RpcApprovalUi>>,
     writer: &SharedRpcWriter,
     id: u64,
     command: RpcCommand,
@@ -408,6 +489,15 @@ async fn dispatch(
         } => {
             // 反向通道应答是单向消息:路由即可,不回 response 帧(pi 语义)
             ui.resolve(request_id, value).await;
+        }
+        RpcCommand::ApprovalResponse {
+            id: request_id,
+            decision,
+        } => {
+            // 审批反向通道应答:单向路由(pi 语义)
+            if let Some(approval) = approval_ui {
+                approval.resolve(request_id, decision).await;
+            }
         }
     }
     // 其余命令都是同步分派(应答已在各分支写出)
