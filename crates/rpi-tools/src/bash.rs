@@ -49,7 +49,6 @@ pub(crate) struct ShellToolConfig {
     pub name: &'static str,
     pub description: String,
     pub prompt_snippet: Option<String>,
-    pub prompt_guidelines: Vec<String>,
     /// shell 可执行文件
     pub program: &'static str,
     /// 命令之前的固定参数(如 `["-c"]`)
@@ -107,12 +106,6 @@ fn bash_config() -> ShellToolConfig {
              truncated (tail kept)"
                 .into(),
         ),
-        prompt_guidelines: vec![
-            "Prefer read for inspecting files; use bash for searches, git, builds and quick \
-             scripts."
-                .into(),
-            "Avoid interactive commands; they will hang until timeout.".into(),
-        ],
         program: "sh",
         base_args: &["-c"],
     }
@@ -134,12 +127,6 @@ fn powershell_config() -> ShellToolConfig {
              output is truncated (tail kept)"
                 .into(),
         ),
-        prompt_guidelines: vec![
-            "Prefer read for inspecting files; use powershell for searches, git, builds and \
-             quick scripts."
-                .into(),
-            "Avoid interactive commands; they will hang until timeout.".into(),
-        ],
         program,
         base_args: &["-NoProfile", "-Command"],
     }
@@ -422,9 +409,6 @@ impl Tool for ShellTool {
         self.config.prompt_snippet.clone()
     }
 
-    fn prompt_guidelines(&self) -> Vec<String> {
-        self.config.prompt_guidelines.clone()
-    }
 
     async fn execute(
         &self,

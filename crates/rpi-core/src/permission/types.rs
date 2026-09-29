@@ -82,7 +82,7 @@ pub fn classify_tool(name: &str) -> ToolRiskClass {
         // web-search.json 的用户配置约束;fetch/source_check 的目标 URL 过
         // SSRF 校验(私网封锁),故整体按只读类放行(取舍:确认于 web 设计)
         "web_search" | "get_search_content" | "fetch_content" | "source_check"
-        | "web_enable" => ToolRiskClass::ReadOnly,
+        | "web_access" => ToolRiskClass::ReadOnly,
         "edit" | "write" => ToolRiskClass::FileWrite,
         "bash" | "powershell" => ToolRiskClass::Shell,
         _ => ToolRiskClass::External,
@@ -261,32 +261,20 @@ pub fn mode_baseline_tools(mode: SessionMode, sandbox_available: bool) -> Vec<St
     }
 }
 
-/// Plan 模式 `<mode>` 提示词节(13 文档 §8.2;切出时移除)。
-pub const PLAN_MODE_SECTION: &str = "You are in Plan mode (read-only). Your goal is to produce an implementation plan, not to change anything.\n\
-\n\
-1. Explore: read code, run read-only commands (git log/diff, grep) to understand the current state.\n\
-2. Clarify: if requirements are ambiguous, ask the user before planning.\n\
-3. Plan: produce a step-by-step implementation plan.\n\
-\n\
-Hard rules:\n\
-- You MUST NOT create, modify, or delete files. Write operations are blocked and will be rejected.\n\
-- Only read-only shell commands are allowed (no redirects, pipes into writers, package installs, or network commands).\n\
-- Do not attempt to bypass restrictions by rephrasing a mutation as a read.\n\
-\n\
-When the plan is final, output it inside a single block:\n\
-<proposed_plan>\n\
-- step 1 ...\n\
-- step 2 ...\n\
-</proposed_plan>\n\
-After the plan block, stop and end your turn. The user will review it and switch modes when ready.";
+/// 模式 → 请求级补充指令(独立 Developer 消息,插入最后一条 user 之前;
+/// 不并入系统提示词 —— 系统提示词与工具数组随模式恒定,保 KV 缓存前缀命中)。
+/// Plan 进/出各一句:进 Plan 提示只读+产出计划;切出后的 Confirm/FullAccess
+/// 沿用退出句(后半句"可写"恒为真,提醒模型可以动手)。
+pub const PLAN_MODE_ENTER_SECTION: &str = "You are entering Plan mode: files cannot be created, modified, or deleted; inspect the codebase and produce an implementation plan.";
 
-/// 模式 → 请求级补充指令(独立 Developer 消息,追加在每请求消息数组末尾;
-/// 不并入系统提示词 —— 系统提示词与工具数组随模式恒定,保 KV 缓存前缀命中。
-/// None = 该模式无补充指令)。新增可切换模式节时在此扩展。
+pub const PLAN_MODE_EXIT_SECTION: &str = "You are exiting Plan mode: you may now create, modify, and delete files; implement the agreed plan.";
+
 pub fn mode_section(mode: SessionMode) -> Option<String> {
     match mode {
-        SessionMode::Plan => Some(PLAN_MODE_SECTION.to_string()),
-        SessionMode::Confirm | SessionMode::FullAccess => None,
+        SessionMode::Plan => Some(PLAN_MODE_ENTER_SECTION.to_string()),
+        SessionMode::Confirm | SessionMode::FullAccess => {
+            Some(PLAN_MODE_EXIT_SECTION.to_string())
+        }
     }
 }
 

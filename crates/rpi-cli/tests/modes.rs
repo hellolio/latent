@@ -1154,48 +1154,48 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-// ---- rpi-web:懒激活桥(web_enable → set_active_tools_by_name)----
+// ---- rpi-web:懒激活桥(web_access → set_active_tools_by_name)----
 
 #[tokio::test]
-async fn web_enable_activates_web_tools_via_session_bridge() {
+async fn web_access_activates_web_tools_via_session_bridge() {
     let built = build_with(scripted_provider(Vec::new())).await;
 
-    // 默认懒激活:web_enable 在激活集,四个 web 工具不在
+    // 默认懒激活:web_access 在激活集,四个 web 工具不在
     let active = built.session.active_tool_names();
     assert!(
-        active.iter().any(|name| name == "web_enable"),
-        "web_enable must be active by default, got {active:?}"
+        active.iter().any(|name| name == "web_access"),
+        "web_access must be active by default, got {active:?}"
     );
     for name in ["web_search", "fetch_content", "source_check", "get_search_content"] {
         assert!(
             !active.iter().any(|existing| existing == name),
-            "{name} must be inactive until web_enable, got {active:?}"
+            "{name} must be inactive until web_access, got {active:?}"
         );
     }
 
-    // 经 web_enable 工具激活(走 SessionToolSetActivator 桥)
+    // 经 web_access 工具激活(走 SessionToolSetActivator 桥)
     let enable_tool = built
         .session
-        .tool("web_enable")
-        .expect("web_enable in candidate pool");
+        .tool("web_access")
+        .expect("web_access in candidate pool");
     enable_tool
         .execute(
             rpi_agent::ToolCall {
                 id: "t1".into(),
-                name: "web_enable".into(),
+                name: "web_access".into(),
                 args: serde_json::json!({}),
             },
             tokio_util::sync::CancellationToken::new(),
             &NoopToolUpdater,
         )
         .await
-        .expect("web_enable ok");
+        .expect("web_access ok");
 
     let active = built.session.active_tool_names();
     for name in ["web_search", "fetch_content", "source_check", "get_search_content"] {
         assert!(
             active.iter().any(|existing| existing == name),
-            "{name} should be activated by web_enable, got {active:?}"
+            "{name} should be activated by web_access, got {active:?}"
         );
     }
     // 既有工具保持激活(追加,不整体替换)

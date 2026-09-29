@@ -33,10 +33,6 @@ pub struct SystemPromptOptions {
     pub force_system_prompt: Option<String>,
     /// 每个工具贡献的一行片段(进 tools 节)
     pub tool_snippets: Vec<String>,
-    /// 工具指南条目(进 rules 节)
-    pub tool_guidelines: Vec<String>,
-    /// 额外全局指南(进 rules 节)
-    pub prompt_guidelines: Vec<String>,
     /// 追加到提示词末尾(addendum 节)
     pub append_system_prompt: Option<String>,
     /// 扩展自定义 XML 节
@@ -50,8 +46,12 @@ pub struct SystemPromptOptions {
 pub type SystemPromptSections = BTreeMap<String, String>;
 
 const BASE_RULES: &[&str] = &[
-    "Be concise: answer directly without preamble or filler.",
-    "Show file paths clearly when referring to files.",
+    "Be concise, precise, and rigorous.",
+    "Make minimal changes and preserve existing behavior.",
+    "Ask before making non-trivial design or implementation decisions.",
+    "Inspect relevant files before modifying them.",
+    "Verify changes when practical.",
+    "Avoid interactive commands.",
 ];
 
 /// 构建 sections 状态(preamble 无标签,tools/rules/addendum/project_context/cwd
@@ -69,8 +69,8 @@ pub fn build_system_prompt_sections(
     sections.insert(
         "preamble".into(),
         options.custom_prompt.clone().unwrap_or_else(|| {
-            "You are rpi, a pragmatic coding agent that reads, edits and runs code \
-             directly in the user's working directory."
+            "You are Hart, an interactive agent that helps users with software engineering \
+             tasks."
                 .into()
         }),
     );
@@ -84,10 +84,8 @@ pub fn build_system_prompt_sections(
         sections.insert("tools".into(), tools.trim_end().to_string());
     }
 
-    // rules 节:基础规则 + 工具指南 + 全局指南
-    let mut rules: Vec<String> = BASE_RULES.iter().map(|s| s.to_string()).collect();
-    rules.extend(options.tool_guidelines.iter().cloned());
-    rules.extend(options.prompt_guidelines.iter().cloned());
+    // rules 节:固定基础规则(工具提示词只进 tools 节,不再并入 rules)
+    let rules: Vec<String> = BASE_RULES.iter().map(|s| s.to_string()).collect();
     if !rules.is_empty() {
         let text = rules
             .iter()
@@ -180,7 +178,6 @@ mod tests {
     fn options() -> SystemPromptOptions {
         SystemPromptOptions {
             tool_snippets: vec!["read(path): read a file".into()],
-            tool_guidelines: vec!["Prefer read over bash cat.".into()],
             cwd: Some("/tmp/proj".into()),
             ..Default::default()
         }
@@ -190,7 +187,7 @@ mod tests {
     fn sections_render_with_tags_and_preamble_untagged() {
         let sections = build_system_prompt_sections(&options()).unwrap();
         let text = sections_to_text(&sections);
-        assert!(text.starts_with("You are rpi"));
+        assert!(text.starts_with("You are Hart"));
         assert!(!text.contains("<preamble>"));
         assert!(text.contains("<tools>\nAvailable tools:"));
         assert!(text.contains("<rules>"));
@@ -227,7 +224,7 @@ mod tests {
         opts.custom_prompt = Some("You are my custom agent.".into());
         let text = build_system_prompt_state(&opts).unwrap().to_text();
         assert!(text.starts_with("You are my custom agent."), "{text}");
-        assert!(!text.contains("You are rpi"));
+        assert!(!text.contains("You are Hart, an interactive agent"));
         assert!(text.contains("<tools>\nAvailable tools:"), "{text}");
         assert!(text.contains("<cwd>\nWorking directory: /tmp/proj"), "{text}");
         assert!(text.contains("<rules>"), "{text}");

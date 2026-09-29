@@ -254,11 +254,6 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
     options
         .tool_snippets
         .extend(active_tools.iter().filter_map(|tool| tool.prompt_snippet()));
-    options.tool_guidelines.extend(
-        active_tools
-            .iter()
-            .flat_map(|tool| tool.prompt_guidelines()),
-    );
     let state = build_system_prompt_state(&options)?;
     let sections = match &state {
         SystemPromptState::Sections(sections) => sections.clone(),
@@ -580,15 +575,11 @@ impl AgentSession {
             let mut runtime = self.runtime.lock().unwrap();
             runtime.active_tool_names = names.to_vec();
             // 在原始 options 上替换工具片段(保留 custom_prompt/context_files/
-            // append/prompt_guidelines 等全部用户配置);Forced 整 prompt 不参与重建
+            // append 等全部用户配置);Forced 整 prompt 不参与重建
             let mut options = runtime.system_prompt_options.clone();
             options.tool_snippets = active_tools
                 .iter()
                 .filter_map(|tool| tool.prompt_snippet())
-                .collect();
-            options.tool_guidelines = active_tools
-                .iter()
-                .flat_map(|tool| tool.prompt_guidelines())
                 .collect();
             // Forced 整 prompt:提示词不随工具集变化,只换工具集本身
             let forced = matches!(runtime.system_prompt, SystemPromptState::Forced(_));
@@ -609,7 +600,7 @@ impl AgentSession {
         Ok(())
     }
 
-    /// 当前激活工具名快照(web_enable 桥:在现有集合上追加,而非整体替换)。
+    /// 当前激活工具名快照(web_access 桥:在现有集合上追加,而非整体替换)。
     pub fn active_tool_names(&self) -> Vec<String> {
         self.runtime.lock().unwrap().active_tool_names.clone()
     }

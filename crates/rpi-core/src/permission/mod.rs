@@ -13,7 +13,7 @@ pub use hooks::{ApprovalHooks, ApprovalUi, HeadlessApproval, HeadlessApprovalUi,
 pub use types::{mode_section,
     classify_tool, mode_baseline_tools, normalize_command, policy_for_mode, ApprovalDecision,
     ApprovalKey, ApprovalReason, ApprovalRequest, SessionMode, SandboxConfig, SandboxPolicy,
-    ToolRiskClass, Verdict, PLAN_MODE_SECTION,
+    ToolRiskClass, Verdict, PLAN_MODE_ENTER_SECTION, PLAN_MODE_EXIT_SECTION,
 };
 
 use std::path::PathBuf;

@@ -171,12 +171,6 @@ impl Tool for EditTool {
         Some("edit(path, edits): exact string replacements; every oldText must be unique and non-overlapping".into())
     }
 
-    fn prompt_guidelines(&self) -> Vec<String> {
-        vec![
-            "Make oldText as small as possible while remaining unique; never pad it with large unchanged blocks.".into(),
-            "Combine several nearby changes into one edit call with multiple edits entries.".into(),
-        ]
-    }
 
     async fn execute(
         &self,

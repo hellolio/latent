@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use rpi_tui::{CommandEntry, CommandPopup, Editor, Key, SelectList, Theme, UiLine};
+use rpi_tui::{CommandPopup, Editor, Key, SelectList, Theme, UiLine};
 
 use super::usage::UsageTracker;
 

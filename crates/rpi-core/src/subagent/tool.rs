@@ -222,21 +222,6 @@ impl Tool for SubagentTool {
         ))
     }
 
-    fn prompt_guidelines(&self) -> Vec<String> {
-        vec![
-            "The `task` text must be self-contained: the sub-agent shares no conversation \
-             history with you."
-                .into(),
-            "An inline `systemPrompt` needs no configuration. Named agents are optional \
-             conveniences defined as .md files in .rpi/agents/*.md (project) and \
-             ~/.rpi/agents/*.md (user); prefer one when it fits, otherwise just pass \
-             `systemPrompt`."
-                .into(),
-            "For long-running or parallelizable work use async:true; poll with action:\"list\" \
-             and the result arrives automatically when the run settles."
-                .into(),
-        ]
-    }
 
     async fn execute(
         &self,

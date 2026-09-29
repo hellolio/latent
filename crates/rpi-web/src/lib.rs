@@ -1,6 +1,3 @@
-//! rpi-web:网络搜索扩展(pi-web-access 的 Rust 重实现,分析文档
-//! docs/web-search-principles-and-prompts.md)。
-//!
 //! 分层:仅依赖 rpi-agent(Tool trait)+ rpi-ai(LLM 注入),宿主能力
 //! (模型解析、工具集切换、后台通知)经 `WebDeps` 注入,不依赖 rpi-core。
 //!

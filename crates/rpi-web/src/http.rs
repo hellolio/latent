@@ -73,7 +73,7 @@ fn build_client(proxy: Option<&str>, timeout: Duration) -> Result<reqwest::Clien
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout)
         .connect_timeout(Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (compatible; rpi-web/1.0; +https://github.com/nicobailon/pi-web-access)");
+        .user_agent("Mozilla/5.0 (compatible; rpi-web/1.0; +https://github.com/hellolio/rpi)");
     if let Some(proxy) = proxy {
         // reqwest 的 socks 特性原生支持 socks5h:// scheme
         let parsed = reqwest::Proxy::all(proxy.trim())

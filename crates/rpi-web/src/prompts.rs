@@ -158,11 +158,11 @@ pub const GET_SEARCH_CONTENT_PARAM_FIND_TEXT: &str = "Text or texts to find in t
 
 pub const GET_SEARCH_CONTENT_PARAM_FIND_MODE: &str = "Matching mode for findText (default: case-insensitive). Requires findText.";
 
-/// `web_enable` 工具(tool-activation.ts:53-58)。
-pub const WEB_ENABLE_DESCRIPTION: &str = "Enable configured pi-web-access tools for web research and content retrieval. Does not search or fetch. Enabled tools are available on the next model request; disabled capabilities remain unavailable.";
+/// `web_access` 工具(tool-activation.ts:53-58)。
+pub const WEB_ACCESS_DESCRIPTION: &str = "Enable configured web-access tools for web research and content retrieval. Does not search or fetch. Enabled tools are available on the next model request; disabled capabilities remain unavailable.";
 
-pub fn web_enable_prompt_snippet() -> String {
-    format!("pi-web-access is configured for {capabilities}. Call web_enable to activate these tools; use them on the next model request.", capabilities = "web search, source checking, content fetching, stored-result retrieval")
+pub fn web_access_prompt_snippet() -> String {
+    format!("web-access is configured for {capabilities}. Call web_access to activate these tools; use them on the next model request.", capabilities = "web search, source checking, content fetching, stored-result retrieval")
 }
 
 // ---------------------------------------------------------------------------

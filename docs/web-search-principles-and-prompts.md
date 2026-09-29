@@ -1,10 +1,10 @@
-# pi-web-access 网络搜索功能：原理与功能分析（供 Rust 重实现参考）
+# web-access 网络搜索功能：原理与功能分析（供 Rust 重实现参考）
 
-> 分析对象：pi-web-access v0.32.0（Pi coding agent 的 TypeScript 扩展，MIT 协议）。
+> 分析对象：web-access v0.32.0（Pi coding agent 的 TypeScript 扩展，MIT 协议）。
 >
 > **项目位置**：
-> - 本地源码：`/Users/kin/Documents/10source/pi-web-access`（扁平结构，全部源码 `.ts` 在根目录）
-> - 上游仓库：https://github.com/nicobailon/pi-web-access
+> - 本地源码：`/Users/kin/Documents/10source/web-access`（扁平结构，全部源码 `.ts` 在根目录）
+> - 上游仓库：https://github.com/nicobailon/web-access
 > - 配置文件：`~/.pi/agent/web-search.json`（API key、路由、fetch 选项等均在此）
 >
 > 本文档分两部分：**第一部分**讲原理与功能（不含逐行逻辑）；**第二部分**逐字记录所有提示词与工具定义原文。
@@ -29,7 +29,7 @@
 
 ### 1. 这个项目是什么
 
-pi-web-access 是 Pi coding agent 的扩展包（`package.json` 中 `"pi": { "extensions": ["./index.ts"] }`，Pi 以约定式 default export `function (pi: ExtensionAPI)` 加载）。它为编码 agent 提供 4 个核心工具 + 1 个激活工具：
+web-access 是 Pi coding agent 的扩展包（`package.json` 中 `"pi": { "extensions": ["./index.ts"] }`，Pi 以约定式 default export `function (pi: ExtensionAPI)` 加载）。它为编码 agent 提供 4 个核心工具 + 1 个激活工具：
 
 | 工具 | 功能 |
 |---|---|
@@ -37,7 +37,7 @@ pi-web-access 是 Pi coding agent 的扩展包（`package.json` 中 `"pi": { "ex
 | `source_check` | 针对一个论断收集网络证据，输出带 passage 级引用的 JSON research artifact |
 | `fetch_content` | 抓取 URL 全文（readable/raw/answer 三模式），支持图片、GitHub、PDF、YouTube、本地视频 |
 | `get_search_content` | 按 responseId 分页/检索之前存储的搜索结果与抓取全文，支持文本定位 |
-| `web_enable` | 懒加载激活器：Pi ≥0.86.1 时所有 web 工具默认不注册进活跃列表，模型先调它才激活 |
+| `web_access` | 懒加载激活器：Pi ≥0.86.1 时所有 web 工具默认不注册进活跃列表，模型先调它才激活 |
 
 核心设计思想：**搜索结果不直接全文塞给模型，而是"有界输出 + 存储 + 二次检索"**——工具返回截断到上限（默认 30k 字符）的紧凑结果，完整结果存入带 `responseId` 的存储层，模型需要更多内容时用 `get_search_content` 分页取回。
 
@@ -120,7 +120,7 @@ Rust 重实现时照搬这个原则：provider trait 的 `is_available()` 保持
 7. 摘要：候选模型链 + 30s deadline 竞速 + 确定性 fallback（summary-review.ts 可近乎直译）；
 8. 若做 fetch：SSRF 校验（协议白名单、私网/保留段封锁、**手动跟重定向且每一跳重新校验**）+ 可读性提取（Readability/Defuddle 等价物）。
 
-可整体省略：curator 浏览器 UI（3600 行内嵌 JS）、web_enable 懒加载（Rust 宿主可自行决定）。
+可整体省略：curator 浏览器 UI（3600 行内嵌 JS）、web_access 懒加载（Rust 宿主可自行决定）。
 
 ---
 
@@ -313,13 +313,13 @@ parameters: Type.Object({
 
 （`${storedContentSources}` 运行时拼为 `"web_search, source_check, or fetch_content"` 之类的工具名列表。）
 
-#### `web_enable`（tool-activation.ts:53-58）
+#### `web_access`（tool-activation.ts:53-58）
 
 ```ts
-name: "web_enable",          // 固定加载器名，不可被 toolNames 改写
+name: "web_access",          // 固定加载器名，不可被 toolNames 改写
 label: "Enable Web Access",
-description: "Enable configured pi-web-access tools for web research and content retrieval. Does not search or fetch. Enabled tools are available on the next model request; disabled capabilities remain unavailable.",
-promptSnippet: `pi-web-access is configured for ${capabilities}. Call web_enable to activate these tools; use them on the next model request.`,
+description: "Enable configured web-access tools for web research and content retrieval. Does not search or fetch. Enabled tools are available on the next model request; disabled capabilities remain unavailable.",
+promptSnippet: `web-access is configured for ${capabilities}. Call web_access to activate these tools; use them on the next model request.`,
 parameters: Type.Object({}, { additionalProperties: false }),
 ```
 
@@ -665,7 +665,7 @@ Searching "${query}" (${completedSearches}/${queryList.length} complete)...
 | source_check 工具定义 | index.ts:2431-2447 |
 | fetch_content 工具定义 | index.ts:2530-2572 |
 | get_search_content 工具定义 | index.ts:2885-2904 |
-| web_enable 工具定义 | tool-activation.ts:53-58 |
+| web_access 工具定义 | tool-activation.ts:53-58 |
 | provider 枚举 + all 集合 | gemini-search.ts:47-48, 112-114 |
 | Query 重写 prompt | query-rewrite.ts:40 |
 | 摘要生成 prompt | summary-review.ts:66-100 |

@@ -7,7 +7,7 @@
 pub mod fetch_content;
 pub mod get_search_content;
 pub mod source_check;
-pub mod web_enable;
+pub mod web_access;
 pub mod web_search;
 
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use crate::config::WebSearchConfig;
 use crate::llm::LlmDeps;
 
-/// web_enable 需要的"把工具加入激活集"能力(set_active_tools_by_name 的桥)。
+/// web_access 需要的"把工具加入激活集"能力(set_active_tools_by_name 的桥)。
 #[async_trait]
 pub trait ToolSetActivator: Send + Sync {
     async fn activate(&self, names: &[String]) -> Result<(), String>;
@@ -36,7 +36,7 @@ pub struct WebContext {
     /// 磁盘 fetch 缓存上限
     pub cache_limits: crate::config::CacheLimits,
     pub llm: LlmDeps,
-    /// web_enable 用;None = 懒激活不可用(web_enable 直接报错)
+    /// web_access 用;None = 懒激活不可用(web_access 直接报错)
     pub activator: Option<Arc<dyn ToolSetActivator>>,
     /// includeContent 后台通知;None = 静默完成
     pub notifier: Option<Arc<dyn BackgroundNotifier>>,
@@ -49,14 +49,14 @@ impl WebContext {
     }
 }
 
-/// 出口:按懒激活约定返回 5 个工具(web_enable 恒激活,其余默认不进激活集)。
+/// 出口:按懒激活约定返回 5 个工具(web_access 恒激活,其余默认不进激活集)。
 pub fn create_web_tools(context: Arc<WebContext>) -> Vec<Arc<dyn rpi_agent::Tool>> {
     vec![
         Arc::new(web_search::WebSearchTool::new(context.clone())),
         Arc::new(source_check::SourceCheckTool::new(context.clone())),
         Arc::new(fetch_content::FetchContentTool::new(context.clone())),
         Arc::new(get_search_content::GetSearchContentTool::new(context.clone())),
-        Arc::new(web_enable::WebEnableTool::new(context)),
+        Arc::new(web_access::WebEnableTool::new(context)),
     ]
 }
 
@@ -66,9 +66,9 @@ pub mod names {
     pub const SOURCE_CHECK: &str = "source_check";
     pub const FETCH_CONTENT: &str = "fetch_content";
     pub const GET_SEARCH_CONTENT: &str = "get_search_content";
-    pub const WEB_ENABLE: &str = "web_enable";
+    pub const WEB_ACCESS: &str = "web_access";
 
-    /// 懒激活的目标工具(web_enable 之外的全部)。
+    /// 懒激活的目标工具(web_access 之外的全部)。
     pub const ACTIVATABLE: [&str; 4] = [
         WEB_SEARCH,
         SOURCE_CHECK,

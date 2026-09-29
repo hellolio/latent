@@ -1,12 +1,12 @@
 # 16 — web 访问扩展(rpi-web)
 
-> **一句话**:pi-web-access(pi 的 TS 网络搜索扩展)的 Rust 核心重实现 —— 新 crate `crates/rpi-web`,提供 `web_search / get_search_content / fetch_content / source_check / web_enable` 五个工具,核心设计是**有界输出 + 存储 + responseId 二次检索**,provider 可用性检查纯本地零开销、auto 链按"有 key 用 key、没 key 用免费"降级。移植基准与逐字契约见 `web-search-principles-and-prompts.md`(下称"分析文档")。
+> **一句话**:web-access(pi 的 TS 网络搜索扩展)的 Rust 核心重实现 —— 新 crate `crates/rpi-web`,提供 `web_search / get_search_content / fetch_content / source_check / web_access` 五个工具,核心设计是**有界输出 + 存储 + responseId 二次检索**,provider 可用性检查纯本地零开销、auto 链按"有 key 用 key、没 key 用免费"降级。移植基准与逐字契约见 `web-search-principles-and-prompts.md`(下称"分析文档")。
 
 ## 1. 定位与分层
 
 - 新 crate 与 rpi-tools 同层:仅依赖 `rpi-agent`(Tool trait)+ `rpi-ai`(LLM 注入),**不依赖 rpi-core/rpi-cli**(docs/10 分层纪律)。workspace 成员与 `rpi-web.workspace = true` 依赖已加。
 - 对 rpi-core 的两个能力以 trait 注入,实现留在 `rpi-cli/assembly.rs`:
-  - `ToolSetActivator`:web_enable → `AgentSession::set_active_tools_by_name`(在现有激活集上追加);
+  - `ToolSetActivator`:web_access → `AgentSession::set_active_tools_by_name`(在现有激活集上追加);
   - `BackgroundNotifier`:includeContent 后台抓取完成 → `wait_idle → follow_up → continue_run`(仿 subagent supervisor,14 §4.3)。
 - 会话/agent 弱引在 session 建好后回填(与 `session_cell` / `subagent_parent_cell` 同点)。
 
@@ -18,9 +18,9 @@
 | `get_search_content` | 按 responseId 分页切片 / findText 定位(exact / case-insensitive / fuzzy) | ReadOnly |
 | `fetch_content` | URL 抓取,readable / raw / answer 三模式(readable = 正文提取 → markdown) | ReadOnly |
 | `source_check` | 论断取证,ResearchArtifact(passage 级引用 + sha256 content_hash) | ReadOnly |
-| `web_enable` | 懒加载激活器:把上面四个拉入激活集,并经 follow_up 唤醒新 run(工具集在 run 起点快照,新 run 生效) | ReadOnly |
+| `web_access` | 懒加载激活器:把上面四个拉入激活集,并经 follow_up 唤醒新 run(工具集在 run 起点快照,新 run 生效) | ReadOnly |
 
-- **默认懒激活**:装配期候选池含全部 web 工具;未显式配置激活集时默认剔除四个可激活工具、只留 `web_enable`(模型经 promptSnippet 知道先调用它)。**settings `tools` 显式配置 = 精确集合,完全尊重** —— 需要 web 的用户把 `web_enable`(或具体工具名)加进自己的 tools 列表。
+- **默认懒激活**:装配期候选池含全部 web 工具;未显式配置激活集时默认剔除四个可激活工具、只留 `web_access`(模型经 promptSnippet 知道先调用它)。**settings `tools` 显式配置 = 精确集合,完全尊重** —— 需要 web 的用户把 `web_access`(或具体工具名)加进自己的 tools 列表。
 - `classify_tool`(13 文档)五个名字归 ReadOnly:无本地写副作用(缓存写专属目录 `~/.rpi/web-search-cache/`),目标 URL 过 SSRF 私网封锁。
 
 ## 3. 关键机制(与分析文档对照)
@@ -71,14 +71,14 @@
 4. fetch 的 PDF/GitHub/YouTube/本地视频/图片缩放/浏览器 cookie 通道不做;工具参数相应省略(`forceClone/timestamp/frames/model/auth/answerModel`)。
 5. 摘要模型:硬编码候选链 → 配置 `summaryModel` + 回退主模型。
 6. session journal 持久化/重放不做;存储 = 内存 + 磁盘缓存。
-7. `web_enable` 固定加载器名保留;无 `toolNames` 改名面。
+7. `web_access` 固定加载器名保留;无 `toolNames` 改名面。
 
 ## 6. 实现索引
 
 | 内容 | 位置 |
 |---|---|
 | 工具出口 / WebContext / 注入 trait | `crates/rpi-web/src/tools/mod.rs` |
-| 五个工具 | `tools/{web_search,get_search_content,fetch_content,source_check,web_enable}.rs` |
+| 五个工具 | `tools/{web_search,get_search_content,fetch_content,source_check,web_access}.rs` |
 | provider trait / auto 链 / all 集合 | `crates/rpi-web/src/providers/mod.rs` |
 | 路由(扇出/all/单家/auto/配置路由) | `crates/rpi-web/src/router.rs` |
 | 错误分类 | `crates/rpi-web/src/error.rs` |

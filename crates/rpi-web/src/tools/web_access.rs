@@ -1,4 +1,4 @@
-//! web_enable 工具(tool-activation.ts:53-58 的移植):
+//! web_access 工具(tool-activation.ts:53-58 的移植):
 //! 懒加载激活器 —— 把四个 web 工具加入激活集(经注入的 ToolSetActivator),
 //! 下一次模型请求生效。本身无搜索/抓取行为。
 
@@ -26,15 +26,15 @@ impl WebEnableTool {
 #[async_trait]
 impl Tool for WebEnableTool {
     fn name(&self) -> &str {
-        names::WEB_ENABLE
+        names::WEB_ACCESS
     }
 
     fn description(&self) -> &str {
-        prompts::WEB_ENABLE_DESCRIPTION
+        prompts::WEB_ACCESS_DESCRIPTION
     }
 
     fn prompt_snippet(&self) -> Option<String> {
-        Some(prompts::web_enable_prompt_snippet())
+        Some(prompts::web_access_prompt_snippet())
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -67,7 +67,7 @@ impl Tool for WebEnableTool {
         if let Some(notifier) = &self.context.notifier {
             notifier
                 .notify(format!(
-                    "web_enable completed: {} are now active. Continue with the user's original request using these tools.",
+                    "web_access completed: {} are now active. Continue with the user's original request using these tools.",
                     names::ACTIVATABLE.join(", ")
                 ))
                 .await;

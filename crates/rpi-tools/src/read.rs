@@ -78,9 +78,6 @@ impl Tool for ReadTool {
         Some("read(path, offset?, limit?): reads a file; large outputs are truncated with a continuation hint".into())
     }
 
-    fn prompt_guidelines(&self) -> Vec<String> {
-        vec!["When reading a large file, continue with the offset from the truncation hint instead of re-reading from the start.".into()]
-    }
 
     async fn execute(
         &self,

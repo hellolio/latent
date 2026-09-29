@@ -80,11 +80,6 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// 条目,进系统提示词 rules 节(04 文档 §3.1 promptGuidelines)
-    fn prompt_guidelines(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     async fn execute(
         &self,
         call: ToolCall,

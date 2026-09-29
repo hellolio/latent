@@ -895,7 +895,6 @@ async fn stream_impl(
                                 handle_sse_event(&mut state, &model, &event, &mut events_out, &opts.on_provider_stream_event)
                             {
                                 terminal = Some(error_with_partial(
-                                    &model,
                                     state.output.clone(),
                                     message,
                                 ));
@@ -918,7 +917,6 @@ async fn stream_impl(
                                 handle_sse_event(&mut state, &model, &event, &mut events_out, &opts.on_provider_stream_event)
                             {
                                 terminal = Some(error_with_partial(
-                                    &model,
                                     state.output.clone(),
                                     message,
                                 ));
@@ -936,7 +934,7 @@ async fn stream_impl(
                     return;
                 }
                 ReadOutcome::Transport(message) => {
-                    terminal = Some(error_with_partial(&model, state.output.clone(), message));
+                    terminal = Some(error_with_partial(state.output.clone(), message));
                     break;
                 }
             }
@@ -957,7 +955,7 @@ async fn stream_impl(
             } else {
                 "Anthropic stream ended without a stop reason".to_string()
             };
-            yield error_with_partial(&model, state.output, message);
+            yield error_with_partial(state.output, message);
             return;
         }
         if state.output.stop_reason == StopReason::Error || state.output.stop_reason == StopReason::Aborted {

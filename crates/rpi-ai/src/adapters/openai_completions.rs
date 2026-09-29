@@ -984,7 +984,6 @@ async fn stream_impl(
                                 }
                                 Err(err) => {
                                     terminal = Some(error_with_partial(
-                                        &model,
                                         state.output.clone(),
                                         format!("Could not parse OpenAI SSE chunk: {err}; data={}", event.data),
                                     ));
@@ -1016,7 +1015,7 @@ async fn stream_impl(
                     return;
                 }
                 ReadOutcome::Transport(message) => {
-                    terminal = Some(error_with_partial(&model, state.output.clone(), message));
+                    terminal = Some(error_with_partial(state.output.clone(), message));
                     break;
                 }
             }
@@ -1046,12 +1045,12 @@ async fn stream_impl(
                     StopReason::Stop
                 };
             } else {
-                yield error_with_partial(&model, state.output, "Stream ended without finish_reason".into());
+                yield error_with_partial(state.output, "Stream ended without finish_reason".into());
                 return;
             }
         }
         if state.output.stop_reason == StopReason::Pending {
-            yield error_with_partial(&model, state.output, "Stream ended without finish_reason".into());
+            yield error_with_partial(state.output, "Stream ended without finish_reason".into());
             return;
         }
         if state.output.stop_reason == StopReason::Error {

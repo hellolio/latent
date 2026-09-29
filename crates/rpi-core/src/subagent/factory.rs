@@ -379,13 +379,13 @@ mod tests {
         let (system, tools, roles) = &captured[0];
         assert_eq!(system, "You are a reviewer.", "系统提示词 = md 正文");
         assert_eq!(tools, &vec!["write".to_string()]);
-        // 主引擎处于 Plan 模式:子会话与主会话行为一致 —— 模式节插在
-        // 用户最新输入之前(倒数第二),而非系统提示词里
+        // 主引擎处于 Plan 模式:子会话与主会话行为一致 —— 模式节(进入句)
+        // 插在用户最新输入之前(倒数第二),而非系统提示词里
         assert_eq!(roles.len(), 3, "{roles:?}");
         assert!(roles[0].starts_with("system:You are a reviewer."));
         assert!(
-            roles[1].starts_with("developer:You are in Plan mode"),
-            "模式节应为完整 Plan 提示词:{roles:?}"
+            roles[1].starts_with("developer:You are entering Plan mode"),
+            "模式节应为 Plan 进入提示词:{roles:?}"
         );
         assert_eq!(roles[2], "user:hi", "用户输入应保持最后");
         // 定义 model 缺省 → 继承 fallback(主会话模型)

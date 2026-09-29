@@ -49,12 +49,6 @@ impl Tool for WriteTool {
         )
     }
 
-    fn prompt_guidelines(&self) -> Vec<String> {
-        vec![
-            "Use write only for new files or complete rewrites; prefer edit for partial changes."
-                .into(),
-        ]
-    }
 
     async fn execute(
         &self,

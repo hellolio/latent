@@ -93,7 +93,6 @@ pub(crate) fn setup_error(model: &Model, message: String) -> AssistantMessageEve
 /// 流中失败终态:保留已流出的内容增量(用户在 UI 已看到的 text/tool_use
 /// 不因传输/解析错误丢弃,pi 语义),只覆盖终止原因与错误文案。
 pub(crate) fn error_with_partial(
-    model: &Model,
     partial: AssistantMessage,
     message: String,
 ) -> AssistantMessageEvent {

@@ -649,7 +649,7 @@ impl rpi_tools::ShellSpawnHook for ChainedSpawnHook {
     }
 }
 
-/// web_enable 桥:把工具加入当前激活集(rpi_web::ToolSetActivator 的
+/// web_access 桥:把工具加入当前激活集(rpi_web::ToolSetActivator 的
 /// rpi-core 实现;set_active_tools_by_name 落 tool_set_change entry)。
 struct SessionToolSetActivator {
     session: Arc<Mutex<Weak<AgentSession>>>,
@@ -874,7 +874,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     );
 
     // 进程内 web 扩展(rpi-web,16 文档):搜索/抓取/检索/取证/激活五工具,
-    // 懒激活(默认只激活 web_enable,其余经 web_enable 拉入激活集)。配置
+    // 懒激活(默认只激活 web_access,其余经 web_access 拉入激活集)。配置
     // ~/.rpi/web-search.json + 项目 .rpi/web-search.json;零配置可用
     // (auto 链兜底 duckduckgo)。rpi-core 能力经 trait 注入,保持 rpi-web
     // 不依赖 rpi-core
@@ -1007,16 +1007,16 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 否则用调用方显式传入(main 从 settings `tools` 解析),未传 = 全部;
     // 配置了未知工具名直接报错(配置错误要显式暴露)
     // web 工具(rpi-web)懒激活:未显式配置激活集时,web 工具在候选池但
-    // 默认只激活 web_enable;**显式配置(settings `tools`)= 精确集合,
-    // 完全尊重** —— 需要 web 的用户把 `web_enable`(或具体工具名)加进列表
-    let has_web_enable = tools
+    // 默认只激活 web_access;**显式配置(settings `tools`)= 精确集合,
+    // 完全尊重** —— 需要 web 的用户把 `web_access`(或具体工具名)加进列表
+    let has_web_access = tools
         .iter()
-        .any(|tool| tool.name() == rpi_web::tools::names::WEB_ENABLE);
+        .any(|tool| tool.name() == rpi_web::tools::names::WEB_ACCESS);
     let active_tool_names = match (&seed_active_tools, &active_tools) {
         (Some(names), _) | (None, Some(names)) => {
             Some(resolve_active_tools(names, &tools)?)
         }
-        (None, None) if has_web_enable => {
+        (None, None) if has_web_access => {
             let activatable = rpi_web::tools::names::ACTIVATABLE;
             Some(
                 tools
