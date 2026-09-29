@@ -133,7 +133,7 @@ interface ToolDefinition<TParams, TDetails, TState> {
 | `packages/coding-agent/src/core/model-resolver.ts` / `model-runtime.ts` | 783/886 | 模型解析与运行时 | — | P1 |
 | `packages/coding-agent/src/core/cache-warmer.ts` | 453 | cache 保温 | — | P1 |
 | `packages/coding-agent/src/core/resource-loader.ts` | 1167 | 资源装载 | — | P1 |
-| `packages/coding-agent/src/core/skills.ts` / `prompt-templates.ts` | 509/320 | skill 与模板 | — | P1 |
+| `packages/coding-agent/src/core/skills.ts` / `prompt-templates.ts` | 509/320 | skill 与模板 | `rpi-core/src/skills/`(skill 部分;模板未移植) | P1(skill 已移植) |
 | `packages/coding-agent/src/core/package-manager.ts` | 2729 | pi 包管理 | — | P2 |
 | `packages/coding-agent/src/core/trust-manager.ts` / `project-trust.ts` | 245/96 | 信任决策 | — | P1 |
 | `packages/coding-agent/src/core/auth-storage.ts` | 506 | 凭据存储 | — | P2 |

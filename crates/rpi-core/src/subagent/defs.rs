@@ -138,7 +138,9 @@ pub fn parse_agent_def(content: &str, default_name: &str) -> Result<AgentDef, St
     })
 }
 
-fn split_frontmatter(content: &str) -> Result<(&str, &str), String> {
+/// frontmatter 围栏切分(`---` 围栏 + 正文;无围栏整篇当正文)。
+/// skills 定义复用同一解析纪律。
+pub(crate) fn split_frontmatter(content: &str) -> Result<(&str, &str), String> {
     let content = content.trim_start_matches('\u{feff}');
     let Some(rest) = content.strip_prefix("---") else {
         return Ok(("", content));
@@ -167,7 +169,7 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str), String> {
     }
 }
 
-fn require_scalar(key: &str, value: &str) -> Result<String, String> {
+pub(crate) fn require_scalar(key: &str, value: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err(format!("`{key}` 需要同行标量值"));
     }

@@ -921,6 +921,18 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     for diagnostic in &subagent_diagnostics {
         eprintln!("[rpi][subagent] {diagnostic}");
     }
+    // skill 机制(pi skills.ts 移植):skill 是数据目录(.rpi/skills/<name>/SKILL.md,
+    // 项目优先);摘要经 load_skill 工具描述暴露给模型,execute 按名读全文进上下文。
+    // push 必须先于 subagent 装配(tool_pool = tools.clone()):子 agent 定义
+    // 的 tools 白名单写 load_skill 才可加载,默认只读集不含。
+    let (skill_defs, skill_diagnostics) =
+        rpi_core::discover_skill_defs(&cwd, subagent_home.as_deref());
+    for diagnostic in &skill_diagnostics {
+        eprintln!("[rpi][skills] {diagnostic}");
+    }
+    tools.push(Arc::new(rpi_core::LoadSkillTool::new(rpi_core::LoadSkillDeps {
+        skills: skill_defs,
+    })));
     let subagent_parent_cell: Arc<Mutex<Weak<rpi_agent::Agent>>> = Arc::new(Mutex::new(Weak::new()));
     // /model 同源的解析面(models.json + 内置 provider 默认表);父模型缺省
     // 继承自父会话快照,显式 `model` 参数走本解析器

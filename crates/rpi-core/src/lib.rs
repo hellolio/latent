@@ -11,6 +11,7 @@ pub mod model;
 pub mod permission;
 pub mod retry;
 pub mod session;
+pub mod skills;
 pub mod subagent;
 pub mod system_prompt;
 
@@ -34,6 +35,7 @@ pub use session::{
     AgentSessionEvent, ContextCompactor, CoreError, PromptOutcome, SessionSharedSubscriber,
     SessionSink, SessionSubscriber, create_session_persistence_subscriber,
 };
+pub use skills::{discover_skill_defs, parse_skill_def, LoadSkillDeps, LoadSkillTool, SkillDef};
 pub use subagent::{
     discover_agent_defs, run_child, AgentDef, ChildOutcome, ChildSpec, RunGuard, RunStatus,
     ChildStore, ChildStoreFactory, SubagentDeps, SubagentRegistry, SubagentSessionFactory,
