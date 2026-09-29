@@ -14,6 +14,7 @@ rpi-agent.workspace = true
 rpi-core.workspace = true
 rpi-session.workspace = true
 rpi-tools.workspace = true
+rpi-web.workspace = true
 rpi-tui.workspace = true
 rpi-sandbox.workspace = true
 async-trait.workspace = true

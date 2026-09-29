@@ -649,6 +649,51 @@ impl rpi_tools::ShellSpawnHook for ChainedSpawnHook {
     }
 }
 
+/// web_enable 桥:把工具加入当前激活集(rpi_web::ToolSetActivator 的
+/// rpi-core 实现;set_active_tools_by_name 落 tool_set_change entry)。
+struct SessionToolSetActivator {
+    session: Arc<Mutex<Weak<AgentSession>>>,
+}
+
+#[async_trait]
+impl rpi_web::ToolSetActivator for SessionToolSetActivator {
+    async fn activate(&self, names: &[String]) -> Result<(), String> {
+        let Some(session) = self.session.lock().unwrap().upgrade() else {
+            return Err("No active session to enable web tools in".to_string());
+        };
+        let mut merged = session.active_tool_names();
+        for name in names {
+            if !merged.iter().any(|existing| existing == name) {
+                merged.push(name.to_string());
+            }
+        }
+        session
+            .set_active_tools_by_name(&merged)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// includeContent 后台抓取完成通知:仿 subagent supervisor 的
+/// wait_idle → follow_up → continue_run 唤醒链。
+struct AgentFollowUpNotifier {
+    agent: Arc<Mutex<Weak<rpi_agent::Agent>>>,
+}
+
+#[async_trait]
+impl rpi_web::BackgroundNotifier for AgentFollowUpNotifier {
+    async fn notify(&self, text: String) {
+        let Some(agent) = self.agent.lock().unwrap().upgrade() else {
+            return; // 会话已释放:通知无处投递,丢弃
+        };
+        tokio::spawn(async move {
+            agent.wait_idle().await;
+            agent.follow_up(rpi_agent::AgentMessage::user(text));
+            let _ = agent.continue_run().await;
+        });
+    }
+}
+
 /// 共享装配:扩展连接失败不阻断(诊断打 stderr,07 §8.5)。
 pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -828,6 +873,45 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         Some(retry_hooks),
     );
 
+    // 进程内 web 扩展(rpi-web,16 文档):搜索/抓取/检索/取证/激活五工具,
+    // 懒激活(默认只激活 web_enable,其余经 web_enable 拉入激活集)。配置
+    // ~/.rpi/web-search.json + 项目 .rpi/web-search.json;零配置可用
+    // (auto 链兜底 duckduckgo)。rpi-core 能力经 trait 注入,保持 rpi-web
+    // 不依赖 rpi-core
+    let web_home = dirs_home();
+    let web_config = rpi_web::config::load_web_search_config(Some(&cwd), web_home.as_deref());
+    rpi_web::storage::set_fetch_cache_dir(
+        rpi_web::config::config_dir(web_home.as_deref()).join("web-search-cache"),
+    );
+    let web_resolver =
+        rpi_core::create_model_resolver_from_config(Some(&cwd), web_home.as_deref());
+    // 当前主模型:会话建好后回填的弱引(agent 状态快照取 model)
+    let web_agent_cell: Arc<Mutex<Weak<rpi_agent::Agent>>> = Arc::new(Mutex::new(Weak::new()));
+    let web_agent_for_model = web_agent_cell.clone();
+    let web_llm = rpi_web::llm::LlmDeps {
+        provider: provider.clone(),
+        resolve_model: Arc::new(move |spec: &str| web_resolver.resolve(spec)),
+        current_model: Arc::new(move || {
+            let agent = web_agent_for_model.lock().unwrap().upgrade()?;
+            agent.state_snapshot().model
+        }),
+    };
+    let web_session_cell: Arc<Mutex<Weak<AgentSession>>> = Arc::new(Mutex::new(Weak::new()));
+    let web_cache_limits = web_config.cache_limits.unwrap_or_default();
+    let web_context = Arc::new(rpi_web::tools::WebContext {
+        config: web_config,
+        cache_limits: web_cache_limits,
+        llm: web_llm,
+        activator: Some(Arc::new(SessionToolSetActivator {
+            session: web_session_cell.clone(),
+        })),
+        notifier: Some(Arc::new(AgentFollowUpNotifier {
+            agent: web_agent_cell.clone(),
+        })),
+        cwd: cwd.clone(),
+    });
+    tools.extend(rpi_web::tools::create_web_tools(web_context));
+
     // 进程内 subagent 引擎(14 文档 §4):task 工具编译进二进制,agent 类型
     // 定义是数据文件(.rpi/agents/*.md,项目优先);解析失败诊断打 stderr 跳过。
     // 递归防护 = 子工具面裁剪;后台审批按 settings 策略(默认 deny,fail-closed)
@@ -922,13 +1006,29 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 激活工具集:会话内切换过(ToolSetChange entry)则按记录恢复并校验;
     // 否则用调用方显式传入(main 从 settings `tools` 解析),未传 = 全部;
     // 配置了未知工具名直接报错(配置错误要显式暴露)
-    let active_tool_names = match &seed_active_tools {
-        Some(names) => Some(resolve_active_tools(names, &tools)?),
-        None => match &active_tools {
-            None => None,
-            Some(names) => Some(resolve_active_tools(names, &tools)?),
-        },
+    // web 工具(rpi-web)懒激活:未显式配置激活集时,web 工具在候选池但
+    // 默认只激活 web_enable;**显式配置(settings `tools`)= 精确集合,
+    // 完全尊重** —— 需要 web 的用户把 `web_enable`(或具体工具名)加进列表
+    let has_web_enable = tools
+        .iter()
+        .any(|tool| tool.name() == rpi_web::tools::names::WEB_ENABLE);
+    let active_tool_names = match (&seed_active_tools, &active_tools) {
+        (Some(names), _) | (None, Some(names)) => {
+            Some(resolve_active_tools(names, &tools)?)
+        }
+        (None, None) if has_web_enable => {
+            let activatable = rpi_web::tools::names::ACTIVATABLE;
+            Some(
+                tools
+                    .iter()
+                    .map(|tool| tool.name().to_string())
+                    .filter(|name| !activatable.contains(&name.as_str()))
+                    .collect(),
+            )
+        }
+        (None, None) => None,
     };
+
     let session = Arc::new(
         create_agent_session(AgentSessionConfig {
             provider: provider.clone(),
@@ -985,6 +1085,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // subagent:回填父会话弱引(模型继承 + supervisor 唤醒),启动空闲唤醒任务
     *subagent_parent_cell.lock().unwrap() = Arc::downgrade(session.agent());
     subagent_tool.spawn_supervisor();
+    // web 扩展:回填会话/agent 弱引(激活桥 + 后台完成通知 + 当前主模型)
+    *web_session_cell.lock().unwrap() = Arc::downgrade(&session);
+    *web_agent_cell.lock().unwrap() = Arc::downgrade(session.agent());
 
     // 装配期诊断(编译期扩展 init 失败跳过等)
     for diagnostic in session.extension_diagnostics() {

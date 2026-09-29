@@ -5,6 +5,7 @@ members = [
     "crates/rpi-agent",
     "crates/rpi-session",
     "crates/rpi-tools",
+    "crates/rpi-web",
     "crates/rpi-core",
     "crates/rpi-tui",
     "crates/rpi-sandbox",
@@ -22,6 +23,7 @@ rpi-ai = { path = "crates/rpi-ai" }
 rpi-agent = { path = "crates/rpi-agent" }
 rpi-session = { path = "crates/rpi-session" }
 rpi-tools = { path = "crates/rpi-tools" }
+rpi-web = { path = "crates/rpi-web" }
 rpi-core = { path = "crates/rpi-core" }
 rpi-tui = { path = "crates/rpi-tui" }
 rpi-sandbox = { path = "crates/rpi-sandbox" }

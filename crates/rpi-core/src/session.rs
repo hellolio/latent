@@ -609,6 +609,19 @@ impl AgentSession {
         Ok(())
     }
 
+    /// 当前激活工具名快照(web_enable 桥:在现有集合上追加,而非整体替换)。
+    pub fn active_tool_names(&self) -> Vec<String> {
+        self.runtime.lock().unwrap().active_tool_names.clone()
+    }
+
+    /// 按名字取候选池中的工具实例(诊断/测试/桥接用)。
+    pub fn tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools_all
+            .iter()
+            .find(|tool| tool.name() == name)
+            .cloned()
+    }
+
     /// 切模型(pi setModel):Agent 状态 + model_change entry 同步落盘。
     /// 落盘内联 await:与 SessionBridge 的消息 append 保持文件内顺序,
     /// spawn 异步写会让 model_change 排在后续 message 之后(恢复时投影出错模型)。
