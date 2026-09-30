@@ -3,7 +3,7 @@
 //! `normalize_context` 是 `TranscriptContext` 的唯一常规构造入口:提示词与工具
 //! 折叠为首条 system 消息,provider 代码只见转录,不见散装字段。
 
-use crate::types::{Context, Message, Tool, ToolReference, TranscriptContext};
+use crate::types::{ContentBlock, Context, Message, Model, Tool, ToolReference, TranscriptContext, UserContent};
 use std::collections::BTreeMap;
 
 /// 为提示词与工具集构造首条 system 消息;两者皆空时返回 None(空转录保持为空)。
@@ -213,6 +213,75 @@ pub fn tool_reference(name: impl Into<String>) -> ToolReference {
     ToolReference { name: name.into() }
 }
 
+/// 图片占位符文本(pi 的 "Image reading is disabled.")。
+pub const IMAGE_PLACEHOLDER: &str = "[Image omitted: image input is disabled or unsupported]";
+
+/// 图片占位符替换(pi 的 convertToLlmWithBlockImages,sdk.ts:268):
+/// 用户禁用图片(`block`)或模型不支持图片输入(`model.input` 无 "image")时,
+/// 把 user/toolResult 消息里的 Image 块替换为文本占位符,让模型知道"这里曾有
+/// 一张图"而无需承担图片体积;连续占位符合并为一条。其余消息原样透传。
+pub fn replace_images_with_placeholders(
+    messages: Vec<Message>,
+    block: bool,
+    model: &Model,
+) -> Vec<Message> {
+    let replace = block || !model.input.iter().any(|m| m == "image");
+    if !replace {
+        return messages;
+    }
+    let mut out = Vec::with_capacity(messages.len());
+    for message in messages {
+        match message {
+            Message::User { content, timestamp } => {
+                let content = match content {
+                    UserContent::Blocks(blocks) => {
+                        UserContent::Blocks(blocks_with_placeholders(blocks))
+                    }
+                    other => other,
+                };
+                out.push(Message::User { content, timestamp });
+            }
+            Message::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                details,
+                is_error,
+                timestamp,
+            } => {
+                let content = blocks_with_placeholders(content);
+                out.push(Message::ToolResult {
+                    tool_call_id,
+                    tool_name,
+                    content,
+                    details,
+                    is_error,
+                    timestamp,
+                });
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// 块数组中的 Image → 占位符文本;连续占位符合并为一条。
+fn blocks_with_placeholders(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+    let mut out: Vec<ContentBlock> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ContentBlock::Image { .. } => {
+                let placeholder = ContentBlock::text(IMAGE_PLACEHOLDER);
+                if out.last() != Some(&placeholder) {
+                    out.push(placeholder);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +420,81 @@ mod tests {
         assert_eq!(kept.messages.len(), 3);
         let folded = resolve_transcript(ctx, false);
         assert_eq!(folded.messages.len(), 2);
+    }
+
+    // ---- 图片占位符替换 ----
+    fn image_block() -> ContentBlock {
+        ContentBlock::Image {
+            data: "aGVsbG8=".into(),
+            mime_type: "image/png".into(),
+        }
+    }
+
+    fn vision_model() -> Model {
+        let mut model = Model::minimal("vision", "anthropic", "anthropic-messages");
+        model.input = vec!["text".into(), "image".into()];
+        model
+    }
+
+    #[test]
+    fn images_replaced_with_placeholders_when_blocked() {
+        let messages = vec![
+            Message::User {
+                content: UserContent::Blocks(vec![
+                    ContentBlock::text("look"),
+                    image_block(),
+                    image_block(),
+                ]),
+                timestamp: 0,
+            },
+            Message::tool_result("t1", "read", vec![image_block()], false),
+        ];
+        let replaced = replace_images_with_placeholders(messages, true, &vision_model());
+        // user:文本保留,连续两张图合并为一条占位符
+        match &replaced[0] {
+            Message::User {
+                content: UserContent::Blocks(blocks),
+                ..
+            } => {
+                assert_eq!(blocks.len(), 2);
+                assert_eq!(blocks[0].as_text(), Some("look"));
+                assert_eq!(blocks[1].as_text(), Some(IMAGE_PLACEHOLDER));
+            }
+            other => panic!("expected user blocks, got {other:?}"),
+        }
+        // toolResult:图片 → 占位符
+        match &replaced[1] {
+            Message::ToolResult { content, .. } => {
+                assert_eq!(content.len(), 1);
+                assert_eq!(content[0].as_text(), Some(IMAGE_PLACEHOLDER));
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn images_kept_when_allowed_and_supported() {
+        let messages = vec![Message::tool_result("t1", "read", vec![image_block()], false)];
+        let kept = replace_images_with_placeholders(messages, false, &vision_model());
+        match &kept[0] {
+            Message::ToolResult { content, .. } => {
+                assert!(matches!(content[0], ContentBlock::Image { .. }));
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn images_replaced_when_model_lacks_image_input() {
+        // 用户未禁用,但模型不支持图片:仍替换
+        let model = Model::minimal("text-only", "anthropic", "anthropic-messages");
+        let messages = vec![Message::tool_result("t1", "read", vec![image_block()], false)];
+        let replaced = replace_images_with_placeholders(messages, false, &model);
+        match &replaced[0] {
+            Message::ToolResult { content, .. } => {
+                assert_eq!(content[0].as_text(), Some(IMAGE_PLACEHOLDER));
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
     }
 }

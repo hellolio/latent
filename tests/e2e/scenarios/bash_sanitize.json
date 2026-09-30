@@ -1,0 +1,26 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "printf '\\033[31mRED\\033[0m-ok\\n'"
+        }
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "printf '\\033[32mGREEN\\033[0m-raw\\n'",
+          "sanitize": false
+        }
+      }
+    ]
+  },
+  {
+    "text": "sanitize e2e 完成"
+  }
+]

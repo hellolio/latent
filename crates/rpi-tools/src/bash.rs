@@ -147,6 +147,7 @@ fn create_shell_tool(
 struct ParsedArgs {
     command: String,
     timeout_secs: Option<u64>,
+    sanitize: bool,
 }
 
 fn parse_args(name: &str, args: &serde_json::Value) -> Result<ParsedArgs, ToolError> {
@@ -172,6 +173,7 @@ fn parse_args(name: &str, args: &serde_json::Value) -> Result<ParsedArgs, ToolEr
     Ok(ParsedArgs {
         command,
         timeout_secs,
+        sanitize: crate::sanitize::parse_sanitize_arg(args),
     })
 }
 
@@ -208,6 +210,7 @@ async fn run(
     tool: &ShellTool,
     command: &str,
     timeout_secs: Option<u64>,
+    sanitize: bool,
     cancel: &CancellationToken,
     accumulator: Arc<Mutex<OutputAccumulator>>,
     updater: &dyn ToolUpdater,
@@ -316,9 +319,14 @@ async fn run(
                         acc.finish();
                         acc.snapshot(true)
                     };
+                    let content = if sanitize {
+                        crate::sanitize::sanitize_output(&snapshot.content)
+                    } else {
+                        snapshot.content
+                    };
                     let mut message = format!(
                         "{}\nCommand timed out after {} seconds",
-                        snapshot.content,
+                        content,
                         timeout_secs.unwrap_or(0)
                     );
                     if let Some(path) = &snapshot.full_output_path {
@@ -351,8 +359,15 @@ fn kill_process_tree(child: &mut tokio::process::Child) {
 
 /// 输出 + details(pi 的 BashToolDetails {truncation?, fullOutputPath?});
 /// 截断时追加 `[Showing lines X-Y of N. Full output: <tmpfile>]` 提示。
-fn settle_output(snapshot: OutputSnapshot) -> ToolOutput {
-    let mut output = snapshot.content.clone();
+/// `sanitize`(参数 `sanitize`,缺省 true):剥离 ANSI 序列并过滤控制字符;
+/// 关闭时保留原文(流式 tail 与临时文件始终为原文)。
+fn settle_output(snapshot: OutputSnapshot, sanitize: bool) -> ToolOutput {
+    let content = if sanitize {
+        crate::sanitize::sanitize_output(&snapshot.content)
+    } else {
+        snapshot.content.clone()
+    };
+    let mut output = content;
     let mut details = serde_json::Map::new();
     if snapshot.truncation.truncated {
         let total = snapshot.truncation.total_lines;
@@ -400,7 +415,8 @@ impl Tool for ShellTool {
             "required": ["command"],
             "properties": {
                 "command": {"type": "string", "description": "The shell command to execute"},
-                "timeout": {"type": "integer", "description": "Optional timeout in seconds"}
+                "timeout": {"type": "integer", "description": "Optional timeout in seconds"},
+                "sanitize": {"type": "boolean", "description": "Set false to keep raw output including ANSI color codes and control characters. Defaults to true."}
             }
         })
     }
@@ -419,6 +435,7 @@ impl Tool for ShellTool {
         let ParsedArgs {
             command,
             timeout_secs,
+            sanitize,
         } = parse_args(self.config.name, &call.args)?;
 
         // T10:hook 先改写(检查的是用户命令),prefix 最后前置;
@@ -450,6 +467,7 @@ impl Tool for ShellTool {
             self,
             &effective,
             timeout_secs,
+            sanitize,
             &cancel,
             accumulator.clone(),
             updater,
@@ -462,7 +480,7 @@ impl Tool for ShellTool {
             acc.finish();
             acc.snapshot(true)
         };
-        let output = settle_output(snapshot);
+        let output = settle_output(snapshot, sanitize);
 
         if code != 0 {
             return Err(ToolError::Failed {
@@ -546,6 +564,42 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(output.output.trim(), "hello");
+    }
+
+    // ---- sanitize:默认剥离 ANSI/控制字符,sanitize:false 保留原文 ----
+    #[tokio::test]
+    async fn sanitizes_ansi_output_by_default() {
+        let tool = bash_at(&std::env::temp_dir());
+        let output = exec(
+            &tool,
+            serde_json::json!({
+                "command": "printf '\\033[32mgreen\\033[0m plain\\n'"
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.output.trim(), "green plain");
+    }
+
+    #[tokio::test]
+    async fn sanitize_false_keeps_raw_output() {
+        let tool = bash_at(&std::env::temp_dir());
+        let output = exec(
+            &tool,
+            serde_json::json!({
+                "command": "printf '\\033[32mgreen\\033[0m plain\\n'",
+                "sanitize": false
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            output.output.contains("\u{1b}[32m"),
+            "sanitize:false 应保留 ANSI 码: {:?}",
+            output.output
+        );
     }
 
     #[tokio::test]

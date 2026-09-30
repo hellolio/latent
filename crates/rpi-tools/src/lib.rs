@@ -12,6 +12,7 @@ mod ls;
 mod output_accumulator;
 mod powershell;
 mod read;
+mod sanitize;
 mod truncate;
 mod write;
 

@@ -56,6 +56,7 @@ pub async fn build_bare_session(
         context_snapshot: Some(settings.context_snapshot),
         active_tools: settings.active_tools,
         tool_result_max_chars: settings.tool_result_max_chars,
+        block_images: settings.block_images,
         compaction: settings.compaction,
         session_mode: session_mode_override,
         default_session_mode: settings.session_mode,

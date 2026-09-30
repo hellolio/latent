@@ -138,6 +138,8 @@ pub struct Agent {
     limits: Mutex<TurnLimits>,
     /// 超长 tool result 进转录前的字符上限(Current Turn 层裁剪)
     tool_result_max_chars: Mutex<usize>,
+    /// 图片占位符开关(settings `blockImages`):发送前把 Image 块替换为文本占位符
+    block_images: Mutex<bool>,
     stream_options: Mutex<StreamOptions>,
     /// streaming 标志(T8):watch 化,`wait_idle` 经 receiver 等待、零轮询;
     /// Sender 加锁串行化"检查-置位"(替代 AtomicBool 的 compare_exchange)
@@ -172,6 +174,7 @@ impl Agent {
             adapter,
             limits: Mutex::new(TurnLimits::default()),
             tool_result_max_chars: Mutex::new(DEFAULT_TOOL_RESULT_MAX_CHARS),
+            block_images: Mutex::new(false),
             stream_options: Mutex::new(StreamOptions::default()),
             streaming: Mutex::new(streaming),
             streaming_rx,
@@ -207,6 +210,12 @@ impl Agent {
     /// 超长 tool result 的字符上限(0 = 不裁剪)。
     pub fn set_tool_result_max_chars(&self, max_chars: usize) {
         *self.tool_result_max_chars.lock().unwrap() = max_chars;
+    }
+
+    /// 图片占位符开关(settings `blockImages`):true = 发送前把转录里的
+    /// Image 块替换为文本占位符。
+    pub fn set_block_images(&self, block: bool) {
+        *self.block_images.lock().unwrap() = block;
     }
 
     pub fn set_stream_options(&self, options: StreamOptions) {
@@ -385,7 +394,7 @@ impl Agent {
             cancel.clone()
         };
 
-        let (system, model, thinking, tools, transcript, limits, tool_result_max_chars, stream_options, steering_mode, follow_up_mode) = {
+        let (system, model, thinking, tools, transcript, limits, tool_result_max_chars, block_images, stream_options, steering_mode, follow_up_mode) = {
             let state = self.state.lock().unwrap();
             (
                 state.system.clone(),
@@ -395,6 +404,7 @@ impl Agent {
                 state.messages.clone(),
                 *self.limits.lock().unwrap(),
                 *self.tool_result_max_chars.lock().unwrap(),
+                *self.block_images.lock().unwrap(),
                 self.stream_options.lock().unwrap().clone(),
                 *self.steering_mode.lock().unwrap(),
                 *self.follow_up_mode.lock().unwrap(),
@@ -427,6 +437,7 @@ impl Agent {
             steering_mode,
             follow_up_mode,
             tool_result_max_chars,
+            block_images,
         };
         let sink: Arc<dyn Subscriber> = match self.self_weak.upgrade() {
             Some(this) => this,

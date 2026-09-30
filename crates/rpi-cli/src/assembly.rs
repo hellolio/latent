@@ -64,6 +64,10 @@ struct SettingsFile {
     /// 超长 tool result 进转录的字符上限(头尾裁剪);未配置 = 默认 20000
     #[serde(rename = "toolResultMaxChars", alias = "tool_result_max_chars", default)]
     tool_result_max_chars: Option<usize>,
+    /// 图片输入开关(`blockImages`):true = 发送给模型前把转录里的 Image 块
+    /// 替换为文本占位符(模型不支持图片时无论此值都会替换);未配置 = false
+    #[serde(rename = "blockImages", alias = "block_images", default)]
+    block_images: Option<bool>,
     /// 自动压缩阈值(`compaction` 节)
     #[serde(rename = "compaction", alias = "auto_compact", default)]
     compaction: Option<CompactionConfig>,
@@ -351,6 +355,9 @@ pub struct BuildOptions {
     pub active_tools: Option<Vec<String>>,
     /// 超长 tool result 字符上限:None = 默认 20000;Some(0) = 不裁剪。
     pub tool_result_max_chars: Option<usize>,
+    /// 图片输入开关(settings `blockImages`):true = 发送前 Image 块替换为
+    /// 文本占位符(默认 false = 允许图片进转录)。
+    pub block_images: bool,
     /// 自动压缩阈值(默认 = CompactionSettings::default)。
     pub compaction: CompactionConfig,
     /// CLI 显式会话模式(--session-mode/--plan/--yolo;None = 未显式指定,
@@ -443,6 +450,8 @@ pub struct SessionSettings {
     /// settings `toolResultMaxChars`:超长 tool result 进转录的字符上限
     /// (头尾裁剪);None = 默认 20000,0 = 不裁剪
     pub tool_result_max_chars: Option<usize>,
+    /// settings `blockImages`:发送前把转录里的 Image 块替换为文本占位符
+    pub block_images: bool,
     /// settings 压缩配置(自动压缩阈值,见 `CompactionConfig`)
     pub compaction: CompactionConfig,
     /// settings `sessionMode`:新会话初始档位(默认 Plan;13 文档 §12)
@@ -500,6 +509,7 @@ impl Default for SessionSettings {
             context_snapshot: false,
             active_tools: None,
             tool_result_max_chars: None,
+            block_images: false,
             compaction: CompactionConfig::default(),
             session_mode: SessionMode::Plan,
             headless_approval: HeadlessApproval::Deny,
@@ -533,6 +543,10 @@ pub fn load_session_settings() -> SessionSettings {
     let tool_result_max_chars = files
         .iter()
         .find_map(|settings| settings.tool_result_max_chars);
+    let block_images = files
+        .iter()
+        .find_map(|settings| settings.block_images)
+        .unwrap_or(false);
     let compaction = files
         .iter()
         .find_map(|settings| settings.compaction.clone())
@@ -562,6 +576,7 @@ pub fn load_session_settings() -> SessionSettings {
         context_snapshot: load_context_snapshot_enabled(),
         active_tools: load_active_tool_names(),
         tool_result_max_chars,
+        block_images,
         compaction,
         session_mode: parse_session_mode(session_mode.as_ref()),
         headless_approval: parse_headless_approval(headless_approval.as_ref()),
@@ -707,6 +722,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         context_snapshot,
         active_tools,
         tool_result_max_chars,
+        block_images,
         compaction,
         session_mode,
         default_session_mode,
@@ -1091,6 +1107,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     if let Some(max_chars) = tool_result_max_chars {
         session.agent().set_tool_result_max_chars(max_chars);
     }
+    // 图片输入开关(settings `blockImages`;false = 允许图片进转录)
+    session.agent().set_block_images(block_images);
 
     // T9:session 建好后回填共享 cell,PI_* 环境闭包此后可按需快照
     *session_cell.lock().unwrap() = Arc::downgrade(&session);
@@ -1166,6 +1184,7 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         context_snapshot: Some(request.settings.context_snapshot),
         active_tools: request.settings.active_tools,
         tool_result_max_chars: request.settings.tool_result_max_chars,
+        block_images: request.settings.block_images,
         compaction: request.settings.compaction,
         session_mode: request.session_mode_override,
         default_session_mode: request.settings.session_mode,

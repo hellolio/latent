@@ -33,6 +33,7 @@ pub use retry::{
 };
 pub use transcript::{
     collapse_system_messages, get_current_system_message, get_current_system_prompt,
-    get_current_tools, normalize_context, resolve_transcript,
+    get_current_tools, normalize_context, replace_images_with_placeholders, resolve_transcript,
+    IMAGE_PLACEHOLDER,
 };
 pub use types::*;

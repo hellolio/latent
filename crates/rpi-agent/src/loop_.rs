@@ -28,8 +28,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use rpi_ai::{
-    normalize_context, AssistantMessage, AssistantMessageEvent, ContentBlock, Context, Model,
-    Provider, StopReason, StreamOptions, ThinkingLevel, Tool as DeclaredTool, TranscriptContext,
+    normalize_context, replace_images_with_placeholders, AssistantMessage, AssistantMessageEvent,
+    ContentBlock, Context, Model, Provider, StopReason, StreamOptions, ThinkingLevel,
+    Tool as DeclaredTool, TranscriptContext,
 };
 
 use crate::agent::QueueMode;
@@ -254,6 +255,9 @@ pub struct LoopConfig {
     /// 超长 tool result 进转录前的字符上限(Current Turn 层裁剪):超出时
     /// 头尾保留、中间省略。0 = 不裁剪。
     pub tool_result_max_chars: usize,
+    /// 图片占位符开关(settings `blockImages`):true = 发送给模型前把转录里
+    /// 的 Image 块替换为文本占位符(模型不支持图片时无论此值都会替换)。
+    pub block_images: bool,
 }
 
 impl LoopConfig {
@@ -266,6 +270,7 @@ impl LoopConfig {
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
             tool_result_max_chars: DEFAULT_TOOL_RESULT_MAX_CHARS,
+            block_images: false,
         }
     }
 }
@@ -414,6 +419,7 @@ struct LoopState {
     steering_mode: QueueMode,
     follow_up_mode: QueueMode,
     tool_result_max_chars: usize,
+    block_images: bool,
 
     model: Model,
     thinking: Option<ThinkingLevel>,
@@ -575,6 +581,7 @@ pub async fn run_agent_loop(
         steering_mode: config.steering_mode,
         follow_up_mode: config.follow_up_mode,
         tool_result_max_chars: config.tool_result_max_chars,
+        block_images: config.block_images,
         model: config.model,
         thinking: config.thinking,
         current: context.messages,
@@ -706,6 +713,7 @@ async fn step_streaming(state: &mut LoopState) -> Phase {
         &state.cancel,
         &mut state.receiver,
         &mut state.deferred_steering,
+        state.block_images,
     )
     .await;
     state.total_tokens = state
@@ -929,9 +937,13 @@ async fn stream_assistant_response(
     cancel: &CancellationToken,
     receiver: &mut InjectionReceiver,
     deferred: &mut Vec<AgentMessage>,
+    block_images: bool,
 ) -> AssistantMessage {
     let transformed = hooks.transform_context(current.to_vec()).await;
     let llm_messages = hooks.convert_to_llm(&transformed);
+    // 图片占位符(pi 的 convertToLlmWithBlockImages):用户禁用或模型不支持
+    // 图片时,Image 块在进转录前替换为文本占位符
+    let llm_messages = replace_images_with_placeholders(llm_messages, block_images, model);
     let declarations: Vec<DeclaredTool> = tools
         .iter()
         .map(|tool| DeclaredTool::new(tool.name(), tool.description(), tool.schema()))

@@ -24,7 +24,7 @@ pub fn create_ls_tool(cwd: &Path) -> Arc<dyn Tool> {
     })
 }
 
-fn parse_args(args: &serde_json::Value) -> Result<(Option<String>, usize), String> {
+fn parse_args(args: &serde_json::Value) -> Result<(Option<String>, usize, bool), String> {
     let obj = args.as_object().ok_or("arguments must be an object")?;
     let path = match obj.get("path") {
         Some(v) if v.is_string() => Some(v.as_str().unwrap().to_string()),
@@ -34,7 +34,11 @@ fn parse_args(args: &serde_json::Value) -> Result<(Option<String>, usize), Strin
         Some(v) if !v.is_null() => v.as_u64().ok_or("`limit` must be a positive integer")? as usize,
         _ => DEFAULT_LIMIT,
     };
-    Ok((path, limit))
+    Ok((
+        path,
+        limit,
+        crate::sanitize::parse_sanitize_arg(args),
+    ))
 }
 
 #[async_trait]
@@ -54,7 +58,8 @@ impl Tool for LsTool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Directory to list (default: current directory)"},
-                "limit": {"type": "integer", "description": "Maximum number of entries to return (default: 500)"}
+                "limit": {"type": "integer", "description": "Maximum number of entries to return (default: 500)"},
+                "sanitize": {"type": "boolean", "description": "Set false to keep raw output including ANSI escape codes and control characters. Defaults to true."}
             }
         })
     }
@@ -69,10 +74,11 @@ impl Tool for LsTool {
         _cancel: CancellationToken,
         _updater: &dyn ToolUpdater,
     ) -> Result<ToolOutput, ToolError> {
-        let (path, limit) = parse_args(&call.args).map_err(|message| ToolError::Failed {
-            name: "ls".into(),
-            message,
-        })?;
+        let (path, limit, sanitize) =
+            parse_args(&call.args).map_err(|message| ToolError::Failed {
+                name: "ls".into(),
+                message,
+            })?;
 
         let dir = match &path {
             Some(p) if Path::new(p).is_absolute() => PathBuf::from(p),
@@ -119,6 +125,12 @@ impl Tool for LsTool {
         }
 
         let raw = results.join("\n");
+        // sanitize(缺省 true):文件名可能含控制字符;截断前净化,字节统计保持自洽
+        let raw = if sanitize {
+            crate::sanitize::sanitize_output(&raw)
+        } else {
+            raw
+        };
         // 条目数已被 limit 封顶,这里只剩字节限
         let truncation = truncate_head(&raw, usize::MAX, DEFAULT_MAX_BYTES);
         let mut output = truncation.content.clone();

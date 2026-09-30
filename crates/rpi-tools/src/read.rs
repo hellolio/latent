@@ -23,7 +23,9 @@ pub fn create_read_tool(cwd: &Path) -> Arc<dyn Tool> {
     })
 }
 
-fn parse_args(args: &serde_json::Value) -> Result<(String, Option<usize>, Option<usize>), String> {
+fn parse_args(
+    args: &serde_json::Value,
+) -> Result<(String, Option<usize>, Option<usize>, bool), String> {
     let obj = args.as_object().ok_or("arguments must be an object")?;
     let path = obj
         .get("path")
@@ -46,7 +48,12 @@ fn parse_args(args: &serde_json::Value) -> Result<(String, Option<usize>, Option
         }
         _ => None,
     };
-    Ok((path, offset, limit))
+    Ok((
+        path,
+        offset,
+        limit,
+        crate::sanitize::parse_sanitize_arg(args),
+    ))
 }
 
 const IMAGE_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "gif", "webp"];
@@ -69,7 +76,8 @@ impl Tool for ReadTool {
             "properties": {
                 "path": {"type": "string", "description": "File path (relative paths resolve against the working directory)"},
                 "offset": {"type": "integer", "description": "1-based line number to start reading from"},
-                "limit": {"type": "integer", "description": "Number of lines to read"}
+                "limit": {"type": "integer", "description": "Number of lines to read"},
+                "sanitize": {"type": "boolean", "description": "Set false to keep raw content including ANSI escape codes and control characters. Defaults to true."}
             }
         })
     }
@@ -85,7 +93,7 @@ impl Tool for ReadTool {
         _cancel: CancellationToken,
         _updater: &dyn ToolUpdater,
     ) -> Result<ToolOutput, ToolError> {
-        let (path, offset, limit) =
+        let (path, offset, limit, sanitize) =
             parse_args(&call.args).map_err(|message| ToolError::Failed {
                 name: "read".into(),
                 message,
@@ -121,6 +129,13 @@ impl Tool for ReadTool {
             });
         }
         let content = String::from_utf8_lossy(&bytes);
+        // sanitize(缺省 true):文本文件也可能含 ANSI 码/控制字符;
+        // 后续行号与字节提示均基于净化后内容计算,保持自洽
+        let content = if sanitize {
+            std::borrow::Cow::Owned(crate::sanitize::sanitize_output(&content))
+        } else {
+            content
+        };
 
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();

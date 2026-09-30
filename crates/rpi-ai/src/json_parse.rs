@@ -38,10 +38,39 @@ pub fn repair_json(json: &str) -> String {
                         chars.next();
                         let rest: String = chars.clone().take(4).collect();
                         if rest.chars().count() == 4 && rest.chars().all(is_hex_digit) {
-                            repaired.push_str("\\u");
-                            repaired.push_str(&rest);
                             for _ in 0..4 {
                                 chars.next();
+                            }
+                            // 孤立代理对转义:serde_json 会拒绝("lone leading
+                            // surrogate in hex escape"),整个参数对象解析失败。
+                            // 高代理未跟低代理、或孤立低代理 → 替换为 U+FFFD;
+                            // 成对高/低代理保留(pi 的 sanitize-unicode 等价物:
+                            // Rust String 恒为合法 UTF-8,风险只在 JSON 转义层)
+                            let value = u32::from_str_radix(&rest, 16).unwrap_or(0);
+                            let is_high = (0xD800..=0xDBFF).contains(&value);
+                            let is_low = (0xDC00..=0xDFFF).contains(&value);
+                            if is_high || is_low {
+                                let next: String = chars.clone().take(6).collect();
+                                let paired = is_high
+                                    && next.chars().count() == 6
+                                    && next.starts_with("\\u")
+                                    && next[2..].chars().all(is_hex_digit)
+                                    && (0xDC00..=0xDFFF)
+                                        .contains(&u32::from_str_radix(&next[2..], 16).unwrap_or(0));
+                                if paired {
+                                    repaired.push_str("\\u");
+                                    repaired.push_str(&rest);
+                                    repaired.push_str("\\u");
+                                    repaired.push_str(&next[2..]);
+                                    for _ in 0..6 {
+                                        chars.next();
+                                    }
+                                } else {
+                                    repaired.push_str("\\uFFFD");
+                                }
+                            } else {
+                                repaired.push_str("\\u");
+                                repaired.push_str(&rest);
                             }
                         } else {
                             repaired.push_str("\\\\");
@@ -190,6 +219,37 @@ mod tests {
         assert_eq!(
             parse_streaming_json(Some("{\"a\": \"x\\\"")),
             json!({"a": "x\""})
+        );
+    }
+
+    // ---- 孤立代理对转义清理:serde_json 拒绝孤立 \uD800,修复后应可解析 ----
+    #[test]
+    fn lone_surrogate_escapes_repair_to_replacement_char() {
+        assert_eq!(
+            parse_json_with_repair("\"\\ud800\"").unwrap(),
+            json!("\u{FFFD}")
+        );
+        assert_eq!(
+            parse_json_with_repair("\"\\udc00x\"").unwrap(),
+            json!("\u{FFFD}x")
+        );
+    }
+
+    #[test]
+    fn paired_surrogate_escapes_survive() {
+        // \ud842\udfb7 = "𠮷"
+        assert_eq!(
+            parse_json_with_repair("\"\\ud842\\udfb7\"").unwrap(),
+            json!("\u{20BB7}")
+        );
+    }
+
+    #[test]
+    fn streaming_parse_with_lone_surrogate_does_not_degrade_to_empty() {
+        // 修复前:整个参数对象解析失败退化为 {}
+        assert_eq!(
+            parse_streaming_json(Some("{\"a\": \"\\ud800\"}")),
+            json!({"a": "\u{FFFD}"})
         );
     }
 }

@@ -27,7 +27,9 @@ pub fn create_find_tool(cwd: &Path) -> Arc<dyn Tool> {
     })
 }
 
-fn parse_args(args: &serde_json::Value) -> Result<(String, Option<String>, usize), String> {
+fn parse_args(
+    args: &serde_json::Value,
+) -> Result<(String, Option<String>, usize, bool), String> {
     let obj = args.as_object().ok_or("arguments must be an object")?;
     let pattern = obj
         .get("pattern")
@@ -42,7 +44,12 @@ fn parse_args(args: &serde_json::Value) -> Result<(String, Option<String>, usize
         Some(v) if !v.is_null() => v.as_u64().ok_or("`limit` must be a positive integer")? as usize,
         _ => DEFAULT_LIMIT,
     };
-    Ok((pattern, path, limit))
+    Ok((
+        pattern,
+        path,
+        limit,
+        crate::sanitize::parse_sanitize_arg(args),
+    ))
 }
 
 #[async_trait]
@@ -64,7 +71,8 @@ impl Tool for FindTool {
             "properties": {
                 "pattern": {"type": "string", "description": "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'"},
                 "path": {"type": "string", "description": "Directory to search in (default: current directory)"},
-                "limit": {"type": "integer", "description": "Maximum number of results (default: 1000)"}
+                "limit": {"type": "integer", "description": "Maximum number of results (default: 1000)"},
+                "sanitize": {"type": "boolean", "description": "Set false to keep raw output including ANSI escape codes and control characters. Defaults to true."}
             }
         })
     }
@@ -79,7 +87,7 @@ impl Tool for FindTool {
         cancel: CancellationToken,
         _updater: &dyn ToolUpdater,
     ) -> Result<ToolOutput, ToolError> {
-        let (pattern, path, limit) =
+        let (pattern, path, limit, sanitize) =
             parse_args(&call.args).map_err(|message| ToolError::Failed {
                 name: "find".into(),
                 message,
@@ -159,6 +167,12 @@ impl Tool for FindTool {
         results.sort_by_key(|a| a.to_lowercase());
 
         let raw = results.join("\n");
+        // sanitize(缺省 true):文件名可能含控制字符;截断前净化,字节统计保持自洽
+        let raw = if sanitize {
+            crate::sanitize::sanitize_output(&raw)
+        } else {
+            raw
+        };
         // 结果数已被 limit 封顶,这里只剩字节限
         let truncation = truncate_head(&raw, usize::MAX, DEFAULT_MAX_BYTES);
         let mut output = truncation.content.clone();
