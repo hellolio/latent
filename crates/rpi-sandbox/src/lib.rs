@@ -51,12 +51,15 @@ pub enum SandboxAvailability {
     None,
 }
 
-/// 平台探测(13 文档 §7.1):macOS 看固定绝对路径(防 PATH 注入,对齐 Codex
-/// seatbelt.rs);Linux 先 bwrap 后 Landlock(lsm 列表探测,无 unsafe)。
+/// 平台探测(13 文档 §7.1):macOS 对 sandbox-exec 做**真实执行探测**(该
+/// 二进制在部分 macOS 版本上存在但运行即 EPERM,存在性检查会假阳性);
+/// Linux 先 bwrap 后 Landlock(lsm 列表探测,无 unsafe)。
 pub fn detect_availability() -> SandboxAvailability {
     #[cfg(target_os = "macos")]
     {
-        if Path::new(seatbelt::SEATBELT_EXEC).exists() {
+        if Path::new(seatbelt::SEATBELT_EXEC).exists()
+            && seatbelt_probe_executes()
+        {
             return SandboxAvailability::MacosSeatbelt;
         }
     }
@@ -71,6 +74,17 @@ pub fn detect_availability() -> SandboxAvailability {
     }
     let _ = std::env::var_os("PATH");
     SandboxAvailability::None
+}
+
+/// seatbelt 真实执行探测:最小 profile 跑 /bin/true。
+/// 只在装配期调用一次,失败 = 本机 sandbox-exec 不可用(如被系统策略禁用)。
+#[cfg(target_os = "macos")]
+fn seatbelt_probe_executes() -> bool {
+    std::process::Command::new(seatbelt::SEATBELT_EXEC)
+        .args(["-p", "(version 1)(deny default)(allow process-exec* (subpath \"/bin\"))"])
+        .arg("/bin/true")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// 沙箱执行器 trait(10 文档 §2 规则 1/2:工厂出厂,上游只见 trait)。
@@ -106,7 +120,7 @@ pub fn create_sandbox(
                 exe.to_path_buf(),
             ))))
         }
-        SandboxAvailability::None => Err("平台无可用沙箱".to_string()),
+        SandboxAvailability::None => Err("No sandbox available on this platform".to_string()),
     }
 }
 

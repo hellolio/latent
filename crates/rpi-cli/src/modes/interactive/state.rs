@@ -158,8 +158,11 @@ pub struct InteractiveState {
     pub git_branch: Option<String>,
     /// 已加载资源分节(启动区;ctrl+o 重渲染数据源)
     pub resources: Vec<(String, Vec<String>)>,
-    /// 执行中的工具(ToolExecutionStart → 结果到达时标题随终态着色落盘)
-    pub current_tool: Option<(String, String)>,
+    /// 执行中的工具(ToolExecutionStart → 结果到达时标题随终态着色落盘)。
+    /// 按 tool_call_id 配对:并行批的 start 事件全部先于结果消息发出,
+    /// 结果消息还可能按完成序到达,单槽"最近一次 start"会配错对。
+    /// (tool_call_id, name, args)
+    pub pending_tools: Vec<(String, String, String)>,
     /// 最近一次工具执行的错误标记
     pub last_tool_error: bool,
 }
@@ -194,7 +197,7 @@ impl InteractiveState {
             auto_compact: true, // 自动压缩已在 session 层接线(阈值触发)
             cwd_display: String::new(),
             git_branch: None,
-            current_tool: None,
+            pending_tools: Vec::new(),
             last_tool_error: false,
             resources: Vec::new(),
         }
@@ -255,7 +258,7 @@ impl InteractiveState {
         self.pending.clear();
         self.stream_text.clear();
         self.pending_thinking = None;
-        self.current_tool = None;
+        self.pending_tools.clear();
         self.last_tool_error = false;
         self.usage = UsageTracker::default();
         self.context_tokens = 0;

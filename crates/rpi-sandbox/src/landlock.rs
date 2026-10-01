@@ -72,7 +72,7 @@ impl Sandbox for LandlockSandbox {
 /// 非 Linux 平台:helper 不存在(探测已保证不会被路由到此处)。
 #[cfg(not(target_os = "linux"))]
 pub fn run_helper(_args: &[String]) -> Result<(), String> {
-    Err("landlock 沙箱仅支持 Linux".to_string())
+    Err("landlock sandbox supports Linux only".to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -86,7 +86,7 @@ pub fn run_helper(args: &[String]) -> Result<(), String> {
             "--rw-root" => {
                 let root = iter
                     .next()
-                    .ok_or_else(|| "--rw-root 缺少路径参数".to_string())?;
+                    .ok_or_else(|| "--rw-root is missing its path argument".to_string())?;
                 roots.push(PathBuf::from(root));
             }
             "--allow-net" => allow_net = true,
@@ -94,11 +94,11 @@ pub fn run_helper(args: &[String]) -> Result<(), String> {
                 rest = iter.cloned().collect();
                 break;
             }
-            other => return Err(format!("landlock helper 未知参数: {other}")),
+            other => return Err(format!("landlock helper: unknown argument: {other}")),
         }
     }
     if rest.is_empty() {
-        return Err("landlock helper 缺少 `-- <command>` 段".to_string());
+        return Err("landlock helper: missing `-- <command>` section".to_string());
     }
 
     restrict_filesystem(&roots)?;
@@ -108,7 +108,7 @@ pub fn run_helper(args: &[String]) -> Result<(), String> {
 
     use std::os::unix::process::CommandExt as _;
     let error = std::process::Command::new(&rest[0]).args(&rest[1..]).exec();
-    Err(format!("landlock helper exec 失败: {error}"))
+    Err(format!("landlock helper exec failed: {error}"))
 }
 
 /// Landlock 文件系统限制:读全盘、写仅可写根(非 Linux 平台不支持)。
@@ -118,28 +118,28 @@ fn restrict_filesystem(roots: &[PathBuf]) -> Result<(), String> {
         AccessFs, ABI, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
     };
     // 兼容模式:内核 ABI 低于所选版本时降级到可用访问集
-    let abi = ABI::new_enforceable().map_err(|e| format!("landlock ABI 探测失败: {e}"))?;
+    let abi = ABI::new_enforceable().map_err(|e| format!("landlock ABI probe failed: {e}"))?;
     let read_access = AccessFs::from_read(abi)
-        .map_err(|e| format!("landlock 读访问集构造失败: {e}"))?;
-    let all_access = AccessFs::from_all(abi).map_err(|e| format!("landlock 全访问集构造失败: {e}"))?;
+        .map_err(|e| format!("failed to build landlock read access set: {e}"))?;
+    let all_access = AccessFs::from_all(abi).map_err(|e| format!("failed to build landlock full access set: {e}"))?;
     let ruleset = Ruleset::default()
         .set_compatibility(true)
         .handle_access(all_access)
         .and_then(|ruleset| ruleset.create())
-        .map_err(|e| format!("landlock ruleset 创建失败: {e}"))?;
+        .map_err(|e| format!("failed to create landlock ruleset: {e}"))?;
     // 全盘可读(基线),可写根放开全部访问
     let ruleset = ruleset
         .add_rule(PathBeneath::new(read_access, PathBuf::from("/")))
-        .map_err(|e| format!("landlock 读规则失败: {e}"))?;
+        .map_err(|e| format!("failed to add landlock read rule: {e}"))?;
     for root in roots {
-        let fd = PathFd::new(root).map_err(|e| format!("landlock 打开可写根失败: {e}"))?;
+        let fd = PathFd::new(root).map_err(|e| format!("failed to open landlock writable root: {e}"))?;
         ruleset
             .add_rule(PathBeneath::new(all_access, fd))
-            .map_err(|e| format!("landlock 写规则失败: {e}"))?;
+            .map_err(|e| format!("failed to add landlock write rule: {e}"))?;
     }
     ruleset
         .restrict_self()
-        .map_err(|e| format!("landlock 限制失败: {e}"))
+        .map_err(|e| format!("failed to apply landlock restriction: {e}"))
 }
 
 /// seccomp 网络限制:socket(2) 的非 AF_UNIX 调用一律 Errno(13 文档 §7.4)。
@@ -152,7 +152,7 @@ fn restrict_network() -> Result<(), String> {
     } else if cfg!(target_arch = "aarch64") {
         seccompiler::TargetArch::aarch64
     } else {
-        return Err("landlock helper: 不支持的 CPU 架构(网络限制未生效)".to_string());
+        return Err("landlock helper: unsupported CPU architecture (network restriction inactive)".to_string());
     };
     // AF_UNIX = 1;socket(domain != 1) → EPERM
     let socket_not_unix = SeccompRule::new(vec![])
@@ -161,7 +161,7 @@ fn restrict_network() -> Result<(), String> {
             seccompiler::SeccompValueMask::Eq(1),
             false,
         ))
-        .map_err(|e| format!("seccomp 条件构造失败: {e}"))?;
+        .map_err(|e| format!("failed to build seccomp condition: {e}"))?;
     let filter = SeccompFilter::new(
         [(libc_consts::SYS_SOCKET, vec![socket_not_unix])]
             .into_iter()
@@ -170,10 +170,10 @@ fn restrict_network() -> Result<(), String> {
         SeccompAction::Allow,
         arch,
     )
-    .map_err(|e| format!("seccomp filter 构造失败: {e}"))?;
+    .map_err(|e| format!("failed to build seccomp filter: {e}"))?;
     let program: seccompiler::BpfProgram =
-        filter.try_into().map_err(|e| format!("seccomp 编译失败: {e}"))?;
-    seccompiler::apply_filter(&program).map_err(|e| format!("seccomp 应用失败: {e}"))
+        filter.try_into().map_err(|e| format!("failed to compile seccomp filter: {e}"))?;
+    seccompiler::apply_filter(&program).map_err(|e| format!("failed to apply seccomp filter: {e}"))
 }
 
 /// socket(2) 系统调用号(避免引入 libc 依赖;目标架构在 restrict_network 里已限定)。

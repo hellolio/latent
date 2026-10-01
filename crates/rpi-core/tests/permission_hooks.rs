@@ -197,7 +197,7 @@ async fn deny_reason_enters_tool_result() {
     let results = tool_results_of(&session).await;
     let (text, is_error) = &results[0];
     assert!(*is_error, "拒绝原因应为错误 tool result");
-    assert!(text.contains("用户拒绝"), "{text}");
+    assert!(text.contains("User denied"), "{text}");
 }
 
 #[tokio::test]

@@ -997,28 +997,28 @@ async fn handle_session_event(
     event: AgentSessionEvent,
 ) {
     match event {
-        AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageDelta { delta }) => match delta {
-            rpi_agent::MessageDeltaPayload::Text { delta } => {
-                // thinking → text 的交接点:thinking 块先于正文提交进转录
-                commit_pending_thinking(state);
-                state.stream_text.push_str(&delta);
-                state.status = Status::Thinking;
-            }
-            rpi_agent::MessageDeltaPayload::Thinking { delta } => {
-                state.status = Status::Thinking;
-                state
-                    .pending_thinking
-                    .get_or_insert_with(String::new)
-                    .push_str(&delta);
-            }
-            rpi_agent::MessageDeltaPayload::ToolCallArgs { .. } => {
-                state.status = state
-                    .current_tool
-                    .as_ref()
-                    .map(|(name, _)| Status::Tool(name.clone()))
-                    .unwrap_or(Status::Thinking);
-            }
-        },
+            AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageDelta { delta }) => match delta {
+                rpi_agent::MessageDeltaPayload::Text { delta } => {
+                    // thinking → text 的交接点:thinking 块先于正文提交进转录
+                    commit_pending_thinking(state);
+                    state.stream_text.push_str(&delta);
+                    state.status = Status::Thinking;
+                }
+                rpi_agent::MessageDeltaPayload::Thinking { delta } => {
+                    state.status = Status::Thinking;
+                    state
+                        .pending_thinking
+                        .get_or_insert_with(String::new)
+                        .push_str(&delta);
+                }
+                rpi_agent::MessageDeltaPayload::ToolCallArgs { .. } => {
+                    state.status = state
+                        .pending_tools
+                        .last()
+                        .map(|(_, name, _)| Status::Tool(name.clone()))
+                        .unwrap_or(Status::Thinking);
+                }
+            },
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageStart { message, .. }) => {
             // 新 assistant 消息:重置流式缓冲与 thinking 累积
             if matches!(message.as_ref(), rpi_agent::AgentMessage::Assistant(_)) {
@@ -1049,15 +1049,23 @@ async fn handle_session_event(
                 // 工具结果:标题(按终态着色)+ 输出块(紧贴上文,框本身
                 // 已提供视觉分隔;TurnEnd 用量块同样紧随其后)
                 rpi_agent::AgentMessage::ToolResult {
+                    tool_call_id,
                     tool_name,
                     is_error,
                     ..
                 } => {
                     flush_stream(state, false);
                     let output = message.tool_result_content().unwrap_or_default();
+                    // 按 tool_call_id 精确配对(并行批的结果消息按源序/完成序
+                    // 到达,不能按"最近一次 start"配对)
                     let (name, args) = state
-                        .current_tool
-                        .take()
+                        .pending_tools
+                        .iter()
+                        .position(|(id, _, _)| id == tool_call_id)
+                        .map(|index| {
+                            let (_, name, args) = state.pending_tools.remove(index);
+                            (name, args)
+                        })
                         .unwrap_or_else(|| (tool_name.clone(), String::new()));
                     let status = if *is_error {
                         ToolStatus::Error
@@ -1074,13 +1082,16 @@ async fn handle_session_event(
             }
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::ToolExecutionStart {
+            tool_call_id,
             tool_name,
             args,
             ..
         }) => {
             flush_stream(state, false);
             let args = serde_json::to_string(&args).unwrap_or_default();
-            state.current_tool = Some((tool_name.clone(), args));
+            state
+                .pending_tools
+                .push((tool_call_id.clone(), tool_name.clone(), args));
             state.status = Status::Tool(tool_name);
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::ToolExecutionEnd { is_error, .. }) => {
@@ -1126,7 +1137,8 @@ async fn handle_session_event(
         }
         AgentSessionEvent::AgentSettled => {
             // 兜底:工具结果未到达时,标题仍要落盘(状态用终态色)
-            if let Some((name, args)) = state.current_tool.take() {
+            let leftover = std::mem::take(&mut state.pending_tools);
+            for (_, name, args) in leftover {
                 let status = if state.last_tool_error {
                     ToolStatus::Error
                 } else {

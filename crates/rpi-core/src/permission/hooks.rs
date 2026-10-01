@@ -213,12 +213,12 @@ impl LoopHooks for ApprovalHooks {
                     }
                     ApprovalDecision::Deny => Some(ToolBlock {
                         block: true,
-                        reason: format!("用户拒绝了该操作:{}", request.detail),
+                        reason: format!("User denied the operation: {}", request.detail),
                         ..Default::default()
                     }),
                     ApprovalDecision::Abort => Some(ToolBlock {
                         block: true,
-                        reason: "用户中止".into(),
+                        reason: "Aborted by user".into(),
                         terminate: Some(true),
                         ..Default::default()
                     }),
@@ -335,7 +335,7 @@ mod tests {
             .await
             .expect("期望 block");
         assert!(block.block);
-        assert!(block.reason.contains("用户拒绝"));
+        assert!(block.reason.contains("User denied"));
     }
 
     #[tokio::test]
@@ -346,6 +346,6 @@ mod tests {
             .await
             .expect("期望 block");
         assert_eq!(block.terminate, Some(true));
-        assert!(block.reason.contains("中止"));
+        assert!(block.reason.contains("Aborted"));
     }
 }

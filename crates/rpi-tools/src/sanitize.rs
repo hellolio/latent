@@ -1,8 +1,9 @@
-//! 工具输出净化(pi 的 utils/ansi.ts + utils/shell.ts):剥离 ANSI 转义序列、
-//! 过滤控制字符。目的不是截断长度,而是去掉对模型纯属噪声的不可见内容。
+//! shell 输出净化(pi 的 utils/ansi.ts + utils/shell.ts):剥离 ANSI 转义序列、
+//! 过滤控制字符。
 //!
-//! 默认对所有产出外部内容的工具开启;模型可用 `sanitize: false` 参数关闭
-//! (见各工具 schema)。
+//! **只用于 `!` 裸命令路径**(rpi-cli 的 run_command,对应 pi 的
+//! bash-executor.ts:82)——模型调用的内置工具结果字节级保真、不做净化
+//! (对齐 pi:截断管体积,不管内容)。
 
 use std::iter::Peekable;
 use std::str::Chars;
@@ -96,14 +97,6 @@ pub fn sanitize_output(text: &str) -> String {
     sanitize_control_chars(&strip_ansi(text))
 }
 
-/// 解析工具参数里的 `sanitize` 开关(缺省 true;非 bool 值忽略按 true,
-/// 严格类型由 schema 校验负责)。
-pub fn parse_sanitize_arg(args: &serde_json::Value) -> bool {
-    args.get("sanitize")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,14 +140,5 @@ mod tests {
     #[test]
     fn sanitize_output_combines_both() {
         assert_eq!(sanitize_output("\x1b[31merr\x1b[0m\u{7}"), "err");
-    }
-
-    #[test]
-    fn parse_sanitize_arg_defaults_true() {
-        assert!(parse_sanitize_arg(&serde_json::json!({})));
-        assert!(parse_sanitize_arg(&serde_json::json!({"sanitize": true})));
-        assert!(!parse_sanitize_arg(&serde_json::json!({"sanitize": false})));
-        // 非 bool 值按缺省处理
-        assert!(parse_sanitize_arg(&serde_json::json!({"sanitize": "no"})));
     }
 }

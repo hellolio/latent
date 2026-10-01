@@ -5,6 +5,7 @@
 
 pub mod engine;
 pub mod hooks;
+pub mod interp;
 pub mod shell;
 pub mod types;
 

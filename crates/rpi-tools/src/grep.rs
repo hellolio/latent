@@ -36,7 +36,6 @@ struct GrepArgs {
     literal: bool,
     context: usize,
     limit: usize,
-    sanitize: bool,
 }
 
 fn parse_args(args: &serde_json::Value) -> Result<GrepArgs, String> {
@@ -86,7 +85,6 @@ fn parse_args(args: &serde_json::Value) -> Result<GrepArgs, String> {
         literal,
         context,
         limit,
-        sanitize: crate::sanitize::parse_sanitize_arg(args),
     })
 }
 
@@ -156,8 +154,7 @@ impl Tool for GrepTool {
                 "ignoreCase": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
                 "literal": {"type": "boolean", "description": "Treat pattern as literal string instead of regex (default: false)"},
                 "context": {"type": "integer", "description": "Number of lines to show before and after each match (default: 0)"},
-                "limit": {"type": "integer", "description": "Maximum number of matches to return (default: 100)"},
-                "sanitize": {"type": "boolean", "description": "Set false to keep raw output including ANSI escape codes and control characters. Defaults to true."}
+                "limit": {"type": "integer", "description": "Maximum number of matches to return (default: 100)"}
             }
         })
     }
@@ -246,11 +243,6 @@ impl Tool for GrepTool {
                     let (text, was_truncated) =
                         truncate_line(line.trim_end_matches('\r'), GREP_MAX_LINE_LENGTH);
                     lines_truncated |= was_truncated;
-                    let text = if args.sanitize {
-                        crate::sanitize::sanitize_output(&text)
-                    } else {
-                        text
-                    };
                     output_lines.push(format!("{display}:{line_number}: {text}"));
                 } else {
                     let start = line_number.saturating_sub(args.context).max(1);
@@ -259,11 +251,6 @@ impl Tool for GrepTool {
                         let text = lines[current - 1].replace('\r', "");
                         let (text, was_truncated) = truncate_line(&text, GREP_MAX_LINE_LENGTH);
                         lines_truncated |= was_truncated;
-                        let text = if args.sanitize {
-                            crate::sanitize::sanitize_output(&text)
-                        } else {
-                            text
-                        };
                         if current == line_number {
                             output_lines.push(format!("{display}:{current}: {text}"));
                         } else {
@@ -464,9 +451,9 @@ mod tests {
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
-    // ---- sanitize:默认剥离匹配行中的 ANSI 码,sanitize:false 保留 ----
+    // ---- 字节级保真:匹配行不做 ANSI 净化(对齐 pi,净化只在 ! 路径) ----
     #[tokio::test]
-    async fn sanitizes_ansi_in_matched_lines_by_default() {
+    async fn preserves_ansi_in_matched_lines() {
         let dir = fixture().await;
         tokio::fs::write(dir.join("c.txt"), "\u{1b}[32malpha\u{1b}[0m here\n")
             .await
@@ -476,21 +463,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !output.output.contains('\u{1b}'),
-            "默认应剥离 ANSI 码: {:?}",
-            output.output
-        );
-        assert!(output.output.contains("alpha here"));
-
-        let output = exec(
-            &tool,
-            json!({"pattern": "alpha", "path": "c.txt", "sanitize": false}),
-        )
-        .await
-        .unwrap();
-        assert!(
             output.output.contains('\u{1b}'),
-            "sanitize:false 应保留 ANSI 码: {:?}",
+            "grep 结果应保留 ANSI 码原文: {:?}",
             output.output
         );
         tokio::fs::remove_dir_all(&dir).await.unwrap();

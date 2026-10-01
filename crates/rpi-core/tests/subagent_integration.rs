@@ -485,7 +485,7 @@ async fn list_and_stop_manage_background_runs() {
         CancellationToken::new(),
         &NullUpdater,
     ).await.unwrap();
-    assert!(stopped.output.contains("已停止"), "{}", stopped.output);
+    assert!(stopped.output.contains("already stopped"), "{}", stopped.output);
     assert!(fx.task.registry().list().contains("stopped"));
 }
 

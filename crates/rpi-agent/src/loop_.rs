@@ -1508,7 +1508,7 @@ async fn prepare_call(
     let hook_decision = tokio::select! {
         _ = cancel.cancelled() => Some(ToolBlock {
             block: true,
-            reason: "已中止".into(),
+            reason: "Aborted".into(),
             ..Default::default()
         }),
         decision = hooks.before_tool_call(ToolCallCtx {

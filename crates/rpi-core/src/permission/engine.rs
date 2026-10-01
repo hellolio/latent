@@ -124,7 +124,8 @@ impl PermissionEngine {
             ToolRiskClass::ReadOnly => Verdict::Allow,
             ToolRiskClass::FileWrite => match mode {
                 SessionMode::Plan => Verdict::Deny(
-                    "Plan 模式为只读;先完成计划,退出 Plan 模式后再修改文件".into(),
+                    "Plan mode is read-only. Finish the plan and exit Plan mode before modifying files"
+                        .into(),
                 ),
                 SessionMode::Confirm => {
                     let path = ctx.args.get("path").and_then(|path| path.as_str());
@@ -164,7 +165,7 @@ impl PermissionEngine {
                             Verdict::Allow
                         } else {
                             Verdict::Deny(format!(
-                                "Plan 模式只允许只读命令:{}",
+                                "Plan mode allows read-only commands only: {}",
                                 shell_detail(command)
                             ))
                         }
@@ -193,7 +194,7 @@ impl PermissionEngine {
                             })
                         {
                             return Verdict::Deny(format!(
-                                "命令命中 deny 规则:{}",
+                                "Command matched a deny rule: {}",
                                 shell_detail(command)
                             ));
                         }
@@ -208,7 +209,9 @@ impl PermissionEngine {
                 }
             }
             ToolRiskClass::External => match mode {
-                SessionMode::Plan => Verdict::Deny("Plan 模式不允许扩展工具".into()),
+                SessionMode::Plan => {
+                    Verdict::Deny("Extension tools are not allowed in Plan mode".into())
+                }
                 SessionMode::Confirm => {
                     Verdict::Ask(self.request(ctx, risk, ApprovalReason::ExternalTool))
                 }
@@ -262,7 +265,7 @@ impl PermissionEngine {
                 .args
                 .get("path")
                 .and_then(|path| path.as_str())
-                .unwrap_or("(路径缺失)")
+                .unwrap_or("(missing path)")
                 .to_string(),
             _ => serde_json::to_string(&ctx.args).unwrap_or_default(),
         };
@@ -342,7 +345,7 @@ mod tests {
         }
         assert_eq!(
             engine.evaluate(&ctx("bash", serde_json::json!({"command": "rm -rf build"})), ToolRiskClass::Shell),
-            Verdict::Deny("Plan 模式只允许只读命令:rm -rf build".into())
+            Verdict::Deny("Plan mode allows read-only commands only: rm -rf build".into())
         );
         // 只读命令放行(沙箱兜底)
         assert_eq!(

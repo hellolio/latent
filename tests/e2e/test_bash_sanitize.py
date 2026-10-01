@@ -1,8 +1,11 @@
-"""sanitize 参数:bash 输出默认剥离 ANSI 码进转录,sanitize:false 保留原文。
+"""净化路径对齐 pi:模型工具结果字节级保真(不剥 ANSI),`!` 裸命令输出净化。
 
-断言面向 mock LLM 服务端收到的**真实请求体**(12 文档 L3 反向断言):
-转录里的 toolResult 文本第一轮无 ESC 码、第二轮带 ESC 码,即证明
-净化发生在"进对话历史"这一层,而非仅是显示。
+- bash 工具结果:请求体 toolResult 里保留 ANSI 原文(字节级保真,pi 的
+  core/tools/bash.ts 行为);
+- `!` 裸命令:输出经执行器净化(stripAnsi → 控制字符 → 去 \\r)后注入转录,
+  请求体 <bash_execution> 内无 ESC 码(pi 的 bash-executor.ts:82 行为)。
+
+断言面向 mock LLM 服务端收到的真实请求体(12 文档 L3 反向断言)。
 """
 
 from harness import RpiApp, load_scenario
@@ -26,26 +29,31 @@ def _tool_result_texts(body) -> list[str]:
     return texts
 
 
-def test_bash_output_sanitized_by_default_and_raw_with_sanitize_false():
+def test_tool_result_raw_and_bang_output_sanitized():
     app = RpiApp(turns=load_scenario("bash_sanitize"), timeout=20.0)
     try:
         app.wait_ready()
-        app.sendline("跑两条命令")
-        app.expect_text("RED-ok")
-        app.expect_text("sanitize e2e 完成")
+        # 第 1 轮:模型调用 bash,输出带 ANSI 码(屏幕上 pyte 会把 ESC 当
+        # 颜色控制消费,可见文本形如 "[31mRED[0m-ok" —— 保真的直接体现)
+        app.sendline("跑一条命令")
+        app.expect_text("第一轮完成")
+
+        # 工具结果字节级保真:请求体 toolResult 保留 ANSI 原文
+        bodies = app.wait_for_requests(2)
+        tool_texts = "\n".join(_tool_result_texts(bodies[1]))
+        assert "\x1b[31m" in tool_texts, f"工具结果应保留 ANSI 原文: {tool_texts!r}"
+        assert "-ok" in tool_texts, f"输出文本应进转录: {tool_texts!r}"
+
+        # 第 2 轮:`!` 裸命令(输出含 ANSI 码),随后一个 prompt 触发第 3 个请求
+        app.sendline("!printf '\\033[31mBANG\\033[0m-marker'")
+        app.expect_text("BANG-marker")
+        app.sendline("看看输出")
+        app.expect_text("第二轮完成")
 
         bodies = app.wait_for_requests(3)
-        # 第 2 个请求体:只有第 1 轮的 toolResult(默认剥离 ANSI)
-        sanitized = "\n".join(_tool_result_texts(bodies[1]))
-        assert "RED-ok" in sanitized, f"输出文本应进转录: {sanitized!r}"
-        assert "\x1b" not in sanitized, f"默认应剥离 ANSI 码: {sanitized!r}"
-
-        # 第 3 个请求体携带全量转录(两条 toolResult):
-        # 第 1 条保持净化原文;第 2 条(sanitize:false)保留 ANSI 码
-        texts = _tool_result_texts(bodies[2])
-        first = next(t for t in texts if "RED-ok" in t)
-        second = next(t for t in texts if "GREEN" in t)
-        assert "\x1b" not in first, f"第 1 轮应保持净化: {first!r}"
-        assert "\x1b[32m" in second, f"sanitize:false 应保留 ANSI 码: {second!r}"
+        body = str(bodies[2])
+        assert "<bash_execution" in body, "BashExecution 消息应进入转录"
+        assert "BANG-marker" in body, f"! 输出应注入上下文: {body[:500]}"
+        assert "\x1b" not in body, f"! 路径的上下文不应含 ESC 码: {body[:500]}"
     finally:
         app.close()

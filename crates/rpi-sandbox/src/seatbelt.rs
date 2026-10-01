@@ -16,11 +16,23 @@ fn build_profile(writable_roots: &[String], network_access: bool) -> String {
         "(version 1)\n\
          (deny default)\n\
          ; 全盘可读\n\
-         (allow file-read*)\n",
+         (allow file-read*)\n\
+         ; 基础设施写:/dev/null(工具重定向)与用户临时目录(xcrun 等\n\
+         ; CLT shim 的 xcrun_db 缓存、sort 大文件临时落盘);不放开则\n\
+         ; Apple CLT shim 包装的工具一律 exec 失败或报错\n",
     );
-    // 写权限:仅可写根
+    profile.push_str("(allow file-write* (literal \"/dev/null\"))\n");
     if writable_roots.is_empty() {
-        profile.push_str("; 无可写根(只读策略)\n");
+        // 只读策略:仅用户 TMPDIR(每用户私有,WorkspaceWrite 已含在可写根里)。
+        // /var 是 /private/var 的符号链接,Seatbelt 按规范路径匹配,须先 canonicalize
+        if let Some(tmp) = std::env::var_os("TMPDIR") {
+            let tmp = std::path::PathBuf::from(tmp);
+            let canonical = tmp.canonicalize().unwrap_or(tmp);
+            profile.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                sbpl_escape(&canonical.display().to_string())
+            ));
+        }
     } else {
         profile.push_str("(allow file-write*");
         for root in writable_roots {
@@ -28,10 +40,14 @@ fn build_profile(writable_roots: &[String], network_access: bool) -> String {
         }
         profile.push_str(")\n");
     }
-    // 进程与基础系统操作(平台必需集)
+    // 进程与基础系统操作(平台必需集)。
+    // /Applications/Xcode.app 与 /Library/Developer:/usr/bin/{git,strings,...}
+    // 是 CLT shim,内部转执行 Xcode/CLT 里的真实二进制,不放行 = EPERM;
+    // /usr/local:用户级安装区(Intel homebrew 等)。
     profile.push_str(
         "(allow process-exec* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\") \
-         (subpath \"/opt/homebrew\"))\n\
+         (subpath \"/opt/homebrew\") (subpath \"/usr/local\") \
+         (subpath \"/Applications/Xcode.app\") (subpath \"/Library/Developer\"))\n\
          (allow process-fork)\n\
          (allow sysctl-read)\n\
          (allow mach-lookup)\n\
@@ -112,7 +128,11 @@ mod tests {
         assert!(wrapped.contains("(deny default)"));
         assert!(wrapped.contains("(allow file-read*)"));
         assert!(wrapped.contains("(deny network*)"));
-        assert!(!wrapped.contains("file-write* (subpath"));
+        // /dev/null 与用户 TMPDIR 可写(CLT shim/工具临时文件必需)
+        assert!(wrapped.contains("(literal \"/dev/null\")"), "{wrapped}");
+        assert!(wrapped.contains("(allow file-write* (subpath \"/"));
+        // 除 TMPDIR 外无可写根(工作区/系统目录不可写)
+        assert!(!wrapped.contains("file-write* (subpath \"/Users"));
     }
 
     #[test]

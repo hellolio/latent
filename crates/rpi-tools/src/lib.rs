@@ -22,6 +22,7 @@ pub use bash::{
     create_bash_tool_with_session_env, create_powershell_tool_with, SessionEnvFn, ShellSpawnHook,
     ShellSpawnOptions,
 };
+pub use sanitize::{sanitize_control_chars, sanitize_output, strip_ansi};
 pub use truncate::{
     truncate_head, truncate_line, truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES,
     GREP_MAX_LINE_LENGTH,

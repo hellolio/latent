@@ -186,7 +186,7 @@ impl SubagentRegistry {
         };
         let Some(entry) = entry else {
             if ambiguity > 1 {
-                return Err(format!("run id `{id}` 匹配到 {ambiguity} 条运行,请给出更长的前缀"));
+                return Err(format!("run id `{id}` matched {ambiguity} runs; provide a longer prefix"));
             }
             let ids: Vec<String> = self
                 .runs
@@ -195,10 +195,10 @@ impl SubagentRegistry {
                 .iter()
                 .map(|entry| entry.id.clone())
                 .collect();
-            return Err(format!("未找到 run id `{id}`;现有运行:{ids:?}"));
+            return Err(format!("run id `{id}` not found; existing runs: {ids:?}"));
         };
         if entry.status.is_some() {
-            return Ok(format!("run {} 已结束({})", entry.id, entry.status_str()));
+            return Ok(format!("run {} already finished ({})", entry.id, entry.status_str()));
         }
         entry.stop.cancel();
         let deadline = Instant::now() + STOP_SETTLE_TIMEOUT;
@@ -211,12 +211,12 @@ impl SubagentRegistry {
                     .and_then(|e| e.status)
                     .is_some()
                 {
-                    return Ok(format!("run {} 已停止", entry.id));
+                    return Ok(format!("run {} already stopped", entry.id));
                 }
             }
             if Instant::now() >= deadline {
                 return Ok(format!(
-                    "run {} 停止信号已发出,仍在结算中(稍后用 action:\"list\" 查看)",
+                    "run {} stop signal sent, still settling (check with action:\"list\" later)",
                     entry.id
                 ));
             }
@@ -369,11 +369,11 @@ mod tests {
             }
         });
         let result = registry.stop(&prefix).await.unwrap();
-        assert!(result.contains("已停止"), "{result}");
+        assert!(result.contains("already stopped"), "{result}");
         handle.await.unwrap();
         // 不存在的 id
         let error = registry.stop("zzzzzzzz").await.unwrap_err();
-        assert!(error.contains("未找到"));
+        assert!(error.contains("not found"));
     }
 
     #[tokio::test]

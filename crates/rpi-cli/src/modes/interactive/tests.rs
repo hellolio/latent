@@ -502,7 +502,63 @@ async fn tool_result_renders_title_and_collapsed_output() {
         rendered.contains("+1 lines"),
         "5 行输出折叠为 4 行 + 提示: {rendered}"
     );
-    assert!(state.current_tool.is_none());
+    assert!(state.pending_tools.is_empty());
+}
+
+#[tokio::test]
+async fn parallel_results_pair_with_own_args() {
+    // 并行批(03 文档 I4):start 事件全部先于结果消息发出,结果消息还可能
+    // 按完成序到达 —— 每个结果必须按 tool_call_id 配对自己的标题(回归:
+    // 单槽"最近一次 start"配对会把最后一个调用的 args 安到第一个结果上)
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+
+    for (id, command) in [
+        ("call-1", "ps aux | head -20"),
+        ("call-2", "uname -a && whoami"),
+    ] {
+        handle_ui_event(
+            &ctx,
+            &mut state,
+            session_event(rpi_agent::AgentEvent::ToolExecutionStart {
+                tool_call_id: id.into(),
+                tool_name: "bash".into(),
+                args: serde_json::json!({"command": command}),
+            }),
+        )
+        .await;
+    }
+    // 结果按完成序到达:后发起的 call-2 先落定
+    for (id, reason) in [
+        ("call-2", "Plan 模式只允许只读命令:uname -a && whoami"),
+        ("call-1", "Plan 模式只允许只读命令:ps aux | head -20"),
+    ] {
+        handle_ui_event(
+            &ctx,
+            &mut state,
+            session_event(rpi_agent::AgentEvent::MessageEnd {
+                message: Box::new(rpi_agent::AgentMessage::tool_result_text(
+                    id, "bash", reason, true,
+                )),
+            }),
+        )
+        .await;
+    }
+
+    let rendered = committed_text(&state);
+    // 两个标题都要带各自的 args(旧单槽逻辑下第二个结果标题为空)
+    assert!(
+        rendered.contains(r#"{"command":"ps aux | head -20"}"#),
+        "call-1 标题应带自己的 args: {rendered}"
+    );
+    assert!(
+        rendered.contains(r#"{"command":"uname -a && whoami"}"#),
+        "call-2 标题应带自己的 args: {rendered}"
+    );
+    assert!(state.pending_tools.is_empty());
 }
 
 #[tokio::test]

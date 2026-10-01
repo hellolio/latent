@@ -1,4 +1,4 @@
-"""计划模式与审批流(13 文档 §13 L3):新会话默认 Plan(只读 + <mode> 提示词节),
+"""计划模式与审批流(13 文档 §13 L3):新会话默认 Plan(只读 + 请求级模式指令消息),
 write 被拒绝且不弹审批;模型输出 <proposed_plan> 渲染为计划卡片;
 /mode confirm 后再次 write 触发审批 overlay,数字键批准后工具真实执行。"""
 
@@ -33,14 +33,19 @@ def test_plan_mode_blocks_writes_then_approval_flow():
         try:
             app.wait_ready()
 
-            # 新会话默认 Plan:请求体带 <mode> 只读提示词节
+            # 新会话默认 Plan:模式指令以请求级 Developer 消息投递(ce27e32 起
+            # 模式节迁出 system 提示词,保 KV 缓存前缀恒定;文本为 Plan 进入句)
             app.sendline("帮我写一个文件")
             bodies = app.wait_for_requests(1)
-            assert "<mode>" in str(bodies[0]), "Plan 模式请求应携带 <mode> 提示词节"
+            assert (
+                "You are entering Plan mode" in str(bodies[0])
+            ), "Plan 模式请求应携带模式指令消息"
+            # system 提示词与模式解耦:不再包含 <mode> 节
+            assert "<mode>" not in str(bodies[0]), "system 提示词不应再含 <mode> 节"
 
             # 变更类 bash 命令被权限引擎直接拒绝(Deny,不是审批),
             # 模型收到拒绝原因(write/edit 则在工具集层被收掉,不会进请求)
-            app.expect_text("Plan 模式只允许只读命令")
+            app.expect_text("Plan mode allows read-only commands only")
             target = os.path.join(workdir, "e2e-plan-mode.txt")
             assert not os.path.exists(target), "Plan 模式不应产生文件写入"
 

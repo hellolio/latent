@@ -147,7 +147,6 @@ fn create_shell_tool(
 struct ParsedArgs {
     command: String,
     timeout_secs: Option<u64>,
-    sanitize: bool,
 }
 
 fn parse_args(name: &str, args: &serde_json::Value) -> Result<ParsedArgs, ToolError> {
@@ -173,7 +172,6 @@ fn parse_args(name: &str, args: &serde_json::Value) -> Result<ParsedArgs, ToolEr
     Ok(ParsedArgs {
         command,
         timeout_secs,
-        sanitize: crate::sanitize::parse_sanitize_arg(args),
     })
 }
 
@@ -210,7 +208,6 @@ async fn run(
     tool: &ShellTool,
     command: &str,
     timeout_secs: Option<u64>,
-    sanitize: bool,
     cancel: &CancellationToken,
     accumulator: Arc<Mutex<OutputAccumulator>>,
     updater: &dyn ToolUpdater,
@@ -319,14 +316,9 @@ async fn run(
                         acc.finish();
                         acc.snapshot(true)
                     };
-                    let content = if sanitize {
-                        crate::sanitize::sanitize_output(&snapshot.content)
-                    } else {
-                        snapshot.content
-                    };
                     let mut message = format!(
                         "{}\nCommand timed out after {} seconds",
-                        content,
+                        snapshot.content,
                         timeout_secs.unwrap_or(0)
                     );
                     if let Some(path) = &snapshot.full_output_path {
@@ -359,15 +351,10 @@ fn kill_process_tree(child: &mut tokio::process::Child) {
 
 /// 输出 + details(pi 的 BashToolDetails {truncation?, fullOutputPath?});
 /// 截断时追加 `[Showing lines X-Y of N. Full output: <tmpfile>]` 提示。
-/// `sanitize`(参数 `sanitize`,缺省 true):剥离 ANSI 序列并过滤控制字符;
-/// 关闭时保留原文(流式 tail 与临时文件始终为原文)。
-fn settle_output(snapshot: OutputSnapshot, sanitize: bool) -> ToolOutput {
-    let content = if sanitize {
-        crate::sanitize::sanitize_output(&snapshot.content)
-    } else {
-        snapshot.content.clone()
-    };
-    let mut output = content;
+/// 工具结果字节级保真,不做 ANSI/控制字符净化(对齐 pi:净化只在 `!`
+/// 裸命令路径);截断管体积,不管内容。
+fn settle_output(snapshot: OutputSnapshot) -> ToolOutput {
+    let mut output = snapshot.content.clone();
     let mut details = serde_json::Map::new();
     if snapshot.truncation.truncated {
         let total = snapshot.truncation.total_lines;
@@ -415,8 +402,7 @@ impl Tool for ShellTool {
             "required": ["command"],
             "properties": {
                 "command": {"type": "string", "description": "The shell command to execute"},
-                "timeout": {"type": "integer", "description": "Optional timeout in seconds"},
-                "sanitize": {"type": "boolean", "description": "Set false to keep raw output including ANSI color codes and control characters. Defaults to true."}
+                "timeout": {"type": "integer", "description": "Optional timeout in seconds"}
             }
         })
     }
@@ -435,15 +421,18 @@ impl Tool for ShellTool {
         let ParsedArgs {
             command,
             timeout_secs,
-            sanitize,
         } = parse_args(self.config.name, &call.args)?;
 
         // T10:hook 先改写(检查的是用户命令),prefix 最后前置;
         // hook 返回 Err = 拒绝执行,直接产出错误结果、不 spawn(07 §8.5)
         let mut effective = command.clone();
+        let mut sandboxed = false;
         if let Some(hook) = &self.spawn.spawn_hook {
             match hook.rewrite(command.clone()).await {
-                Ok(rewritten) => effective = rewritten,
+                Ok(rewritten) => {
+                    sandboxed = is_sandbox_wrapper(&rewritten);
+                    effective = rewritten;
+                }
                 Err(reason) => {
                     return Err(ToolError::Failed {
                         name: self.config.name.into(),
@@ -467,7 +456,6 @@ impl Tool for ShellTool {
             self,
             &effective,
             timeout_secs,
-            sanitize,
             &cancel,
             accumulator.clone(),
             updater,
@@ -480,16 +468,32 @@ impl Tool for ShellTool {
             acc.finish();
             acc.snapshot(true)
         };
-        let output = settle_output(snapshot, sanitize);
+        let output = settle_output(snapshot);
 
         if code != 0 {
+            let mut message = format!("{}\nCommand exited with code {code}", output.output);
+            // 沙箱拦截的事后提示:EPERM(seatbelt/landlock/seccomp 统一表现)
+            // 常来自内核拒绝而非命令本身;概率性判断,只补信息不改判定
+            if sandboxed && output.output.contains("Operation not permitted") {
+                message.push_str(SANDBOX_DENIAL_NOTICE);
+            }
             return Err(ToolError::Failed {
                 name: self.config.name.into(),
-                message: format!("{}\nCommand exited with code {code}", output.output),
+                message,
             });
         }
         Ok(output)
     }
+}
+
+const SANDBOX_DENIAL_NOTICE: &str = "\n[rpi] sandbox notice: this command ran sandboxed \
+(plan mode:read-only, no network); the failure above is likely caused by the sandbox, not the command.";
+
+/// 改写后的命令是否被沙箱后端包装(seatbelt/bwrap/landlock helper)。
+fn is_sandbox_wrapper(rewritten: &str) -> bool {
+    rewritten.contains("sandbox-exec")
+        || rewritten.contains("bwrap")
+        || rewritten.contains("--rpi-landlock-helper")
 }
 
 /// T10:空前缀(全空白)= 无操作。
@@ -566,9 +570,9 @@ mod tests {
         assert_eq!(output.output.trim(), "hello");
     }
 
-    // ---- sanitize:默认剥离 ANSI/控制字符,sanitize:false 保留原文 ----
+    // ---- 字节级保真:工具结果不做 ANSI 净化(对齐 pi,净化只在 ! 路径) ----
     #[tokio::test]
-    async fn sanitizes_ansi_output_by_default() {
+    async fn preserves_ansi_output_raw() {
         let tool = bash_at(&std::env::temp_dir());
         let output = exec(
             &tool,
@@ -579,25 +583,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.output.trim(), "green plain");
-    }
-
-    #[tokio::test]
-    async fn sanitize_false_keeps_raw_output() {
-        let tool = bash_at(&std::env::temp_dir());
-        let output = exec(
-            &tool,
-            serde_json::json!({
-                "command": "printf '\\033[32mgreen\\033[0m plain\\n'",
-                "sanitize": false
-            }),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
         assert!(
             output.output.contains("\u{1b}[32m"),
-            "sanitize:false 应保留 ANSI 码: {:?}",
+            "工具结果应保留 ANSI 码原文: {:?}",
             output.output
         );
     }
@@ -893,6 +881,79 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("forbidden by policy"), "{err}");
         assert!(!side_effect.exists(), "hook 拒绝后不得产生子进程副作用");
+    }
+
+    struct StaticRewriteHook(&'static str);
+    #[async_trait]
+    impl ShellSpawnHook for StaticRewriteHook {
+        async fn rewrite(&self, _command: String) -> Result<String, String> {
+            Ok(self.0.into())
+        }
+    }
+
+    // ---- 沙箱拦截的事后提示 ----
+
+    #[tokio::test]
+    async fn sandbox_denial_appends_notice() {
+        // 改写后的命令含沙箱包装特征 + 输出含 EPERM 文案 → 追加提示
+        let tool = bash_with(
+            &std::env::temp_dir(),
+            ShellSpawnOptions {
+                spawn_hook: Some(Arc::new(StaticRewriteHook(
+                    "echo sandbox-exec; echo Operation not permitted; exit 7",
+                ))),
+                ..Default::default()
+            },
+        );
+        let err = exec(
+            &tool,
+            serde_json::json!({"command": "anything"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("sandbox notice"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn non_sandbox_eperm_and_clean_failure_get_no_notice() {
+        // 非沙箱命令输出 EPERM 文案 → 不追加提示
+        let plain = bash_with(
+            &std::env::temp_dir(),
+            ShellSpawnOptions {
+                spawn_hook: Some(Arc::new(StaticRewriteHook(
+                    "echo Operation not permitted; exit 7",
+                ))),
+                ..Default::default()
+            },
+        );
+        let err = exec(
+            &plain,
+            serde_json::json!({"command": "anything"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.to_string().contains("sandbox notice"), "{err}");
+
+        // 沙箱命令但失败与 EPERM 无关 → 不追加提示
+        let sandboxed = bash_with(
+            &std::env::temp_dir(),
+            ShellSpawnOptions {
+                spawn_hook: Some(Arc::new(StaticRewriteHook(
+                    "echo sandbox-exec; exit 3",
+                ))),
+                ..Default::default()
+            },
+        );
+        let err = exec(
+            &sandboxed,
+            serde_json::json!({"command": "anything"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.to_string().contains("sandbox notice"), "{err}");
     }
 
     // ---- T11:进程组杀灭(孙进程清理) ----
