@@ -604,7 +604,8 @@ fn map_policy(policy: &CoreSandboxPolicy) -> rpi_sandbox::SandboxPolicy {
 
 /// 沙箱包装钩子(13 文档 §7.6):按当前模式取 SandboxPolicy 包装 shell 命令。
 /// 只做纯包装,不拒绝 —— 拒绝是权限引擎的事;平台无沙箱时原样返回
-/// (Confirm 已升级为逐命令审批,Plan 已剔除 bash,降级矩阵 §7.5)。
+/// (Confirm 已升级为逐命令审批,Plan 由只读判定兜底 —— 判定通过即执行,
+/// 降级矩阵 §7.5)。
 struct SandboxSpawnHook {
     engine: Arc<PermissionEngine>,
     cwd: std::path::PathBuf,
@@ -760,7 +761,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     ));
     if default_session_mode != SessionMode::FullAccess && !sandbox_available {
         eprintln!(
-            "[rpi][sandbox] 未检测到可用沙箱({:?}),Confirm 模式将逐命令请求批准,Plan 模式 bash 被禁用",
+            "[rpi][sandbox] 未检测到可用沙箱({:?}),Confirm 模式将逐命令请求批准,Plan 模式 bash 仅放行只读判定通过的命令",
             availability
         );
     }

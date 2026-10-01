@@ -530,7 +530,8 @@ impl AgentSession {
         // 模式切换三件事:写模式提示词 cell、引擎切档、entry 落盘。
         // 系统提示词与激活工具集**不随模式变化**(tools 数组恒定保 KV 缓存
         // 前缀命中);Plan 的只读约束由权限引擎在运行时强制(bash 只读检查 /
-        // write Deny / 沙箱 ReadOnly 包装),拒绝原因进转录模型可自行换路径。
+        // write Deny / 沙箱 ReadOnly 包装;无沙箱平台没有 OS 层兜底,只读
+        // 判定就是最后保证 —— 通过即执行),拒绝原因进转录模型可自行换路径。
         self.runtime.lock().unwrap().mode = mode;
         if let Some(cell) = &self.mode_section_cell {
             *cell.lock().unwrap() = crate::permission::mode_section(mode);

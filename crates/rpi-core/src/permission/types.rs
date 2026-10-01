@@ -83,6 +83,8 @@ pub fn classify_tool(name: &str) -> ToolRiskClass {
         // SSRF 校验(私网封锁),故整体按只读类放行(取舍:确认于 web 设计)
         "web_search" | "get_search_content" | "fetch_content" | "source_check"
         | "web_access" => ToolRiskClass::ReadOnly,
+        // skills(rpi-core):按名读 SKILL.md 全文进上下文,纯读无写副作用
+        "load_skill" => ToolRiskClass::ReadOnly,
         "edit" | "write" => ToolRiskClass::FileWrite,
         "bash" | "powershell" => ToolRiskClass::Shell,
         _ => ToolRiskClass::External,
@@ -231,22 +233,17 @@ pub enum SandboxPolicy {
     DangerFullAccess,
 }
 
-/// 三模式的基线激活集(13 文档 §5)。`sandbox_available = false` 时 Plan
-/// 模式从激活集剔除 bash(降级矩阵 §7.5:无沙箱平台 bash 走判定挡不住写盘)。
-pub fn mode_baseline_tools(mode: SessionMode, sandbox_available: bool) -> Vec<String> {
+/// 三模式的基线激活集(13 文档 §5)。无沙箱平台 Plan 的 bash 仍在激活集:
+/// 没有 OS 层兜底时,只读判定就是最后保证 —— 判定通过即执行,不通过拒绝
+/// (降级矩阵 §7.5)。
+pub fn mode_baseline_tools(mode: SessionMode, _sandbox_available: bool) -> Vec<String> {
     match mode {
-        SessionMode::Plan if sandbox_available => vec![
-            "read".into(),
-            "grep".into(),
-            "find".into(),
-            "ls".into(),
-            "bash".into(),
-        ],
         SessionMode::Plan => vec![
             "read".into(),
             "grep".into(),
             "find".into(),
             "ls".into(),
+            "bash".into(),
         ],
         SessionMode::Confirm | SessionMode::FullAccess => vec![
             "read".into(),
@@ -308,19 +305,20 @@ mod tests {
         assert_eq!(classify_tool("bash"), ToolRiskClass::Shell);
         assert_eq!(classify_tool("powershell"), ToolRiskClass::Shell);
         assert_eq!(classify_tool("subagent"), ToolRiskClass::ReadOnly);
+        assert_eq!(classify_tool("load_skill"), ToolRiskClass::ReadOnly);
         assert_eq!(classify_tool("mcp__x__y"), ToolRiskClass::External);
         assert_eq!(classify_tool("unknown"), ToolRiskClass::External);
     }
 
     #[test]
-    fn baseline_tools_drop_bash_and_extensions_in_plan() {
+    fn baseline_tools_drop_write_tools_in_plan() {
         let plan = mode_baseline_tools(SessionMode::Plan, true);
         assert!(plan.contains(&"bash".to_string()));
         assert!(!plan.contains(&"edit".to_string()));
         assert!(!plan.contains(&"powershell".to_string()));
-        // 无沙箱平台:Plan 剔除 bash(降级矩阵)
+        // 无沙箱平台:bash 仍在基线,由只读判定兜底(降级矩阵 §7.5)
         let degraded = mode_baseline_tools(SessionMode::Plan, false);
-        assert!(!degraded.contains(&"bash".to_string()));
+        assert!(degraded.contains(&"bash".to_string()));
         let confirm = mode_baseline_tools(SessionMode::Confirm, true);
         assert!(confirm.contains(&"powershell".to_string()));
         assert!(confirm.contains(&"edit".to_string()));

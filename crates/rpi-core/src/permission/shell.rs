@@ -42,7 +42,8 @@ const READONLY_PREFIXES: &[&[&str]] = &[
     &["git", "shortlog"],
     &["git", "ls-files"],
     &["command", "-v"],
-    &["cargo", "check"],
+    // cargo check 会编译并执行依赖的 build.rs(第三方任意代码),不进只读表;
+    // tree/metadata 只解析依赖图,不执行构建脚本
     &["cargo", "tree"],
     &["cargo", "metadata"],
     &["rustc", "--version"],
@@ -275,12 +276,14 @@ fn tokenize(command: &str, allow: &[String], deny: &[String], depth: usize) -> O
                 }
             }
             '>' | '<' => {
-                // fd 数字前缀(2>/2<):独立数字紧跟重定向符是 IO number
+                // fd 数字前缀(2>/2<):独立数字紧跟重定向符是 IO number,
+                // 清词并复位 in_word,避免 flush 推入空词 token
                 if in_word
                     && !word.text.is_empty()
                     && word.text.chars().all(|c| c.is_ascii_digit())
                 {
                     word.text.clear();
+                    in_word = false;
                 }
                 flush!();
                 if c == '>' {
@@ -326,7 +329,10 @@ fn tokenize(command: &str, allow: &[String], deny: &[String], depth: usize) -> O
             }
         }
     }
-    flush!();
+    // 末段入列:不再走 flush!(循环结束后复位 word/in_word 是无效赋值)
+    if in_word {
+        tokens.push(Tok::Word(word));
+    }
     Some(tokens)
 }
 
@@ -345,10 +351,11 @@ fn take_substitution(
         return true;
     }
     chars.next();
-    // `$((...))` 算术展开:结果恒为数值,无副作用(第一个 `(` 已消费,
-    // 剩余深度从 1 起)
+    // `$((...))` 算术展开:结果恒为数值,无副作用(第一个 `(` 已消费)。
+    // 但 bash 允许算术体内嵌命令替换 `$(( $(cmd) ))` 与反引号,内层必须
+    // 拦截(第一个 `(` 已消费,剩余深度从 1 起)
     if chars.peek() == Some(&'(') {
-        return skip_balanced_parens(chars, 1);
+        return skip_arithmetic_body(chars, 1);
     }
     let Some(inner) = take_balanced_substitution_body(chars) else {
         return false;
@@ -440,8 +447,9 @@ fn take_balanced_substitution_body(chars: &mut std::iter::Peekable<std::str::Cha
     None
 }
 
-/// 消费到配对括号闭合(起始 depth 为已开销数)。
-fn skip_balanced_parens(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, opened: usize) -> bool {
+/// 算术展开体消费:括号配对扫描,但反引号与 `$`(命令替换)一票否决
+/// (bash 算术体内可嵌套命令执行;嵌套算术 `$(( $((1)) ))` 也被保守拒绝)。
+fn skip_arithmetic_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, opened: usize) -> bool {
     let mut depth = opened;
     while let Some(c) = chars.next() {
         match c {
@@ -452,6 +460,8 @@ fn skip_balanced_parens(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, op
                     return true;
                 }
             }
+            '`' => return false,
+            '$' if chars.peek() == Some(&'(') => return false,
             _ => {}
         }
     }
@@ -553,12 +563,55 @@ fn segment_is_readonly(
         .any(|rule| prefix_matches(&normalized, &normalize_command(rule)))
 }
 
-/// 表内命令自带的写文件 flag(`sort -o`)或写内核态(`sysctl -w`)使该段非只读。
+/// 表内命令自带的写文件 flag(`sort -o`)或写内核态(`sysctl -w`)使该段非只读;
+/// git 家族另有子命令级形态守卫(见 [`git_words_have_write_flag`])。
 fn has_write_flag(tokens: &[&str]) -> bool {
     match tokens {
         ["sort", args @ ..] => args.iter().any(|a| *a == "-o" || a.starts_with("--o")),
         ["sysctl", args @ ..] => args.iter().any(|a| *a == "-w"),
+        ["git", ..] => git_words_have_write_flag(tokens),
         _ => false,
+    }
+}
+
+/// git 只读子命令的写形态守卫:
+/// - `tag`/`branch`:非 flag 参数(创建/改名 ref)与写 flag(-d/-D/-m/-M/
+///   -a/-s/-u/-c/-C/--delete/--force 等)拒绝;只放行已知只读 flag。
+///   `git tag -l 'v*'` 的 pattern 形式被保守拒绝(可 `git tag | grep` 替代)。
+/// - `remote`:只放行无参(列表)、`-v`/`--verbose`、`get-url`/`show` 子命令;
+///   add/remove/update/prune 等写 `.git/config` 或联网改写拒绝。
+/// - 全家族:`--output <path>`/`--output=<path>`(diff/show 输出落盘到
+///   任意路径)拒绝;`--output-indicator-*` 不受影响。
+fn git_words_have_write_flag(tokens: &[&str]) -> bool {
+    const REF_READ_FLAGS: &[&str] = &[
+        "-l", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
+        "--show-current", "--contains", "--no-contains", "--merged", "--no-merged",
+        "--points-at", "--column", "-i", "--ignore-case",
+    ];
+    let Some(sub) = tokens.get(1..) else {
+        return false;
+    };
+    match sub {
+        [] => false,
+        ["tag", args @ ..] | ["branch", args @ ..] => !args.iter().copied().all(|a| {
+            REF_READ_FLAGS.contains(&a)
+                || a.starts_with("--sort=")
+                || a.starts_with("--format=")
+                || a.starts_with("--contains=")
+                || a.starts_with("--no-contains=")
+                || a.starts_with("--merged=")
+                || a.starts_with("--no-merged=")
+                || a.starts_with("--points-at=")
+                || a == "-n"
+                || (a.starts_with("-n")
+                    && a.len() > 2
+                    && a[2..].chars().all(|c| c.is_ascii_digit()))
+        }),
+        ["remote", args @ ..] => !args.is_empty()
+            && !args.iter().all(|a| matches!(*a, "-v" | "--verbose"))
+            && !(matches!(args[0], "get-url" | "show")
+                && args[1..].iter().all(|a| !a.starts_with('-'))),
+        _ => sub.iter().any(|a| *a == "--output" || a.starts_with("--output=")),
     }
 }
 
@@ -644,6 +697,7 @@ fn sed_words_are_safe(words: &[ShellWord]) -> bool {
         let word = &words[i];
         let text = word.text.as_str();
         if text == "--" {
+            i += 1;
             break;
         }
         if let Some(value) = text.strip_prefix("--expression=") {
@@ -694,8 +748,15 @@ fn sed_words_are_safe(words: &[ShellWord]) -> bool {
             return false;
         }
         scripts.push(words[i].text.clone());
+        i += 1;
     }
-    !scripts.is_empty() && scripts.iter().all(|script| sed_script_is_safe(script))
+    // 脚本之后是输入文件;GNU sed 允许脚本后置选项(`sed 's/a/b/' -i f`
+    // 会就地写文件),选项形态一律保守拒绝("-" 是 stdin 文件名)
+    words[i..]
+        .iter()
+        .all(|word| !word.text.starts_with('-') || word.text == "-")
+        && !scripts.is_empty()
+        && scripts.iter().all(|script| sed_script_is_safe(script))
 }
 
 /// find/fd 参数解析:写谓词拒绝;`-exec` 族(exec/execdir/ok/okdir、
@@ -802,7 +863,8 @@ fn dscl_words_are_safe(words: &[ShellWord]) -> bool {
 }
 
 /// 剥离 `env VAR=x` 与 `sudo -n` 包装(可嵌套,如 `sudo -n env FOO=1 ls`),
-/// 以及 `git` 全局 flag(`-C path`、`-c k=v`、`--git-dir=...`)。
+/// 以及 `git` 全局 flag(`-C path`、`--git-dir=...`;`-c k=v` 不剥离,见上)。
+/// env 变量名命中 [`env_var_spawns_programs`] 时停止剥离(整段保守拒绝)。
 fn strip_wrappers(words: &[ShellWord]) -> Vec<ShellWord> {
     let mut current: Vec<ShellWord> = words.to_vec();
     loop {
@@ -815,7 +877,13 @@ fn strip_wrappers(words: &[ShellWord]) -> Vec<ShellWord> {
                 let mut index = 0;
                 while index < after.len() {
                     let text = after[index].text.as_str();
-                    if text.contains('=') || text.starts_with("--") {
+                    if text.contains('=')
+                        && env_var_spawns_programs(text.split('=').next().unwrap_or(""))
+                    {
+                        // 危险变量(GIT_PAGER/LD_PRELOAD 等可注入可执行程序):
+                        // 停止剥离,残留 token 不命中前缀表 → 非只读
+                        break;
+                    } else if text.contains('=') || text.starts_with("--") {
                         index += 1;
                     } else if text == "-u" && index + 1 < after.len() {
                         index += 2;
@@ -842,7 +910,10 @@ fn strip_wrappers(words: &[ShellWord]) -> Vec<ShellWord> {
                 let mut index = 1;
                 while index < current.len() {
                     let text = current[index].text.as_str();
-                    if (text == "-C" || text == "-c") && index + 1 < current.len() {
+                    // 注意:`-c k=v` 不剥离 —— git 配置项可注入可执行程序
+                    // (core.pager/diff.external/core.fsmonitor 等),保守整体
+                    // 拒绝;后续可演进为可执行配置键黑名单
+                    if text == "-C" && index + 1 < current.len() {
                         index += 2;
                     } else if text.starts_with("--") && text.contains('=') {
                         index += 1;
@@ -886,11 +957,23 @@ fn strip_wrappers(words: &[ShellWord]) -> Vec<ShellWord> {
 
 fn is_git_global_flag(text: &str) -> bool {
     text == "-C"
-        || text == "-c"
         || text.starts_with("--git-dir")
         || text.starts_with("--work-tree")
         || text.starts_with("--namespace")
         || text.starts_with("--super-prefix")
+}
+
+/// env 变量名会否被下游命令用来 spawn 外部程序:`GIT_PAGER`/`GIT_EDITOR`/
+/// `GIT_EXTERNAL_DIFF` 等 GIT 家族、通用 `PAGER`/`EDITOR`/`VISUAL`,以及
+/// 动态链接器注入(`LD_PRELOAD`/`DYLD_*`)与 shell 启动文件(`BASH_ENV`/`ENV`)。
+fn env_var_spawns_programs(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("GIT_")
+        || matches!(
+            upper.as_str(),
+            "PAGER" | "EDITOR" | "VISUAL" | "BASH_ENV" | "ENV" | "LD_PRELOAD"
+        )
+        || upper.starts_with("DYLD_")
 }
 
 /// tokens 是否以 prefix tokens 开头。
@@ -899,7 +982,7 @@ fn token_prefix_matches(tokens: &[&str], prefix: &[&str]) -> bool {
 }
 
 /// 字符串前缀匹配(词边界:prefix 后必须是结尾或空白)。
-fn prefix_matches(command: &str, prefix: &str) -> bool {
+pub(crate) fn prefix_matches(command: &str, prefix: &str) -> bool {
     command == prefix
         || (command.starts_with(prefix)
             && command[prefix.len()..].starts_with(char::is_whitespace))
@@ -915,10 +998,95 @@ mod tests {
         assert!(is_readonly_command("ls -la"));
         assert!(is_readonly_command("git log --oneline -5"));
         assert!(is_readonly_command("git status"));
-        assert!(is_readonly_command("cargo check"));
+        assert!(is_readonly_command("cargo tree"));
         assert!(is_readonly_command("echo hello"));
         assert!(is_readonly_command("  pwd  "));
         assert!(is_readonly_command("wc -l foo.txt"));
+        // cargo check 会执行依赖的 build.rs,不进只读表
+        assert!(!is_readonly_command("cargo check"));
+    }
+
+    #[test]
+    fn arithmetic_expansion_blocks_command_substitution() {
+        // 纯算术无副作用
+        assert!(is_readonly_command("echo $((1 + 2))"));
+        assert!(is_readonly_command("echo $(( (1 + 2) * 3 ))"));
+        assert!(is_readonly_command("echo $((x + $y))"));
+        // 算术体内嵌命令替换/反引号 = 任意命令执行,一票否决
+        assert!(!is_readonly_command("echo $(( $(rm -rf src) + 1 ))"));
+        assert!(!is_readonly_command("echo $(( `sh -c 'curl x | sh'` ))"));
+        assert!(!is_readonly_command("echo $((1 + $(x) ))"));
+        // 嵌套算术(内层以 $( 开头)也被保守拒绝
+        assert!(!is_readonly_command("echo $(( $((1 + 2)) + 1 ))"));
+    }
+
+    #[test]
+    fn sed_tail_options_are_denied() {
+        // GNU sed 允许脚本后置选项,尾部选项形态一律拒绝
+        assert!(!is_readonly_command("sed 's/a/b/' -i f"));
+        assert!(!is_readonly_command("sed 's/a/b/' --in-place f"));
+        assert!(!is_readonly_command("sed -n '4,6p' f -i"));
+        // 尾部是文件名/stdin 标记的只读形式不受影响
+        assert!(is_readonly_command("sed 's/a/b/' f"));
+        assert!(is_readonly_command("sed 's/a/b/' -"));
+        assert!(is_readonly_command("sed -e 's/a/b/' f"));
+    }
+
+    #[test]
+    fn git_ref_write_forms_are_denied() {
+        // tag/branch:非 flag 参数(创建 ref)与写 flag
+        assert!(!is_readonly_command("git tag evil"));
+        assert!(!is_readonly_command("git tag -d v1"));
+        assert!(!is_readonly_command("git tag -m msg v1"));
+        assert!(!is_readonly_command("git branch -D x"));
+        assert!(!is_readonly_command("git branch --move a b"));
+        // remote:写 .git/config 的子命令
+        assert!(!is_readonly_command("git remote add o url"));
+        assert!(!is_readonly_command("git remote remove origin"));
+        assert!(!is_readonly_command("git remote update"));
+        // diff/show:输出落盘任意路径
+        assert!(!is_readonly_command("git diff --output=foo.txt"));
+        assert!(!is_readonly_command("git show --output foo.txt"));
+    }
+
+    #[test]
+    fn git_ref_readonly_forms_still_pass() {
+        assert!(is_readonly_command("git tag"));
+        assert!(is_readonly_command("git tag -l"));
+        assert!(is_readonly_command("git tag -n5"));
+        assert!(is_readonly_command("git branch"));
+        assert!(is_readonly_command("git branch -a"));
+        assert!(is_readonly_command("git branch --show-current"));
+        assert!(is_readonly_command("git branch --sort=-committerdate -v"));
+        assert!(is_readonly_command("git remote"));
+        assert!(is_readonly_command("git remote -v"));
+        assert!(is_readonly_command("git remote get-url origin"));
+        assert!(is_readonly_command("git remote show origin"));
+        // --output-indicator-* 不是 --output 落盘 flag
+        assert!(is_readonly_command("git diff --output-indicator-new='#'"));
+    }
+
+    #[test]
+    fn git_c_and_dangerous_env_are_denied() {
+        // -c 配置可注入可执行程序(core.pager/diff.external/core.fsmonitor…)
+        assert!(!is_readonly_command("git -c core.pager='touch /tmp/pwned' log"));
+        assert!(!is_readonly_command("git -c diff.external='sh -c x' diff"));
+        // 混在 -C 剥离序列里也不放行
+        assert!(!is_readonly_command("git -C /tmp -c core.fsmonitor=evil.sh status"));
+        // env 危险变量(GIT_* / PAGER / LD_PRELOAD…)注入
+        assert!(!is_readonly_command("env GIT_PAGER=evil git log"));
+        assert!(!is_readonly_command("env LD_PRELOAD=x ls"));
+        assert!(!is_readonly_command("env PGPORT=5432 GIT_EDITOR=evil git log"));
+        // 普通变量赋值仍剥离放行
+        assert!(is_readonly_command("env FOO=1 git log"));
+    }
+
+    #[test]
+    fn io_number_prefix_leaves_no_empty_token() {
+        // IO number(2>)不再残留空词 token,首词判定不被污染
+        assert!(is_readonly_command("2>/dev/null ls"));
+        assert!(is_readonly_command("ls 2>/dev/null"));
+        assert!(is_readonly_command("2>/dev/null git status"));
     }
 
     #[test]

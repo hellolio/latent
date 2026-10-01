@@ -469,6 +469,32 @@ async fn bash_tool_receives_pi_session_env_via_build_session() {
     assert!(!echoed.contains("$"), "变量应已展开: {echoed}");
 }
 
+/// 降级矩阵 §7.5(集成验收):无沙箱平台 Plan 模式没有 OS 层兜底,只读
+/// 判定是最后保证 —— 判定通过的 bash 命令照常执行。
+#[tokio::test]
+async fn plan_mode_bash_readonly_executes_without_sandbox() {
+    let built = build_with(two_turn_provider()).await;
+
+    let stop = built
+        .session
+        .prompt("run echo")
+        .await
+        .expect("prompt")
+        .stop();
+    assert_eq!(stop, rpi_agent::RunStop::EndTurn);
+
+    let executed = built
+        .session
+        .agent()
+        .messages()
+        .iter()
+        .any(|msg| {
+            matches!(msg, rpi_agent::AgentMessage::ToolResult { tool_name, is_error: false, .. }
+                if tool_name == "bash")
+        });
+    assert!(executed, "无沙箱 Plan 模式只读判定通过的 bash 应正常执行");
+}
+
 // ---- Session 文件持久化:CLI 装配走 file-backed session,重启可续聊 ----
 
 /// /new:进程内新建会话文件并切换,旧会话原样保留,转录清空,

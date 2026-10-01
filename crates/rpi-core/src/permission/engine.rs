@@ -114,9 +114,6 @@ impl PermissionEngine {
         if mode == SessionMode::FullAccess {
             return Verdict::Allow;
         }
-        if risk == ToolRiskClass::ReadOnly {
-            return Verdict::Allow;
-        }
         if self.cache_hit(ctx, risk) {
             return Verdict::Allow;
         }
@@ -156,6 +153,8 @@ impl PermissionEngine {
                     .unwrap_or("");
                 match mode {
                     SessionMode::Plan => {
+                        // 无沙箱平台没有 OS 层兜底,只读判定就是最后保证:
+                        // 判定通过即放行,不通过直接拒绝
                         if is_readonly_command_with_rules(
                             command,
                             &self.rules.allow_commands,
@@ -183,14 +182,10 @@ impl PermissionEngine {
                             .deny_commands
                             .iter()
                             .any(|rule| {
-                                let normalized =
-                                    crate::permission::types::normalize_command(rule);
-                                let command =
-                                    crate::permission::types::normalize_command(command);
-                                command == normalized
-                                    || (command.starts_with(&normalized)
-                                        && command[normalized.len()..]
-                                            .starts_with(char::is_whitespace))
+                                crate::permission::shell::prefix_matches(
+                                    &crate::permission::types::normalize_command(command),
+                                    &crate::permission::types::normalize_command(rule),
+                                )
                             })
                         {
                             return Verdict::Deny(format!(
@@ -375,6 +370,27 @@ mod tests {
             other => panic!("期望 Ask,得到 {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plan_mode_shell_without_sandbox_relies_on_judge() {
+        // 降级矩阵 §7.5:无沙箱平台没有 OS 层兜底,只读判定是最后保证 ——
+        // 判定通过即放行,不通过拒绝
+        let engine = PermissionEngine::new(
+            SessionMode::Plan,
+            SandboxConfig::default(),
+            ApprovalRules::default(),
+            std::env::temp_dir(),
+            false,
+        );
+        assert_eq!(
+            engine.evaluate(&ctx("bash", serde_json::json!({"command": "git log"})), ToolRiskClass::Shell),
+            Verdict::Allow
+        );
+        match engine.evaluate(&ctx("bash", serde_json::json!({"command": "rm -rf build"})), ToolRiskClass::Shell) {
+            Verdict::Deny(reason) => assert!(reason.contains("read-only"), "{reason}"),
+            other => panic!("期望 Deny,得到 {other:?}"),
+        }
     }
 
     #[test]
