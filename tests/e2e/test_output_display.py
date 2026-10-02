@@ -18,9 +18,10 @@ def test_reply_commits_with_usage_and_footer():
         app.sendline("你好")
         # 流式回复上屏
         app.expect_text(r"这是 mock LLM 的固定回复")
-        # 回合结束后:用量盒(标题 tokens)+ footer token 段(cache 0% 也要显示)
-        app.expect_text(r"─+tokens")
-        app.expect_text(r"cache 0%")
+        # 回合结束后:用量行(裸行无外框;mock 无缓存读写,↑ = 裸 input)
+        # + footer token 段
+        app.expect_text(r"↓7")
+        app.expect_text(r"↑10")
         app.expect_text(r"↑")
         # 编辑器回到可输入状态
         app.expect_text(r"❯")

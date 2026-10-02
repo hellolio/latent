@@ -1,6 +1,6 @@
 //! 底部状态栏(pi components/footer.ts 的对应物,三行):
 //! 1. cwd(~/ 缩写)+(git 分支);
-//! 2. 右对齐 token 段:↑in │ ↓out │ cache 命中率 │ ctx%(>70% warning 黄、
+//! 2. 右对齐 token 段:↑prompt(hit/miss 明细) │ ↓out │ ctx%(>70% warning 黄、
 //!    >90% error 红)· 用量/窗口 │ $cost,每段独立着色;
 //! 3. 右对齐模型 · thinking。
 
@@ -92,7 +92,7 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
     vec![line1, line2, line3]
 }
 
-/// token 用量段(右对齐显示;session 累计):↑in │ ↓out │ cache 命中率 │
+/// token 用量段(右对齐显示;session 累计):↑prompt(hit/miss 明细) │
 /// ctx 用量 │ $cost。各段独立着色,分隔符 dim;零用量也显示 ↑ 0 │ ↓ 0。
 fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
@@ -128,7 +128,7 @@ fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// ↑in │ ↓out │ cache 命中率 │ $cost 分段(footer 与转录单回合用量行共用)。
+/// ↑prompt(hit/miss) │ ↓out │ $cost 分段(footer 与转录单回合用量行共用)。
 /// 零用量也显示 `↑ 0 │ ↓ 0`(footer 要求 token 段常驻)。
 fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
     let dim = Style::new().fg(theme.dim);
@@ -142,14 +142,29 @@ fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
     };
     let mut sep = false;
     {
+        // ↑ 显示完整 prompt 规模(input + cache 读 + cache 写),括号内给出
+        // 命中/未命中明细:命中 = cache_read,未命中 = input + cache_write
+        // (本次新发送、未从缓存读取的 token)。
+        // 无缓存读写(如不带 prompt cache 的 provider)时退化为裸 ↑ input。
+        let prompt_total = data.input_tokens + data.cache_read + data.cache_write;
+        let miss_total = data.input_tokens + data.cache_write;
+        let up = if data.cache_read + data.cache_write > 0 {
+            format!(
+                "↑ {} (hit {} / miss {})",
+                format_tokens(prompt_total),
+                format_tokens(data.cache_read),
+                format_tokens(miss_total)
+            )
+        } else {
+            format!("↑ {}", format_tokens(data.input_tokens))
+        };
         push(
             &mut spans,
             &mut sep,
-            Span::styled(
-                format!("↑ {}", format_tokens(data.input_tokens)),
-                Style::new().fg(theme.usage_input),
-            ),
+            Span::styled(up, Style::new().fg(theme.usage_input)),
         );
+        // 命中/未命中明细随 ↑ 段的括号展示(替代旧 cache N% 段:数量信息
+        // 更完整且 80 列内放得下);无缓存读写的 provider 不展示
         push(
             &mut spans,
             &mut sep,
@@ -158,20 +173,6 @@ fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
                 Style::new().fg(theme.usage_output),
             ),
         );
-        // 命中率 = cache_read / (input + cache_read + cache_write)
-        // (prompt 全量;input 为未缓存部分),四舍五入到整数百分比。
-        // 只要有用量就显示,0% 也显示。
-        let prompt_total = data.input_tokens + data.cache_read + data.cache_write;
-        if let Some(hit) = (data.cache_read * 100 + prompt_total / 2).checked_div(prompt_total) {
-            push(
-                &mut spans,
-                &mut sep,
-                Span::styled(
-                    format!("cache {hit}%"),
-                    Style::new().fg(theme.usage_cache),
-                ),
-            );
-        }
         if data.cost_total > 0.0 {
             push(
                 &mut spans,
@@ -332,10 +333,9 @@ mod tests {
         let out = lines(&data(), 80, &theme());
         assert_eq!(out.len(), 3);
         let second = line_text(&out[1]);
-        // 右对齐 token 段:紧凑 k 格式 + 命中率 + ctx + cost
-        assert!(second.contains("↑ 11k"), "{second}");
+        // 右对齐 token 段:↑ 为完整 prompt(11k+5.5k+2.2k),括号内命中/未命中
+        assert!(second.contains("↑ 18.7k (hit 5.5k / miss 13.2k)"), "{second}");
         assert!(second.contains("↓ 149"), "{second}");
-        assert!(second.contains("cache 29%"), "{second}");
         assert!(second.contains("ctx 10% (12.8k/128k) (auto)"), "{second}");
         assert!(second.contains("$0.0012"), "{second}");
         assert_eq!(display_width(&second), 80);
@@ -432,10 +432,11 @@ mod tests {
         d.cost_total = 0.0;
         let out = lines(&d, 40, &theme());
         assert_eq!(out.len(), 3);
-        // 零用量也显示 ↑ 0 │ ↓ 0(token 段常驻,右对齐)
+        // 零用量也显示 ↑ 0 │ ↓ 0(token 段常驻,右对齐;无缓存读写不加明细括号)
         let second = line_text(&out[1]);
         assert!(second.contains("↑ 0"), "{second}");
         assert!(second.contains("↓ 0"), "{second}");
+        assert!(!second.contains("hit"), "{second}");
         assert_eq!(display_width(&second), 40);
         let third = line_text(&out[2]);
         assert!(third.ends_with("mock/m1 · t:high"), "{third}");
@@ -444,11 +445,12 @@ mod tests {
 
     #[test]
     fn cache_hit_shown_even_at_zero_percent() {
+        // cache_read = 0 但有 cache_write:括号明细仍展示(hit 0)
         let mut d = data();
         d.cache_read = 0;
         let out = lines(&d, 80, &theme());
         let second = line_text(&out[1]);
-        assert!(second.contains("cache 0%"), "{second}");
+        assert!(second.contains("(hit 0 / miss 13.2k)"), "{second}");
     }
 
     #[test]

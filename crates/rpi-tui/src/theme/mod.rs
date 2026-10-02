@@ -25,8 +25,6 @@ pub struct Theme {
     pub user_bg: Color,
     pub user_text: Color,
     pub assistant_text: Color,
-    /// AI 输出框边框(纯面向用户的输出;黄色系)
-    pub assistant_border: Color,
     /// thinking 块(pi thinkingText)
     pub thinking: Color,
     /// 工具标题(pi toolTitle,加粗使用)
@@ -34,6 +32,14 @@ pub struct Theme {
     pub tool_pending: Color,
     pub tool_success: Color,
     pub tool_error: Color,
+    /// 工具卡片背景:运行中(pi toolPendingBg,中性暗色)
+    pub tool_pending_bg: Color,
+    /// 工具卡片背景:成功(pi toolSuccessBg,柔和暗绿)
+    pub tool_success_bg: Color,
+    /// 工具卡片背景:失败(pi toolErrorBg,柔和暗红)
+    pub tool_error_bg: Color,
+    /// 计划模式卡片背景(pi customMessageBg,柔和暗紫)
+    pub plan_bg: Color,
     /// 工具输出正文(pi toolOutput)
     pub tool_output: Color,
     pub error: Color,

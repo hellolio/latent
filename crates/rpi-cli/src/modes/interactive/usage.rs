@@ -1,7 +1,6 @@
 //! 用量追踪(T4):单回合用量行渲染 + 会话累计摘要(footer 侧)。
 
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 /// T4 用量追踪:每回合终态(TurnEnd)推送一次 usage。
 #[derive(Default)]
@@ -27,8 +26,8 @@ impl UsageTracker {
     }
 }
 
-/// 单回合用量行(定稿后随转录落盘):样式与 footer 右侧 token 段一致
-/// (同图标同配色,见 rpi_tui::footer::turn_usage_line)。
+/// 单回合用量行(定稿后随转录落盘,裸行无外框):样式与 footer 右侧
+/// token 段一致(同图标同配色,见 rpi_tui::footer::turn_usage_line)。
 pub fn usage_line(usage: &rpi_ai::Usage, theme: &rpi_tui::Theme) -> Line<'static> {
     rpi_tui::footer::turn_usage_line(
         usage.input,
@@ -45,41 +44,6 @@ pub fn usage_line(usage: &rpi_ai::Usage, theme: &rpi_tui::Theme) -> Line<'static
 /// 算法(usage.input + output + cacheRead + cacheWrite)。
 pub fn context_tokens_of(usage: &rpi_ai::Usage) -> u64 {
     usage.input + usage.output + usage.cache_read + usage.cache_write
-}
-
-/// 单回合用量块:用量行外加 box-drawing 外框,与模型正文明确分隔
-/// (边框色与 markdown 代码块一致)。
-pub fn usage_block(
-    usage: &rpi_ai::Usage,
-    theme: &rpi_tui::Theme,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let border = Style::new().fg(theme.md_code_block_border);
-    let width = width.max(8);
-    let inner = width.saturating_sub(4).max(1); // "│ " + " │"
-    let content = usage_line(usage, theme);
-    let text: String = content.spans.iter().map(|s| s.content.as_ref()).collect();
-    let (trunc, _) = rpi_tui::truncate_to_width(&text, inner);
-    let pad = inner.saturating_sub(rpi_tui::display_width(&trunc));
-    let label = "── tokens ";
-    let top = format!(
-        "╭{label}{}╮",
-        "─".repeat(width.saturating_sub(2 + label.chars().count()))
-    );
-    let mut row: Vec<Span<'static>> = vec![Span::styled("│ ".to_string(), border)];
-    row.extend(content.spans);
-    row.push(Span::styled(
-        format!("{}{}", " ".repeat(pad), " │"),
-        border,
-    ));
-    vec![
-        Line::from(Span::styled(top, border)),
-        Line::from(row),
-        Line::from(Span::styled(
-            format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
-            border,
-        )),
-    ]
 }
 
 fn accumulate(total: &mut rpi_ai::Usage, usage: &rpi_ai::Usage) {
@@ -148,11 +112,11 @@ mod tests {
         let theme = rpi_tui::Theme::dark_ansi();
         let line = usage_line(&usage(), &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        // 与 footer token 段同格式:↑/↓ 图标 + 命中率 + $cost + reasoning
-        assert!(text.contains("↑ 100"), "{text}");
+        // 与 footer token 段同格式:↑ 完整 prompt + 命中/未命中明细 +
+        // 命中率 + $cost + reasoning
+        // ↑ = 100 + 5 + 10 = 115;hit = cache_read 5;miss = 100 + 10 = 110
+        assert!(text.contains("↑ 115 (hit 5 / miss 110)"), "{text}");
         assert!(text.contains("↓ 20"), "{text}");
-        // 命中率 = 5 / (100+5+10) = 4%
-        assert!(text.contains("cache 4%"), "{text}");
         assert!(text.contains("reasoning 8"), "{text}");
         assert!(text.contains("$0.0012"), "{text}");
     }

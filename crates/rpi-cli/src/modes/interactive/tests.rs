@@ -287,10 +287,11 @@ async fn assistant_message_finalizes_as_markdown_item() {
     let rendered = committed_text(&state);
     assert!(rendered.contains("标题"), "{rendered}");
     assert!(rendered.contains("正文"));
-    // 纯文本回复:包 AI 输出框
-    assert!(state.transcript.iter().any(
-        |item| matches!(item, super::state::TranscriptItem::Assistant { boxed: true, .. })
-    ));
+    // 定稿正文落盘(裸渲染,无外框)
+    assert!(state
+        .transcript
+        .iter()
+        .any(|item| matches!(item, super::state::TranscriptItem::Assistant { .. })));
 }
 
 #[tokio::test]
@@ -330,9 +331,10 @@ async fn assistant_message_with_tool_call_not_boxed() {
     )
     .await;
 
-    assert!(state.transcript.iter().any(
-        |item| matches!(item, super::state::TranscriptItem::Assistant { boxed: false, .. })
-    ));
+    assert!(state
+        .transcript
+        .iter()
+        .any(|item| matches!(item, super::state::TranscriptItem::Assistant { .. })));
     let rendered = committed_text(&state);
     assert!(rendered.contains("我来查看目录"), "{rendered}");
 }
@@ -410,7 +412,8 @@ async fn turn_end_success_records_usage_and_context() {
         })),
     )
     .await;
-    assert!(committed_text(&state).contains("↑ 100"));
+    // ↑ = 完整 prompt(100 + cache_read 5),括号内命中/未命中明细
+    assert!(committed_text(&state).contains("↑ 105 (hit 5 / miss 100)"));
     assert_eq!(
         state.context_tokens, 115,
         "ctx 估计 = in+out+cacheRead+cacheWrite"

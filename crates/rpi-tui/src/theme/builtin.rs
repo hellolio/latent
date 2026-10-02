@@ -14,12 +14,18 @@ pub fn dark() -> Theme {
         user_bg: Color::Rgb(0x33, 0x34, 0x38),
         user_text: Color::Rgb(0xbe, 0xbe, 0xbe),
         assistant_text: Color::Rgb(0xd4, 0xd4, 0xd4),
-        assistant_border: Color::Rgb(0xe0, 0xaf, 0x68),
         thinking: Color::Rgb(0x8c, 0x8c, 0x8c),
         tool_title: Color::Rgb(0x7d, 0xcf, 0xff),
         tool_pending: Color::Rgb(0xe0, 0xaf, 0x68),
         tool_success: Color::Rgb(0x9e, 0xce, 0x6a),
         tool_error: Color::Rgb(0xf7, 0x76, 0x8e),
+        // pi dark 主题同款 OKHSL 值经 Ottosson 参考实现换算:
+        // toolPendingBg okhsl(229 5% 24%)、toolSuccessBg okhsl(158 46% 25%)、
+        // toolErrorBg okhsl(19 54% 25%)、customMessageBg okhsl(295 42% 24%)
+        tool_pending_bg: Color::Rgb(0x34, 0x38, 0x3a),
+        tool_success_bg: Color::Rgb(0x25, 0x41, 0x31),
+        tool_error_bg: Color::Rgb(0x5b, 0x28, 0x2a),
+        plan_bg: Color::Rgb(0x3a, 0x30, 0x55),
         tool_output: Color::Rgb(0xa9, 0xb1, 0xd6),
         error: Color::Rgb(0xf7, 0x76, 0x8e),
         warning: Color::Rgb(0xe0, 0xaf, 0x68),
@@ -53,12 +59,17 @@ pub fn dark_ansi() -> Theme {
         user_bg: Color::DarkGray,
         user_text: Color::White,
         assistant_text: Color::Gray,
-        assistant_border: Color::Yellow,
         thinking: Color::DarkGray,
         tool_title: Color::Cyan,
         tool_pending: Color::Yellow,
         tool_success: Color::Green,
         tool_error: Color::Red,
+        // 16 色调色板无柔和中间色:成功/失败用基本色相的暗档(Green/Red 即
+        // ANSI 2/1),运行中与计划块用 DarkGray 保守降级
+        tool_pending_bg: Color::DarkGray,
+        tool_success_bg: Color::Green,
+        tool_error_bg: Color::Red,
+        plan_bg: Color::DarkGray,
         tool_output: Color::Gray,
         error: Color::Red,
         warning: Color::Yellow,

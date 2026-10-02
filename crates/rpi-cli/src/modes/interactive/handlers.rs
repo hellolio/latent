@@ -15,7 +15,7 @@ use super::events::UiEvent;
 use super::state::{
     InteractiveState, SelectKind, SelectRequest, Status, ToolStatus, TranscriptItem,
 };
-use super::usage::{context_tokens_of, usage_block};
+use super::usage::{context_tokens_of, usage_line};
 use super::view;
 
 /// 键盘/命令处理共用的会话上下文(状态 + TUI 之外的全部依赖)。
@@ -966,6 +966,8 @@ pub async fn handle_ui_event(
             inject,
             ..
         } => {
+            // 组前空行:Bash 背景块与上文分隔(commit_blank 去重)
+            state.commit_blank();
             state.commit(TranscriptItem::Bash {
                 command: command.clone(),
                 output: output.clone(),
@@ -1020,41 +1022,41 @@ async fn handle_session_event(
                 }
             },
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageStart { message, .. }) => {
-            // 新 assistant 消息:重置流式缓冲与 thinking 累积
+            // 新 assistant 消息:重置流式缓冲与 thinking 累积,并作为消息组
+            // 起始补一个空行(外框移除后组间靠空行分隔;commit_blank 去重)
             if matches!(message.as_ref(), rpi_agent::AgentMessage::Assistant(_)) {
                 state.stream_text.clear();
                 state.pending_thinking = None;
+                state.commit_blank();
             }
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageEnd { message }) => {
             match message.as_ref() {
                 // assistant 定稿:thinking 块 + 正文(markdown)落盘;不追加
-                // 空行(用量行紧贴正文,pi 风格;后续条目自带间距)。
-                // 消息含工具调用(后续要执行命令)→ 不加 AI 输出框
-                rpi_agent::AgentMessage::Assistant(assistant) => {
+                // 空行(用量行紧贴正文,pi 风格)。正文裸渲染无外框。
+                rpi_agent::AgentMessage::Assistant(_) => {
                     commit_pending_thinking(state);
-                    let boxed = !assistant.has_tool_calls();
-                    flush_stream(state, boxed);
+                    flush_stream(state);
                 }
                 // 用户消息即时上屏(与回放一致;steering 亦可见)。
-                // 消息组之间保留一个空行(分割线已移除,框间靠空行分隔)
+                // 消息组之间保留一个空行(框间靠空行分隔)
                 rpi_agent::AgentMessage::User { content, .. } => {
-                    flush_stream(state, false);
+                    flush_stream(state);
                     state.commit_blank();
                     state.commit(TranscriptItem::User {
                         content: content.clone(),
                     });
                     state.commit_blank();
                 }
-                // 工具结果:标题(按终态着色)+ 输出块(紧贴上文,框本身
-                // 已提供视觉分隔;TurnEnd 用量块同样紧随其后)
+                // 工具结果:标题(按终态铺背景色)+ 输出背景块;组前补空行
+                // (背景块替代边框承担视觉分隔)
                 rpi_agent::AgentMessage::ToolResult {
                     tool_call_id,
                     tool_name,
                     is_error,
                     ..
                 } => {
-                    flush_stream(state, false);
+                    flush_stream(state);
                     let output = message.tool_result_content().unwrap_or_default();
                     // 按 tool_call_id 精确配对(并行批的结果消息按源序/完成序
                     // 到达,不能按"最近一次 start"配对)
@@ -1072,6 +1074,7 @@ async fn handle_session_event(
                     } else {
                         ToolStatus::Success
                     };
+                    state.commit_blank();
                     state.commit(TranscriptItem::ToolCall { name, args, status });
                     state.commit(TranscriptItem::ToolResult {
                         output,
@@ -1087,7 +1090,7 @@ async fn handle_session_event(
             args,
             ..
         }) => {
-            flush_stream(state, false);
+            flush_stream(state);
             let args = serde_json::to_string(&args).unwrap_or_default();
             state
                 .pending_tools
@@ -1100,8 +1103,9 @@ async fn handle_session_event(
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::TurnEnd { message, .. }) => {
             // 注意此处保持 busy(Idle 在 AgentSettled):tokens 块必须在视口
-            // 收缩**前**按 busy 高度落盘,与上文(AI 框/工具框)紧贴;随后
-            // 收缩释放的 1 行预留空带全部落在 tokens 下方(输入框一侧)。
+            // 收缩**前**按 busy 高度落盘,与上文(assistant 正文/工具背景块)
+            // 紧贴;随后收缩释放的 1 行预留空带全部落在 tokens 下方(输入框
+            // 一侧)。
             // pi assistant-message.ts 语义:error/aborted 红字上屏且不打
             // 用量行(错误回合无有效 usage);length 先打用量再补截断提示
             match message.stop_reason {
@@ -1117,7 +1121,7 @@ async fn handle_session_event(
                 }
                 StopReason::Length => {
                     state.usage.push(&message.usage);
-                    for item in usage_item_of(&message.usage, &state.theme, state.width) {
+                    for item in usage_item_of(&message.usage, &state.theme) {
                         state.commit(item);
                     }
                     state.commit_ephemeral(view::error_line(
@@ -1128,7 +1132,7 @@ async fn handle_session_event(
                 }
                 _ => {
                     state.usage.push(&message.usage);
-                    for item in usage_item_of(&message.usage, &state.theme, state.width) {
+                    for item in usage_item_of(&message.usage, &state.theme) {
                         state.commit(item);
                     }
                     state.context_tokens = context_tokens_of(&message.usage);
@@ -1144,8 +1148,9 @@ async fn handle_session_event(
                 } else {
                     ToolStatus::Success
                 };
+                state.commit_blank();
                 state.commit(TranscriptItem::ToolCall { name, args, status });
-                // 补空结果条目,让边框卡片闭合(结果未到达的兜底路径)
+                // 补空结果条目,让背景块闭合(结果未到达的兜底路径)
                 state.commit(TranscriptItem::ToolResult {
                     output: String::new(),
                     is_error: state.last_tool_error,
@@ -1190,17 +1195,16 @@ async fn handle_session_event(
     }
 }
 
-/// 流式累积 → assistant 定稿(markdown)转录条目。`boxed` = 是否包 AI
-/// 输出框(纯面向用户的输出;含工具调用的消息不加框)。
-fn flush_stream(state: &mut InteractiveState, boxed: bool) {
+/// 流式累积 → assistant 定稿(markdown)转录条目(裸渲染,无外框)。
+fn flush_stream(state: &mut InteractiveState) {
     if !state.stream_text.trim().is_empty() {
         let markdown = std::mem::take(&mut state.stream_text);
-        // 计划模式产出的 <proposed_plan> 块渲染为边框卡片(13 文档 §8.3);
-        // 渲染只是展示层,原始文本仍按普通 assistant 消息入转录
+        // 计划模式产出的 <proposed_plan> 块渲染为紫色背景卡片(13 文档
+        // §8.3);渲染只是展示层,原始文本仍按普通 assistant 消息入转录
         if markdown.contains("<proposed_plan>") {
             state.commit(TranscriptItem::Plan { markdown });
         } else {
-            state.commit(TranscriptItem::Assistant { markdown, boxed });
+            state.commit(TranscriptItem::Assistant { markdown });
         }
     } else {
         state.stream_text.clear();
@@ -1216,9 +1220,8 @@ fn commit_pending_thinking(state: &mut InteractiveState) {
     }
 }
 
-fn usage_item_of(usage: &rpi_ai::Usage, theme: &Theme, width: usize) -> Vec<TranscriptItem> {
-    usage_block(usage, theme, width)
-        .into_iter()
-        .map(TranscriptItem::Line)
-        .collect()
+fn usage_item_of(usage: &rpi_ai::Usage, theme: &Theme) -> Vec<TranscriptItem> {
+    vec![TranscriptItem::Line(rpi_tui::UiLine::from(usage_line(
+        usage, theme,
+    )))]
 }

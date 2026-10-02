@@ -11,7 +11,7 @@ use rpi_agent::{
 use rpi_ai::{Model, ScriptedProvider, ScriptedTurn};
 use rpi_core::{
     ApprovalDecision, ApprovalHooks, ApprovalRequest, ApprovalRules, ApprovalUi, PermissionEngine,
-    SandboxConfig, SessionMode, SessionSharedSubscriber, SessionSubscriber, ToolRiskClass, Verdict,
+    SandboxConfig, SessionMode, SessionSharedSubscriber, SessionSubscriber, Verdict,
 };
 use tokio_util::sync::CancellationToken;
 

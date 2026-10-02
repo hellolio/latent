@@ -155,7 +155,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `src/view.rs`（modes/interactive 内） | 视口帧组装纯函数：预览区 → 状态行 → 补全弹窗 → 编辑器 → footer；预览高度守恒律防视口跳动 |
 | `src/markdown.rs` | Markdown 渲染（标题/列表/围栏代码块 syntect 高亮/GFM 表格/行内样式） |
 | `src/command_popup.rs` | 斜杠命令补全弹窗（前缀>子串>模糊打分；`/mode` 展开变体子项） |
-| `src/tool_card.rs` | 工具调用卡片：折叠保留前 4 行 + `ctrl+o to expand`；状态色边框 |
+| `src/tool_card.rs` | 工具调用卡片：折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，成功绿/失败红/运行中中性，pi toolSuccessBg 同源色值） |
 | `src/footer.rs` | 三行状态栏：cwd+git 分支 / token 段（in/out/cache/ctx% 变色/$cost）/ model·thinking；mode 标记 plan 黄、full-access 红 |
 | `src/theme/` | 语义主题：ratatui-themes 映射 + 逐主题微调（Tokyo Night/Catppuccin/Dracula…），16 色降级 ANSI |
 | `src/highlight.rs` / `text.rs` / `width.rs` / `key.rs` / `loader.rs` / `select_list.rs` / `header.rs` | syntect 高亮单例 / span 感知折行截断 / 零依赖 CJK 宽度表 / 按键语义归一 / spinner / 单选列表 / 启动横幅 |
