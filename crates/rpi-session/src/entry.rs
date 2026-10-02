@@ -4,7 +4,7 @@
 //! `parentId`(根为 null)、`timestamp`(毫秒)构成树。
 //!
 //! 与 pi 的差异:entry timestamp 用毫秒整数(pi 用 ISO 字符串)—— rpi 会话文件
-//! 自用,未承诺逐字节兼容(见 docs/06 踩坑记录)。
+//! 自用,未承诺逐字节兼容。
 
 use serde::{Deserialize, Serialize};
 

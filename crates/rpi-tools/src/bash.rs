@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
 use crate::output_accumulator::{OutputAccumulator, OutputSnapshot};
-use crate::truncate::{DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use crate::truncate::{OutputLimits, DEFAULT_MAX_LINES};
 
 const MAX_TIMEOUT_MS: u128 = 2_147_483_647;
 
@@ -53,6 +53,8 @@ pub(crate) struct ShellToolConfig {
     pub program: &'static str,
     /// 命令之前的固定参数(如 `["-c"]`)
     pub base_args: &'static [&'static str],
+    /// 输出自我约束上限(与 agent 转录裁剪同源派生,truncate 模块文档)
+    pub limits: OutputLimits,
 }
 
 pub struct ShellTool {
@@ -63,13 +65,13 @@ pub struct ShellTool {
 
 /// bash 工厂(默认集,05 文档 §1)。
 pub fn create_bash_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_shell_tool(bash_config(), cwd, ShellSpawnOptions::default())
+    create_shell_tool(bash_config(OutputLimits::default()), cwd, ShellSpawnOptions::default())
 }
 
 /// bash 工厂 + 会话环境注入(T9,11 计划 §5)。
 pub fn create_bash_tool_with_session_env(cwd: &Path, env: SessionEnvFn) -> Arc<dyn Tool> {
     create_shell_tool(
-        bash_config(),
+        bash_config(OutputLimits::default()),
         cwd,
         ShellSpawnOptions {
             session_env: Some(env),
@@ -80,27 +82,42 @@ pub fn create_bash_tool_with_session_env(cwd: &Path, env: SessionEnvFn) -> Arc<d
 
 /// bash 工厂 + 完整装配选项(T9/T10)。
 pub fn create_bash_tool_with(cwd: &Path, spawn: ShellSpawnOptions) -> Arc<dyn Tool> {
-    create_shell_tool(bash_config(), cwd, spawn)
+    create_shell_tool(bash_config(OutputLimits::default()), cwd, spawn)
+}
+
+/// bash 工厂 + 完整装配选项 + 输出上限注入(装配层统一派生值)。
+pub fn create_bash_tool_with_limits(
+    cwd: &Path,
+    spawn: ShellSpawnOptions,
+    limits: OutputLimits,
+) -> Arc<dyn Tool> {
+    create_shell_tool(bash_config(limits), cwd, spawn)
 }
 
 /// powershell 工厂(全量集,05 文档 §4 powershell)。
 pub fn create_powershell_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_shell_tool(powershell_config(), cwd, ShellSpawnOptions::default())
+    create_shell_tool(
+        powershell_config(OutputLimits::default()),
+        cwd,
+        ShellSpawnOptions::default(),
+    )
 }
 
 /// powershell 工厂 + 完整装配选项(T9/T10,powershell 同理)。
 pub fn create_powershell_tool_with(cwd: &Path, spawn: ShellSpawnOptions) -> Arc<dyn Tool> {
-    create_shell_tool(powershell_config(), cwd, spawn)
+    create_shell_tool(powershell_config(OutputLimits::default()), cwd, spawn)
 }
 
-fn bash_config() -> ShellToolConfig {
+fn bash_config(limits: OutputLimits) -> ShellToolConfig {
     ShellToolConfig {
         name: "bash",
-        description: "Run a shell command and return its combined stdout/stderr. Non-zero exit \
-                      codes return the output plus the exit status as an error. Output is \
-                      truncated to the last 2000 lines or 50KB (whichever is hit first); the \
-                      full output is saved to a temp file referenced in details."
-            .into(),
+        description: format!(
+            "Run a shell command and return its combined stdout/stderr. Non-zero exit \
+             codes return the output plus the exit status as an error. Output is \
+             truncated to the last {DEFAULT_MAX_LINES} lines or {} bytes (whichever is hit \
+             first); the full output is saved to a temp file referenced in details.",
+            limits.effective_max_bytes()
+        ),
         prompt_snippet: Some(
             "bash(command, timeout?): runs a shell command in the working directory; output is \
              truncated (tail kept)"
@@ -108,10 +125,11 @@ fn bash_config() -> ShellToolConfig {
         ),
         program: "sh",
         base_args: &["-c"],
+        limits,
     }
 }
 
-fn powershell_config() -> ShellToolConfig {
+fn powershell_config(limits: OutputLimits) -> ShellToolConfig {
     // Windows 用系统自带 powershell;unix 需要 pwsh(pi 同构)
     #[cfg(windows)]
     let program = "powershell";
@@ -129,6 +147,7 @@ fn powershell_config() -> ShellToolConfig {
         ),
         program,
         base_args: &["-NoProfile", "-Command"],
+        limits,
     }
 }
 
@@ -449,8 +468,8 @@ impl Tool for ShellTool {
         updater.update(format!("$ {effective}")).await;
 
         let accumulator = Arc::new(Mutex::new(OutputAccumulator::new(
-            DEFAULT_MAX_LINES,
-            DEFAULT_MAX_BYTES,
+            self.config.limits.max_lines,
+            self.config.limits.effective_max_bytes(),
         )));
         let code = run(
             self,
@@ -543,7 +562,7 @@ mod tests {
 
     fn bash_at(cwd: &Path) -> Arc<ShellTool> {
         Arc::new(ShellTool {
-            config: bash_config(),
+            config: bash_config(OutputLimits::default()),
             cwd: cwd.to_path_buf(),
             spawn: ShellSpawnOptions::default(),
         })
@@ -551,7 +570,7 @@ mod tests {
 
     fn bash_with(cwd: &Path, spawn: ShellSpawnOptions) -> Arc<ShellTool> {
         Arc::new(ShellTool {
-            config: bash_config(),
+            config: bash_config(OutputLimits::default()),
             cwd: cwd.to_path_buf(),
             spawn,
         })
@@ -691,7 +710,7 @@ mod tests {
             return;
         }
         let tool = ShellTool {
-            config: powershell_config(),
+            config: powershell_config(OutputLimits::default()),
             cwd: std::env::temp_dir(),
             spawn: ShellSpawnOptions::default(),
         };

@@ -15,9 +15,9 @@ use crate::prompts;
 use crate::providers::ProviderContext;
 use crate::router::{self, AttributedSearchResponse};
 use crate::storage::{self, QueryResultData, StoredSearchData, StoredType};
+use crate::config::SearchWorkflow;
 use crate::types::{ExtractedContent, SearchOptions};
 use crate::tools::{names, parse_search_params, WebContext};
-
 const MAX_CONCURRENT_QUERIES: usize = 3;
 
 pub struct WebSearchTool {
@@ -80,7 +80,6 @@ impl Tool for WebSearchTool {
                     ],
                     "description": p::web_search_param_provider()
                 },
-                "workflow": { "type": "string", "enum": ["none", "auto-summary"], "description": p::WEB_SEARCH_PARAM_WORKFLOW },
                 "proxy": { "type": "string", "description": p::WEB_SEARCH_PARAM_PROXY }
             },
             "additionalProperties": false
@@ -207,8 +206,10 @@ impl Tool for WebSearchTool {
         let successful = results.iter().filter(|result| result.error.is_none()).count();
         let total_results: usize = results.iter().map(|result| result.results.len()).sum();
 
-        // auto-summary:摘要替代原始结果(无 responseId 指引,上游语义)
-        if !params.workflow_none {
+        // auto-summary(用户在 web-search.json 配置 workflow = "auto-summary"):
+        // 摘要替代原始结果;头部标注摘要属性,尾部附 searchId 取回指引。
+        // 摘要文本同样走有界管线(LLM 输出可达 ~16k 字符),不超转录预算
+        if self.context.config.workflow() == SearchWorkflow::AutoSummary {
             let summary = crate::summary::generate_summary(
                 &self.context,
                 &results,
@@ -216,8 +217,25 @@ impl Tool for WebSearchTool {
             )
             .await;
             let (text, meta) = summary;
+            let header = "Auto-generated summary of the search results (configured via the `workflow` option in web-search.json).\n\n";
+            let mut tail = format!(
+                "\n\n---\nFull search results are stored as responseId \"{search_id}\". Use {}({{ responseId: \"{search_id}\", queryIndex: 0, offset: 0, limit: {max_inline} }}) to retrieve them.",
+                names::GET_SEARCH_CONTENT
+            );
+            if total > 1 {
+                tail.push_str(&format!(
+                    " Repeat with queryIndex 1 through {} for the other queries.",
+                    total - 1
+                ));
+            }
+            let presentation = crate::bounded::bound_search_presentation(
+                &format!("{header}{text}"),
+                &tail,
+                &tail,
+                max_inline,
+            );
             return Ok(ToolOutput {
-                output: text,
+                output: presentation.text,
                 details: json!({
                     "queries": params.query_list,
                     "queryCount": total,
@@ -226,14 +244,18 @@ impl Tool for WebSearchTool {
                     "includeContent": params.include_content,
                     "fetchId": fetch_id,
                     "searchId": search_id,
-                    "truncated": false,
+                    "truncated": presentation.truncated,
+                    "originalChars": presentation.original_chars,
+                    "returnedChars": presentation.returned_chars,
                     "summary": meta,
                 }),
                 terminate: false,
             });
         }
 
-        // 原始结果组装(index.ts buildSearchReturn 非 curated 路径)
+        // 原始结果组装(index.ts buildSearchReturn 非 curated 路径)。
+        // 预算按 query 均分:每条 query 都有内容幸存,被截的条目附取回提示,
+        // 而非整体截断后在转录中间产生空洞
         let provider_names: Vec<String> = results
             .iter()
             .map(|result| {
@@ -249,6 +271,7 @@ impl Tool for WebSearchTool {
                 }
             })
             .collect();
+        let per_query_budget = max_inline / total.max(1);
         let mut output = if total == 1 {
             prompts::provider_header_single(&provider_names[0])
         } else {
@@ -258,16 +281,28 @@ impl Tool for WebSearchTool {
             if total > 1 {
                 output.push_str(&prompts::query_header(&result.query));
             }
-            if let Some(error) = &result.error {
-                output.push_str(&format!("Error: {error}\n\n"));
+            let section = if let Some(error) = &result.error {
+                format!("Error: {error}\n\n")
             } else {
-                output.push_str(&format!(
+                format!(
                     "{}\n\n",
                     prompts::format_search_summary(&result.results, &result.answer)
+                )
+            };
+            let section_chars = section.chars().count();
+            if section_chars <= per_query_budget {
+                output.push_str(&section);
+            } else {
+                output.push_str(&bound_query_section(
+                    &section,
+                    per_query_budget,
+                    &search_id,
+                    names::GET_SEARCH_CONTENT,
                 ));
             }
         }
         let unbounded = output.trim().to_string();
+        let unbounded = with_all_failed_guidance(&unbounded, successful);
 
         let build_guidance = |for_truncation: bool| -> String {
             let mut value = String::new();
@@ -297,7 +332,12 @@ impl Tool for WebSearchTool {
                     String::new()
                 }
             ));
-            let _ = for_truncation;
+            // 截断场景:模型最需要的是"去哪取全文",指引明确提示已截断
+            if for_truncation {
+                value.push_str(
+                    "\n---\nThe output above was truncated. Use get_search_content with the responseIds above (offset paging or findText) to retrieve the full stored content.",
+                );
+            }
             value
         };
 
@@ -343,6 +383,37 @@ fn providers_of(attributed: &AttributedSearchResponse) -> Vec<String> {
             .collect()
     } else {
         vec![attributed.provider.clone()]
+    }
+}
+
+/// 字符边界安全的前缀截取(多字节安全)。
+fn take_chars(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+/// 单条 query 超预算时的有界切片:截断 + 取回提示,总长不超 budget;
+/// 未超预算时原样返回。
+fn bound_query_section(section: &str, budget: usize, search_id: &str, tool_name: &str) -> String {    let section_chars = section.chars().count();
+    if section_chars <= budget {
+        return section.to_string();
+    }
+    let note = format!(
+        "\n[This query's output was truncated ({section_chars} chars total). Retrieve the full stored results via {tool_name}(responseId \"{search_id}\").]\n\n"
+    );
+    let keep = budget.saturating_sub(note.chars().count());
+    format!("{}{note}", take_chars(section, keep))
+}
+
+/// 全部 query 失败时在末尾追加一次配置指引;部分失败不附,避免
+/// "No search provider available" 与实际成功的 provider 矛盾。
+fn with_all_failed_guidance(output: &str, successful: usize) -> String {
+    if successful == 0 {
+        format!(
+            "{output}\n\n---\n\n{}",
+            crate::router::no_provider_guidance()
+        )
+    } else {
+        output.to_string()
     }
 }
 
@@ -398,4 +469,54 @@ fn web_search_description() -> &'static str {
     use std::sync::LazyLock;
     static DESCRIPTION: LazyLock<String> = LazyLock::new(prompts::web_search_description);
     &DESCRIPTION
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_query_section_passes_through() {
+        let section = "1. Title\n   https://a.com\n\n";
+        let bounded = bound_query_section(section, 500, "search123", "get_search_content");
+        assert_eq!(bounded, section);
+    }
+
+    #[test]
+    fn guidance_appended_only_when_all_queries_failed() {
+        let output = "Auto provider search failed:\n  - duckduckgo: HTTP 202";
+        let all_failed = with_all_failed_guidance(output, 0);
+        assert!(all_failed.contains("No search provider available"));
+        assert_eq!(all_failed.matches("No search provider available").count(), 1);
+
+        let partial = with_all_failed_guidance(output, 2);
+        assert_eq!(partial, output);
+    }
+
+    #[test]
+    fn long_query_section_is_bounded_with_retrieval_note() {
+        let section = format!("{}\n\n", "x".repeat(1_000));
+        let bounded = bound_query_section(&section, 500, "search123", "get_search_content");
+        let chars = bounded.chars().count();
+        assert!(chars <= 500, "切片 + 提示不应超预算: {chars}");
+        assert!(bounded.contains("truncated (1002 chars total)"));
+        assert!(bounded.contains("get_search_content(responseId \"search123\")"));
+    }
+
+    #[test]
+    fn truncation_guidance_differs_from_normal() {
+        // for_truncation 分支必须比未截断指引多出"已截断,去取全文"的提示
+        let max_inline = 1_000;
+        let result = crate::bounded::bound_search_presentation(
+            &"x".repeat(2_000),
+            "normal guidance",
+            "truncated. Use get_search_content to retrieve the full stored content.",
+            max_inline,
+        );
+        assert!(result.truncated);
+        assert!(result.text.ends_with(
+            "truncated. Use get_search_content to retrieve the full stored content."
+        ));
+        assert!(!result.text.contains("normal guidance"));
+    }
 }

@@ -4,6 +4,14 @@
 //! promptSnippet / 各 prompt),意译或改动措辞都会改变 agent 行为。分析文档
 //! 第二部分是移植基准与回归契约 —— 测试断言与实现共享本模块常量。
 //! 仅模板变量处为运行时插值,插值位置本身也是契约。
+//!
+//! 例外清单(为对齐 rpi 实际行为而有意偏离上游原文,测试按 rpi 版本断言):
+//! - web_search:workflow 改为 web-search.json 用户配置,不再对模型暴露,
+//!   描述与参数中的 summary-review / auto-summary 分句已删除;
+//! - fetch_content:rpi 不支持图片/YouTube/GitHub/PDF/本地视频,
+//!   描述如实声明为不支持,避免模型对这类 URL 试错;
+//! - web_search 的 proxy 参数:上游 "Node fetch ignores HTTP(S)_PROXY" 与
+//!   reqwest 实际行为相反,已删除。
 
 use crate::providers::all_providers;
 use crate::providers::provider_label;
@@ -42,11 +50,12 @@ pub const STORED_CONTENT_SOURCES: &str = "web_search, source_check, or fetch_con
 /// get_search_content 的 query 参数描述(searchQueryDescription)。
 pub const SEARCH_QUERY_DESCRIPTION: &str = "Get content for this exact query (must match a query used in the search)";
 
-/// `web_search` 工具 description(index.ts:1832-1857;provider 列表与 all
-/// 策略为运行时插值)。
+/// `web_search` 工具 description(index.ts:1832-1857 的 rpi 修订版;
+/// provider 列表与 all 策略为运行时插值。例外清单:workflow 已改为
+/// web-search.json 用户配置,不再对模型暴露,相关分句删除)。
 pub fn web_search_description() -> String {
     format!(
-        "Search the web with {}. Provider arrays run simultaneously; {}. The default workflow is none: it returns bounded source-linked search results or provider answers without a curator or generated summary, identifies the providers used, and stores full results for retrieval by responseId. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query. When includeContent is true, full page content is fetched in the background. Set workflow to \"summary-review\" to open the curator with an auto-generated summary draft or \"auto-summary\" to generate a summary without the browser curator. The configured provider is used when provider is omitted or set to auto; omit provider unless explicitly overriding it.",
+        "Search the web with {}. Provider arrays run simultaneously; {}. Returns bounded source-linked search results or provider answers, identifies the providers used, and stores full results for retrieval by responseId. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query. When includeContent is true, full page content is fetched in the background. The configured provider is used when provider is omitted or set to auto; omit provider unless explicitly overriding it.",
         allowed_provider_labels().join(", "),
         all_policy_description()
     )
@@ -73,9 +82,10 @@ pub fn web_search_param_provider() -> String {
     )
 }
 
-pub const WEB_SEARCH_PARAM_WORKFLOW: &str = "Search workflow mode: none = no curator (default), summary-review = open curator with auto summary draft, auto-summary = generate summary without opening curator";
+// workflow 参数已移除:搜索工作流由 web-search.json 的 `workflow` 配置决定,
+// 不对模型暴露(见 WebSearchConfig::workflow)。
 
-pub const WEB_SEARCH_PARAM_PROXY: &str = "http(s) or socks proxy URL (e.g. http://host:port or socks5h://host:port) used for every outbound request in this call (search APIs and content fetches). Node fetch ignores HTTP(S)_PROXY env vars, so set this (or `proxy` in web-search.json) when direct access is blocked; empty string forces direct access.";
+pub const WEB_SEARCH_PARAM_PROXY: &str = "http(s) or socks proxy URL (e.g. http://host:port or socks5h://host:port) used for every outbound request in this call (search APIs and content fetches). Omit to use the configured proxy or environment defaults; empty string forces direct access.";
 
 /// `source_check` 工具(index.ts:2431-2447)。
 pub const SOURCE_CHECK_DESCRIPTION: &str = "Gather web sources for a claim and return a bounded machine-readable research artifact with exact passage citations for manual review.";
@@ -103,15 +113,16 @@ pub fn source_check_param_provider() -> String {
 
 pub const SOURCE_CHECK_PARAM_PROXY: &str = "http(s) or socks proxy URL (e.g. http://host:port or socks5h://host:port) used for every outbound request in this call (search APIs and result-page fetches). Empty string forces direct access.";
 
-/// `fetch_content` 工具(index.ts:2530-2572)。
+/// `fetch_content` 工具 description(index.ts:2530-2572 的 rpi 修订版。
+/// 例外清单:rpi 不支持图片/YouTube/GitHub/PDF,描述如实声明以免模型试错)。
 pub fn fetch_content_description() -> String {
     format!(
-        "Fetch URL(s). Available modes: {}. Direct image URLs return resized image content when supported by the selected mode. Supports YouTube transcripts, GitHub repositories, PDFs, and local videos when supported by the selected mode. Full page content and structured results are stored and retrievable by responseId via get_search_content.",
+        "Fetch URL(s). Available modes: {}. HTML and text pages only: PDFs, images, YouTube transcripts, GitHub repositories, and local videos are not supported and will return an error. Full page content and structured results are stored and retrievable by responseId via get_search_content.",
         fetch_mode_description()
     )
 }
 
-pub const FETCH_CONTENT_PROMPT_SNIPPET: &str = "Use to fetch URL content, direct images, GitHub repos, and videos.";
+pub const FETCH_CONTENT_PROMPT_SNIPPET: &str = "Use to fetch URL content as markdown or raw text, or to answer a question from a page.";
 
 pub const FETCH_CONTENT_PARAM_URL: &str = "Single URL to fetch";
 
@@ -157,13 +168,6 @@ pub const GET_SEARCH_CONTENT_PARAM_LIMIT: &str = "Requested maximum stored-conte
 pub const GET_SEARCH_CONTENT_PARAM_FIND_TEXT: &str = "Text or texts to find in the selected stored content. When supplied, offset and limit are ignored.";
 
 pub const GET_SEARCH_CONTENT_PARAM_FIND_MODE: &str = "Matching mode for findText (default: case-insensitive). Requires findText.";
-
-/// `web_access` 工具(tool-activation.ts:53-58)。
-pub const WEB_ACCESS_DESCRIPTION: &str = "Enable configured web-access tools for web research and content retrieval. Does not search or fetch. Enabled tools are available on the next model request; disabled capabilities remain unavailable.";
-
-pub fn web_access_prompt_snippet() -> String {
-    format!("web-access is configured for {capabilities}. Call web_access to activate these tools; use them on the next model request.", capabilities = "web search, source checking, content fetching, stored-result retrieval")
-}
 
 // ---------------------------------------------------------------------------
 // 输出格式化文案(模型可见,index.ts)
@@ -367,6 +371,30 @@ mod tests {
         );
     }
 
+    /// rpi 修订版描述(见文件头例外清单):与 rpi 实际行为对齐的断言。
+    #[test]
+    fn rpi_revised_descriptions_align_with_behavior() {
+        // workflow 已改为用户配置,不对模型暴露
+        let search = web_search_description();
+        assert!(!search.contains("workflow"), "search 描述不得再提 workflow: {search}");
+        assert!(!search.contains("summary-review"));
+        assert!(!search.contains("auto-summary"));
+        // fetch 能力如实声明:不支持清单明确,不再宣称支持
+        let fetch = fetch_content_description();
+        assert!(fetch.contains("are not supported and will return an error"));
+        assert!(!fetch.contains("Supports YouTube transcripts"));
+        assert!(!FETCH_CONTENT_PROMPT_SNIPPET.contains("GitHub"));
+        // proxy 描述不得再含与 reqwest 行为相反的 "Node fetch" 句
+        assert!(!WEB_SEARCH_PARAM_PROXY.contains("Node fetch"));
+        assert!(!SOURCE_CHECK_PARAM_PROXY.contains("Node fetch"));
+        // source_check 降级说明已压缩
+        assert!(crate::source_check::assess_claim("claim", &[serde_json::json!({"passage": 1})])
+            .get("rationale")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .starts_with("Automated assessment unavailable;"));
+    }
+
     /// 页面问答 system prompt(page-query.ts:139,防注入锚点)。
     #[test]
     fn page_query_system_prompt() {
@@ -416,9 +444,6 @@ mod tests {
         );
         assert_eq!(query_header("rust"), "## Query: \"rust\"\n\n");
     }
-
-
-    use super::*;
 
     #[test]
     fn deterministic_summary_lines() {

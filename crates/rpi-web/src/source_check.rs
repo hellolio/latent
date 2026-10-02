@@ -217,7 +217,8 @@ pub fn build_passages(
     passages
 }
 
-/// 自动 assessment:无语义评审能力,明确降级说明(source-check.ts:162-174)。
+/// 自动 assessment:无语义评审能力,明确降级说明(source-check.ts:162-174
+/// 的 rpi 修订版:降级说明压缩为一句,避免每次渲染同一段模板话术)。
 pub fn assess_claim(claim: &str, passages: &[serde_json::Value]) -> serde_json::Value {
     if passages.is_empty() {
         return serde_json::json!({
@@ -234,7 +235,7 @@ pub fn assess_claim(claim: &str, passages: &[serde_json::Value]) -> serde_json::
         "status": "unclear",
         "supporting_passages": [],
         "contradicting_passages": [],
-        "rationale": "Passages were retrieved, but automated semantic support or contradiction assessment is unavailable; review the cited passages manually.",
+        "rationale": "Automated assessment unavailable; review the cited passages manually.",
         "confidence": 0.3,
     })
 }

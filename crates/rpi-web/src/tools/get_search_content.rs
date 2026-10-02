@@ -225,8 +225,9 @@ impl Tool for GetSearchContentTool {
                         ),
                     ));
                 };
-                let serialized = serde_json::to_string_pretty(&artifact)
-                    .unwrap_or_else(|_| "{}".to_string());
+                // artifact 是给模型读的数据:紧凑 JSON(键已语义化,
+                // pretty 缩进只多耗 ~20-30% token)
+                let serialized = serde_json::to_string(&artifact).unwrap_or_else(|_| "{}".to_string());
                 if let Some(texts) = &find_text {
                     let found = find_content(&serialized, texts, find_mode);
                     return Ok(ToolOutput {
@@ -332,6 +333,10 @@ impl Tool for GetSearchContentTool {
                             ));
                         }
                     }
+                } else if queries.len() == 1 {
+                    // 单 query 免选:唯一条目默认取 index 0,省一次必错往返
+                    let index = 0;
+                    (&queries[index], index)
                 } else {
                     let available = queries
                         .iter()
@@ -660,14 +665,6 @@ mod tests {
             .as_millis() as u64
     }
 
-    struct NullActivator;
-    #[async_trait::async_trait]
-    impl crate::tools::ToolSetActivator for NullActivator {
-        async fn activate(&self, _names: &[String]) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
     fn context() -> Arc<WebContext> {
         Arc::new(WebContext {
             config: crate::config::WebSearchConfig::default(),
@@ -677,8 +674,8 @@ mod tests {
                 resolve_model: Arc::new(|spec| Ok(rpi_ai::Model::minimal(spec, "mock", "mock"))),
                 current_model: Arc::new(|| None),
             },
-            activator: Some(Arc::new(NullActivator)),
             notifier: None,
+            tool_result_max_chars: 0,
             cwd: std::env::temp_dir(),
         })
     }
@@ -769,16 +766,22 @@ mod tests {
     #[tokio::test]
     async fn query_lookup_errors_are_self_correcting() {
         let tool = GetSearchContentTool::new(context());
-        let id = store_search(vec![sample_query()]);
-        // 未指定 query
-        let error = call(&tool, serde_json::json!({ "responseId": id.clone() }))
+        // 单 query 免选:未指定 query 默认取 index 0
+        let single_id = store_search(vec![sample_query()]);
+        let output = call(&tool, serde_json::json!({ "responseId": single_id.clone() }))
+            .await
+            .expect("single query defaults to index 0");
+        assert!(output.output.contains("Results for"));
+        // 多 query 未指定:报错并列出可用 query(可自纠)
+        let multi_id = store_search(vec![sample_query(), sample_query()]);
+        let error = call(&tool, serde_json::json!({ "responseId": multi_id }))
             .await
             .expect_err("no query specified");
         assert!(error.to_string().contains("Specify query or queryIndex"));
         // 未命中的 query
         let error = call(
             &tool,
-            serde_json::json!({ "responseId": id, "query": "missing" }),
+            serde_json::json!({ "responseId": single_id, "query": "missing" }),
         )
         .await
         .expect_err("query not found");

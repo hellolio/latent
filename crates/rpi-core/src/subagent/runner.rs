@@ -292,8 +292,10 @@ enum GuardReason {
     Timeout,
 }
 
-/// 输出截断上限(同步结果;对齐工具双限的 50KB)。
-pub const MAX_OUTPUT_CHARS: usize = 50_000;
+/// 输出截断上限(同步结果;与工具自我输出上限同源派生 = agent 转录裁剪
+/// 上限 - 2k 余量,避免结果注入父转录后被 agent 层头尾裁剪挖洞)。
+pub const MAX_OUTPUT_CHARS: usize =
+    rpi_agent::tool_self_output_limit(rpi_agent::DEFAULT_TOOL_RESULT_MAX_CHARS);
 
 pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {

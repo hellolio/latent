@@ -211,13 +211,142 @@ pub fn resolve_redirect_target(current: &str, location: &str) -> Result<String, 
     Ok(format!("{scheme}://{authority}{dir}{location}"))
 }
 
-/// provider 错误文案(与上游一致:`"{label} ... error {status}: {body 前 300 字符}"`)。
+/// provider 错误文案(与上游一致:`"{label} ... error {status}: {body 摘要}"`)。
+/// body 是 HTML 页面时(反爬拦截页等)先做噪声清理:`{status} 前缀保留原样,
+/// 错误分类正则依赖它。
 pub fn http_error_message(label: &str, status: u16, body: &str) -> String {
-    let mut snippet: String = body.chars().take(300).collect();
-    if body.chars().count() > 300 {
-        snippet.push_str("...");
+    format!("{label} search error {status}: {}", clean_error_body(body, ERROR_BODY_CAP))
+}
+
+const ERROR_BODY_CAP: usize = 300;
+
+/// 错误 body 摘要:非 HTML 原样截断;HTML 页面提取 `<title>`(反爬页唯一
+/// 有信息量的部分),无 title 再做剥标签兜底;清理后为空则不附 body。
+pub fn clean_error_body(body: &str, cap: usize) -> String {
+    let trimmed = body.trim();
+    if !looks_like_html(trimmed) {
+        return char_truncate(trimmed, cap);
     }
-    format!("{label} search error {status}: {snippet}")
+    if let Some(title) = html_title(trimmed) {
+        return format!("HTML error page: \"{title}\"");
+    }
+    let text = collapse_whitespace(&decode_entities(&strip_tags(&strip_html_blocks(
+        trimmed,
+    ))));
+    let text = text.trim();
+    if text.is_empty() {
+        String::new()
+    } else {
+        char_truncate(text, cap)
+    }
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let head = &body[..body.len().min(512)].to_lowercase();
+    ["<!doctype", "<html", "<head", "<body"]
+        .iter()
+        .any(|marker| head.starts_with(marker) || head.contains(marker))
+}
+
+/// 首个 `<title>` 文本,解码实体并压空白;超长截断。
+fn html_title(body: &str) -> Option<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap());
+    re.captures(body)
+        .and_then(|captures| captures.get(1))
+        .map(|title| {
+            let text = collapse_whitespace(&decode_entities(title.as_str()));
+            char_truncate(text.trim(), 120)
+        })
+        .filter(|title| !title.is_empty())
+}
+
+/// 整块删除 script/style/注释(标签内文本不属于错误信息)。
+fn strip_html_blocks(body: &str) -> String {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?is)<script\b.*?</script>|<style\b.*?</style>|<!--.*?-->").unwrap()
+    });
+    re.replace_all(body, " ").into_owned()
+}
+
+/// 逐字符剥标签:引号内的 `>` 不结束标签(属性值里可能含 `>`)。
+fn strip_tags(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != '<' {
+            out.push(c);
+            continue;
+        }
+        let mut quote: Option<char> = None;
+        for c in chars.by_ref() {
+            match quote {
+                Some(q) if c == q => quote = None,
+                None if c == '"' || c == '\'' => quote = Some(c),
+                None if c == '>' => break,
+                _ => {}
+            }
+        }
+        out.push(' ');
+    }
+    out
+}
+
+fn decode_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(pos) = rest.find('&') {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        let Some(semicolon) = tail.find(';') else {
+            out.push('&');
+            rest = &tail[1..];
+            continue;
+        };
+        let entity = &tail[1..semicolon];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some(' '),
+            digits if digits.starts_with("#x") || digits.starts_with("#X") => {
+                u32::from_str_radix(&digits[2..], 16).ok().and_then(char::from_u32)
+            }
+            digits if digits.starts_with('#') => {
+                digits[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &tail[semicolon + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn collapse_whitespace(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn char_truncate(input: &str, cap: usize) -> String {
+    if input.chars().count() > cap {
+        let mut snippet: String = input.chars().take(cap).collect();
+        snippet.push_str("...");
+        snippet
+    } else {
+        input.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -251,5 +380,46 @@ mod tests {
             "https://a.com:443/y"
         ));
         assert!(!same_origin("https://a.com", "http://a.com"));
+    }
+
+    #[test]
+    fn plain_body_passes_through() {
+        assert_eq!(
+            clean_error_body("rate limited", 300),
+            "rate limited"
+        );
+        let long = "a".repeat(400);
+        assert_eq!(clean_error_body(&long, 300), format!("{}...", "a".repeat(300)));
+    }
+
+    #[test]
+    fn html_body_uses_title() {
+        let body = "<!DOCTYPE HTML>\n<html><head><title>Attention Required! | Cloudflare</title></head><body>lots of noise</body></html>";
+        assert_eq!(
+            clean_error_body(body, 300),
+            "HTML error page: \"Attention Required! | Cloudflare\""
+        );
+    }
+
+    #[test]
+    fn html_without_title_strips_tags() {
+        let body = "<html><body><h1>Blocked</h1><p>You are being &amp;#160;filtered</p><script>evil()</script></body></html>";
+        assert_eq!(
+            clean_error_body(body, 300),
+            "Blocked You are being &#160;filtered"
+        );
+    }
+
+    #[test]
+    fn numeric_entities_decode() {
+        assert_eq!(decode_entities("&#65;&#x42;&quot;"), "AB\"");
+    }
+
+    #[test]
+    fn strip_tags_respects_quoted_gt() {
+        assert_eq!(
+            strip_tags("<a title=\"a > b\" href=/x>t</a>"),
+            " t "
+        );
     }
 }

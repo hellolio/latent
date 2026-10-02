@@ -657,7 +657,7 @@ pub struct CompactionOutcome {
 /// leaf→root)做切点 → 序列化 → Summarizer 调用 → 产出可 append 的 Compaction
 /// 数据。无有效切点/无可摘要内容时返回 None。
 ///
-/// 取舍(见 docs/06 踩坑记录):分割 turn 时不做 history/prefix 两次请求,
+/// 取舍:分割 turn 时不做 history/prefix 两次请求,
 /// 单请求覆盖全范围,turn_start_index 经 `CompactionOutcome` 的 details 之外
 /// 由调用方按需从 entries 推导。
 pub async fn run_compaction(

@@ -159,9 +159,10 @@ fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
             ),
         );
         // 命中率 = cache_read / (input + cache_read + cache_write)
-        // (prompt 全量;input 为未缓存部分)。只要有用量就显示,0% 也显示。
+        // (prompt 全量;input 为未缓存部分),四舍五入到整数百分比。
+        // 只要有用量就显示,0% 也显示。
         let prompt_total = data.input_tokens + data.cache_read + data.cache_write;
-        if let Some(hit) = (data.cache_read * 100).checked_div(prompt_total) {
+        if let Some(hit) = (data.cache_read * 100 + prompt_total / 2).checked_div(prompt_total) {
             push(
                 &mut spans,
                 &mut sep,

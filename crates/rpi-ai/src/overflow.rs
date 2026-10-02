@@ -86,7 +86,10 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
     // Case 2: 静默溢出(z.ai 式)——成功返回但 usage 超过窗口
     if let Some(window) = context_window {
         if message.stop_reason == StopReason::Stop {
-            let input_tokens = message.usage.input + message.usage.cache_read;
+            // prompt 全量 = input + cache_read + cache_write(cache_write 计入
+            // 窗口,与 compaction/usage 的上下文估算同口径)
+            let input_tokens =
+                message.usage.input + message.usage.cache_read + message.usage.cache_write;
             if input_tokens > window {
                 return true;
             }
@@ -94,7 +97,8 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
 
         // Case 3: length + 0 输出(小米式)——服务端把超长输入截到窗口,没有生成空间
         if message.stop_reason == StopReason::Length && message.usage.output == 0 {
-            let input_tokens = message.usage.input + message.usage.cache_read;
+            let input_tokens =
+                message.usage.input + message.usage.cache_read + message.usage.cache_write;
             if input_tokens as f64 >= window as f64 * 0.99 {
                 return true;
             }

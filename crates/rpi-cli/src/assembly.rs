@@ -665,31 +665,6 @@ impl rpi_tools::ShellSpawnHook for ChainedSpawnHook {
     }
 }
 
-/// web_access 桥:把工具加入当前激活集(rpi_web::ToolSetActivator 的
-/// rpi-core 实现;set_active_tools_by_name 落 tool_set_change entry)。
-struct SessionToolSetActivator {
-    session: Arc<Mutex<Weak<AgentSession>>>,
-}
-
-#[async_trait]
-impl rpi_web::ToolSetActivator for SessionToolSetActivator {
-    async fn activate(&self, names: &[String]) -> Result<(), String> {
-        let Some(session) = self.session.lock().unwrap().upgrade() else {
-            return Err("No active session to enable web tools in".to_string());
-        };
-        let mut merged = session.active_tool_names();
-        for name in names {
-            if !merged.iter().any(|existing| existing == name) {
-                merged.push(name.to_string());
-            }
-        }
-        session
-            .set_active_tools_by_name(&merged)
-            .await
-            .map_err(|error| error.to_string())
-    }
-}
-
 /// includeContent 后台抓取完成通知:仿 subagent supervisor 的
 /// wait_idle → follow_up → continue_run 唤醒链。
 struct AgentFollowUpNotifier {
@@ -877,7 +852,20 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     };
 
     // 内置工具 + 扩展注册工具(McpTool,名字带扩展前缀)
-    let mut tools = rpi_tools::create_tools_at_with_shell(&cwd, shell)
+    // 工具输出自我上限与 agent 转录裁剪同源派生(settings `toolResultMaxChars`,
+    // None = 默认 20k,Some(0) = 关闭裁剪 → 工具回退自身默认;派生 = 上限 - 2k
+    // 余量,见 rpi_agent::tool_self_output_limit)
+    let agent_tool_result_max_chars =
+        tool_result_max_chars.unwrap_or(rpi_agent::DEFAULT_TOOL_RESULT_MAX_CHARS);
+    let tool_output_limits = if agent_tool_result_max_chars == 0 {
+        rpi_tools::OutputLimits::default()
+    } else {
+        rpi_tools::OutputLimits {
+            max_chars: rpi_agent::tool_self_output_limit(agent_tool_result_max_chars),
+            ..Default::default()
+        }
+    };
+    let mut tools = rpi_tools::create_tools_at_with_shell_and_limits(&cwd, shell, tool_output_limits)
         .all()
         .to_vec();
     tools.extend(extension_tools);
@@ -890,9 +878,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         Some(retry_hooks),
     );
 
-    // 进程内 web 扩展(rpi-web,16 文档):搜索/抓取/检索/取证/激活五工具,
-    // 懒激活(默认只激活 web_access,其余经 web_access 拉入激活集)。配置
-    // ~/.rpi/web-search.json + 项目 .rpi/web-search.json;零配置可用
+    // 进程内 web 扩展(rpi-web,16 文档):搜索/抓取/检索/取证四工具,
+    // 随会话常驻激活(tools 数组从首请求起恒定,保 prompt 缓存前缀)。
+    // 配置 ~/.rpi/web-search.json + 项目 .rpi/web-search.json;零配置可用
     // (auto 链兜底 duckduckgo)。rpi-core 能力经 trait 注入,保持 rpi-web
     // 不依赖 rpi-core
     let web_home = dirs_home();
@@ -913,18 +901,15 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             agent.state_snapshot().model
         }),
     };
-    let web_session_cell: Arc<Mutex<Weak<AgentSession>>> = Arc::new(Mutex::new(Weak::new()));
     let web_cache_limits = web_config.cache_limits.unwrap_or_default();
     let web_context = Arc::new(rpi_web::tools::WebContext {
         config: web_config,
         cache_limits: web_cache_limits,
         llm: web_llm,
-        activator: Some(Arc::new(SessionToolSetActivator {
-            session: web_session_cell.clone(),
-        })),
         notifier: Some(Arc::new(AgentFollowUpNotifier {
             agent: web_agent_cell.clone(),
         })),
+        tool_result_max_chars: agent_tool_result_max_chars,
         cwd: cwd.clone(),
     });
     tools.extend(rpi_web::tools::create_web_tools(web_context));
@@ -961,7 +946,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         Arc::new(move |spec: &str| subagent_resolver.resolve(spec));
     let factory_resolve_model: Arc<dyn Fn(&str) -> Result<rpi_ai::Model, String> + Send + Sync> =
         Arc::new(move |spec: &str| factory_resolver.resolve(spec));
-    let read_only_tool_set = rpi_tools::read_only_tools(&cwd);
+    let read_only_tool_set = rpi_tools::read_only_tools_with_limits(&cwd, tool_output_limits);
     // 子会话落盘工厂:与主会话同一套 rpi-session 机制(消息/usage/快照 entry
     // 完全一致),文件名 `<项目前缀>__<tag>__<id>.jsonl`(tag = run id / agent 名);
     // 纯内存会话不落盘。contextSnapshot 开启时子会话同样记录真实上下文
@@ -1035,25 +1020,10 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 激活工具集:会话内切换过(ToolSetChange entry)则按记录恢复并校验;
     // 否则用调用方显式传入(main 从 settings `tools` 解析),未传 = 全部;
     // 配置了未知工具名直接报错(配置错误要显式暴露)
-    // web 工具(rpi-web)懒激活:未显式配置激活集时,web 工具在候选池但
-    // 默认只激活 web_access;**显式配置(settings `tools`)= 精确集合,
-    // 完全尊重** —— 需要 web 的用户把 `web_access`(或具体工具名)加进列表
-    let has_web_access = tools
-        .iter()
-        .any(|tool| tool.name() == rpi_web::tools::names::WEB_ACCESS);
+    // web 工具(rpi-web)随会话常驻激活,tools 数组从首请求起恒定(保缓存)
     let active_tool_names = match (&seed_active_tools, &active_tools) {
         (Some(names), _) | (None, Some(names)) => {
             Some(resolve_active_tools(names, &tools)?)
-        }
-        (None, None) if has_web_access => {
-            let activatable = rpi_web::tools::names::ACTIVATABLE;
-            Some(
-                tools
-                    .iter()
-                    .map(|tool| tool.name().to_string())
-                    .filter(|name| !activatable.contains(&name.as_str()))
-                    .collect(),
-            )
         }
         (None, None) => None,
     };
@@ -1116,8 +1086,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // subagent:回填父会话弱引(模型继承 + supervisor 唤醒),启动空闲唤醒任务
     *subagent_parent_cell.lock().unwrap() = Arc::downgrade(session.agent());
     subagent_tool.spawn_supervisor();
-    // web 扩展:回填会话/agent 弱引(激活桥 + 后台完成通知 + 当前主模型)
-    *web_session_cell.lock().unwrap() = Arc::downgrade(&session);
+    // web 扩展:回填 agent 弱引(后台完成通知 + 当前主模型)
     *web_agent_cell.lock().unwrap() = Arc::downgrade(session.agent());
 
     // 装配期诊断(编译期扩展 init 失败跳过等)

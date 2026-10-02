@@ -13,18 +13,35 @@ use tokio_util::sync::CancellationToken;
 
 use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
-use crate::truncate::{truncate_head, truncate_line, DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH};
+use crate::truncate::{
+    truncate_head, truncate_line, OutputLimits, GREP_MAX_LINE_LENGTH,
+};
 
 const DEFAULT_LIMIT: usize = 100;
 
 pub struct GrepTool {
     cwd: PathBuf,
+    limits: OutputLimits,
+    description: String,
 }
 
 /// 工厂。
 pub fn create_grep_tool(cwd: &Path) -> Arc<dyn Tool> {
+    create_grep_tool_with_limits(cwd, OutputLimits::default())
+}
+
+/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)。
+pub fn create_grep_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn Tool> {
+    let description = format!(
+        "Search file contents for a pattern. Returns matching lines with file paths and line \
+         numbers. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} matches or {} \
+         bytes (whichever is hit first). Long lines are truncated to {GREP_MAX_LINE_LENGTH} chars.",
+        limits.effective_max_bytes()
+    );
     Arc::new(GrepTool {
         cwd: cwd.to_path_buf(),
+        limits,
+        description,
     })
 }
 
@@ -138,9 +155,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents for a pattern. Returns matching lines with file paths and line \
-         numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is \
-         hit first). Long lines are truncated to 500 chars."
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -272,7 +287,7 @@ impl Tool for GrepTool {
 
         // 匹配数已被 limit 封顶,这里只剩字节限(pi 的 truncateHead 无行数限)
         let raw = output_lines.join("\n");
-        let truncation = truncate_head(&raw, usize::MAX, DEFAULT_MAX_BYTES);
+        let truncation = truncate_head(&raw, usize::MAX, self.limits.effective_max_bytes());
         let mut output = truncation.content.clone();
         let mut notices: Vec<String> = Vec::new();
         let mut details = serde_json::Map::new();
@@ -284,7 +299,7 @@ impl Tool for GrepTool {
             details.insert("matchLimitReached".into(), json!(limit));
         }
         if truncation.truncated {
-            notices.push(format!("{}KB limit reached", DEFAULT_MAX_BYTES / 1024));
+            notices.push(format!("{} bytes limit reached", self.limits.effective_max_bytes()));
             details.insert(
                 "truncation".into(),
                 serde_json::to_value(&truncation).unwrap_or_default(),
@@ -308,6 +323,16 @@ impl Tool for GrepTool {
             },
             terminate: false,
         })
+    }
+}
+
+
+#[cfg(test)]
+fn test_tool(cwd: PathBuf) -> GrepTool {
+    GrepTool {
+        cwd,
+        limits: OutputLimits::default(),
+        description: String::new(),
     }
 }
 
@@ -359,7 +384,7 @@ mod tests {
     #[tokio::test]
     async fn finds_matches_with_paths_and_respects_gitignore() {
         let dir = fixture().await;
-        let tool = GrepTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let output = exec(&tool, json!({"pattern": "alpha"})).await.unwrap();
         assert!(
             output.output.contains("src/a.ts:1: let alpha = 1;"),
@@ -378,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn glob_filter_and_literal_and_case() {
         let dir = fixture().await;
-        let tool = GrepTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         // glob 过滤:只搜 .ts
         let output = exec(&tool, json!({"pattern": "alpha", "glob": "*.ts"}))
             .await
@@ -405,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn context_lines_and_match_limit() {
         let dir = fixture().await;
-        let tool = GrepTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let output = exec(&tool, json!({"pattern": "beta", "context": 1}))
             .await
             .unwrap();
@@ -423,7 +448,7 @@ mod tests {
     #[tokio::test]
     async fn long_line_truncated_and_no_match_message() {
         let dir = fixture().await;
-        let tool = GrepTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let long = format!("hit {}", "x".repeat(2000));
         tokio::fs::write(dir.join("long.txt"), long).await.unwrap();
         let output = exec(&tool, json!({"pattern": "hit"})).await.unwrap();
@@ -439,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn missing_path_is_error_and_single_file_search() {
         let dir = fixture().await;
-        let tool = GrepTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let err = exec(&tool, json!({"pattern": "x", "path": "missing-dir"}))
             .await
             .unwrap_err();
@@ -458,7 +483,7 @@ mod tests {
         tokio::fs::write(dir.join("c.txt"), "\u{1b}[32malpha\u{1b}[0m here\n")
             .await
             .unwrap();
-        let tool = GrepTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let output = exec(&tool, json!({"pattern": "alpha", "path": "c.txt"}))
             .await
             .unwrap();
@@ -470,3 +495,4 @@ mod tests {
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }
+

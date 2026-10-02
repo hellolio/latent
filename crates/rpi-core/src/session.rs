@@ -601,7 +601,7 @@ impl AgentSession {
         Ok(())
     }
 
-    /// 当前激活工具名快照(web_access 桥:在现有集合上追加,而非整体替换)。
+    /// 当前激活工具名快照(settings `tools` / resume 恢复用)。
     pub fn active_tool_names(&self) -> Vec<String> {
         self.runtime.lock().unwrap().active_tool_names.clone()
     }

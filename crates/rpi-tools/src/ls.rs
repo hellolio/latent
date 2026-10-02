@@ -9,18 +9,33 @@ use tokio_util::sync::CancellationToken;
 
 use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
-use crate::truncate::{truncate_head, DEFAULT_MAX_BYTES};
+use crate::truncate::{truncate_head, OutputLimits};
 
 const DEFAULT_LIMIT: usize = 500;
 
 pub struct LsTool {
     cwd: PathBuf,
+    limits: OutputLimits,
+    description: String,
 }
 
 /// 工厂。
 pub fn create_ls_tool(cwd: &Path) -> Arc<dyn Tool> {
+    create_ls_tool_with_limits(cwd, OutputLimits::default())
+}
+
+/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)。
+pub fn create_ls_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn Tool> {
+    let description = format!(
+        "List directory contents. Returns entries sorted alphabetically, with '/' suffix for \
+         directories. Includes dotfiles. Output is truncated to {DEFAULT_LIMIT} entries or {} \
+         bytes (whichever is hit first).",
+        limits.effective_max_bytes()
+    );
     Arc::new(LsTool {
         cwd: cwd.to_path_buf(),
+        limits,
+        description,
     })
 }
 
@@ -44,9 +59,7 @@ impl Tool for LsTool {
     }
 
     fn description(&self) -> &str {
-        "List directory contents. Returns entries sorted alphabetically, with '/' suffix for \
-         directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever \
-         is hit first)."
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -120,7 +133,7 @@ impl Tool for LsTool {
 
         let raw = results.join("\n");
         // 条目数已被 limit 封顶,这里只剩字节限
-        let truncation = truncate_head(&raw, usize::MAX, DEFAULT_MAX_BYTES);
+        let truncation = truncate_head(&raw, usize::MAX, self.limits.effective_max_bytes());
         let mut output = truncation.content.clone();
         let mut notices: Vec<String> = Vec::new();
         let mut details = serde_json::Map::new();
@@ -132,7 +145,7 @@ impl Tool for LsTool {
             details.insert("entryLimitReached".into(), json!(limit));
         }
         if truncation.truncated {
-            notices.push(format!("{}KB limit reached", DEFAULT_MAX_BYTES / 1024));
+            notices.push(format!("{} bytes limit reached", self.limits.effective_max_bytes()));
             details.insert(
                 "truncation".into(),
                 serde_json::to_value(&truncation).unwrap_or_default(),
@@ -150,6 +163,16 @@ impl Tool for LsTool {
             },
             terminate: false,
         })
+    }
+}
+
+
+#[cfg(test)]
+fn test_tool(cwd: PathBuf) -> LsTool {
+    LsTool {
+        cwd,
+        limits: OutputLimits::default(),
+        description: String::new(),
     }
 }
 
@@ -183,7 +206,7 @@ mod tests {
         for p in [".hidden", "Zebra.txt", "apple.txt", "sub/inner.txt"] {
             tokio::fs::write(dir.join(p), "x").await.unwrap();
         }
-        let tool = LsTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let output = exec(&tool, json!({})).await.unwrap();
         let lines: Vec<&str> = output.output.lines().collect();
         assert_eq!(lines, vec![".hidden", "apple.txt", "sub/", "Zebra.txt"]);
@@ -194,7 +217,7 @@ mod tests {
     async fn empty_directory_and_limit() {
         let dir = std::env::temp_dir().join(format!("rpi-ls-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        let tool = LsTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let output = exec(&tool, json!({})).await.unwrap();
         assert_eq!(output.output, "(empty directory)");
 
@@ -214,7 +237,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rpi-ls-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("f.txt"), "x").await.unwrap();
-        let tool = LsTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let err = exec(&tool, json!({"path": "missing"})).await.unwrap_err();
         assert!(err.to_string().contains("Path not found"));
         let err = exec(&tool, json!({"path": "f.txt"})).await.unwrap_err();
@@ -222,3 +245,4 @@ mod tests {
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }
+

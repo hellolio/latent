@@ -15,15 +15,6 @@ impl rpi_agent::ToolUpdater for NoopUpdater {
     async fn update(&self, _partial: String) {}
 }
 
-struct NullActivator;
-
-#[async_trait::async_trait]
-impl rpi_web::ToolSetActivator for NullActivator {
-    async fn activate(&self, _names: &[String]) -> Result<(), String> {
-        Ok(())
-    }
-}
-
 fn context() -> Arc<WebContext> {
     Arc::new(WebContext {
         config: rpi_web::config::load_web_search_config(None, None),
@@ -33,8 +24,8 @@ fn context() -> Arc<WebContext> {
             resolve_model: Arc::new(|spec| Ok(rpi_ai::Model::minimal(spec, "mock", "mock"))),
             current_model: Arc::new(|| None),
         },
-        activator: Some(Arc::new(NullActivator)),
         notifier: None,
+        tool_result_max_chars: 0,
         cwd: std::env::current_dir().unwrap(),
     })
 }

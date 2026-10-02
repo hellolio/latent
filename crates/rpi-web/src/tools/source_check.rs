@@ -265,8 +265,15 @@ impl Tool for SourceCheckTool {
             },
         );
 
+        // 全部 query 失败:追加一次配置指引(部分失败时不附)
+        let mut output = prompts::format_source_check_result(&result);
+        if total > 0 && errors.len() == total {
+            output.push_str("\n\n---\n");
+            output.push_str(&router::no_provider_guidance());
+        }
+
         Ok(ToolOutput {
-            output: prompts::format_source_check_result(&result),
+            output,
             details: json!({
                 "responseId": artifact_id,
                 "claim": claim,

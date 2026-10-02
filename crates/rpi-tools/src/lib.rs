@@ -2,7 +2,9 @@
 //! read/grep/find/ls,全量集含 powershell(8 工具)。
 //!
 //! 只依赖 rpi-agent 的 `Tool` trait(方针文档 §1);装配经 `create_default_tools()`
-//! 等工厂,本 crate 整体可拆卸。全部工具遵守统一双限截断(2000 行 / 50KB,05 文档 §2)。
+//! 等工厂,本 crate 整体可拆卸。全部输出型工具经 `OutputLimits` 注入输出上限
+//! (默认派生自 agent 转录裁剪上限 - 2k 余量,见 truncate 模块);*_with_limits
+//! 工厂由装配层接线,无参工厂使用默认派生值。
 
 mod bash;
 mod edit;
@@ -19,12 +21,16 @@ mod write;
 // T9/T10:shell 工具的会话环境/前缀/钩子工厂经 crate 根出厂(其余工具经
 // default_tools/all_tools 注册表工厂装配)
 pub use bash::{
-    create_bash_tool_with_session_env, create_powershell_tool_with, SessionEnvFn, ShellSpawnHook,
-    ShellSpawnOptions,
+    create_bash_tool_with, create_bash_tool_with_limits, create_bash_tool_with_session_env,
+    create_powershell_tool_with, SessionEnvFn, ShellSpawnHook, ShellSpawnOptions,
 };
+pub use read::create_read_tool_with_limits;
+pub use find::create_find_tool_with_limits;
+pub use grep::create_grep_tool_with_limits;
+pub use ls::create_ls_tool_with_limits;
 pub use sanitize::{sanitize_control_chars, sanitize_output, strip_ansi};
 pub use truncate::{
-    truncate_head, truncate_line, truncate_tail, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES,
+    truncate_head, truncate_line, truncate_tail, OutputLimits, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES,
     GREP_MAX_LINE_LENGTH,
 };
 
@@ -70,8 +76,17 @@ pub fn create_tools_at(cwd: &Path) -> ToolRegistry {
 
 /// 工厂:默认工具集 + shell 装配选项(T9/T10,cli 装配点使用)。
 pub fn create_tools_at_with_shell(cwd: &Path, shell: bash::ShellSpawnOptions) -> ToolRegistry {
+    create_tools_at_with_shell_and_limits(cwd, shell, OutputLimits::default())
+}
+
+/// 工厂:默认工具集 + shell 装配选项 + 输出上限注入(装配层统一派生值)。
+pub fn create_tools_at_with_shell_and_limits(
+    cwd: &Path,
+    shell: bash::ShellSpawnOptions,
+    limits: OutputLimits,
+) -> ToolRegistry {
     let mut registry = ToolRegistry::default();
-    for tool in default_tools_with_shell(cwd, shell) {
+    for tool in default_tools_with_shell_and_limits(cwd, shell, limits) {
         registry.register(tool);
     }
     registry
@@ -87,11 +102,15 @@ pub fn default_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
     ]
 }
 
-/// 默认工具列表 + shell 装配选项(T9 会话环境注入 / T10 前缀与改写钩子)。
-pub fn default_tools_with_shell(cwd: &Path, shell: bash::ShellSpawnOptions) -> Vec<Arc<dyn Tool>> {
+/// 默认工具列表 + shell 装配选项 + 输出上限注入(装配层统一派生值)。
+pub fn default_tools_with_shell_and_limits(
+    cwd: &Path,
+    shell: bash::ShellSpawnOptions,
+    limits: OutputLimits,
+) -> Vec<Arc<dyn Tool>> {
     vec![
-        read::create_read_tool(cwd),
-        bash::create_bash_tool_with(cwd, shell),
+        read::create_read_tool_with_limits(cwd, limits),
+        bash::create_bash_tool_with_limits(cwd, shell, limits),
         edit::create_edit_tool(cwd),
         write::create_write_tool(cwd),
     ]
@@ -107,17 +126,28 @@ pub fn read_only_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
     ]
 }
 
-/// 全量工具列表(8 工具,pi 的 createAllTools)。
-pub fn all_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
+/// 只读工具列表 + 输出上限注入(装配层统一派生值)。
+pub fn read_only_tools_with_limits(cwd: &Path, limits: OutputLimits) -> Vec<Arc<dyn Tool>> {
     vec![
-        read::create_read_tool(cwd),
+        read::create_read_tool_with_limits(cwd, limits),
+        grep::create_grep_tool_with_limits(cwd, limits),
+        find::create_find_tool_with_limits(cwd, limits),
+        ls::create_ls_tool_with_limits(cwd, limits),
+    ]
+}
+
+/// 全量工具列表(8 工具,pi 的 createAllTools)+ 输出上限注入(装配层统一派生值)。
+pub fn all_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
+    let limits = OutputLimits::default();
+    vec![
+        read::create_read_tool_with_limits(cwd, limits),
         bash::create_bash_tool(cwd),
         powershell::create_powershell_tool(cwd),
         edit::create_edit_tool(cwd),
         write::create_write_tool(cwd),
-        grep::create_grep_tool(cwd),
-        find::create_find_tool(cwd),
-        ls::create_ls_tool(cwd),
+        grep::create_grep_tool_with_limits(cwd, limits),
+        find::create_find_tool_with_limits(cwd, limits),
+        ls::create_ls_tool_with_limits(cwd, limits),
     ]
 }
 

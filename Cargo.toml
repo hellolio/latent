@@ -18,7 +18,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-# 内部 crate —— 依赖方向见 docs/10-implementation-policy.md §1,禁止反向/同层依赖
+# 内部 crate —— 依赖方向见 AGENTS.md,禁止反向/同层依赖
 rpi-ai = { path = "crates/rpi-ai" }
 rpi-agent = { path = "crates/rpi-agent" }
 rpi-session = { path = "crates/rpi-session" }

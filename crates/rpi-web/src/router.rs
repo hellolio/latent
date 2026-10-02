@@ -1,7 +1,8 @@
 //! 路由/fallback 总入口(gemini-search.ts search() 的移植):
 //! 数组扇出 / all / 显式单家 / auto(配置路由 → 硬编码链)。
 //! auto 链的原则:每层缺失只跳过、不报错;全失败时聚合各 provider
-//! 错误 + 完整配置指引抛出(分析文档 §2/§3)。
+//! 错误(行规整后)抛出;配置指引 `no_provider_guidance` 由工具层在
+//! "全部 query 失败"时追加一次(分析文档 §2/§3)。
 
 use tokio_util::sync::CancellationToken;
 
@@ -187,7 +188,7 @@ async fn search_with_providers(
     if successes.is_empty() {
         let sections = failures
             .iter()
-            .map(|failure| format!("{}: {}", provider_label(&failure.provider), failure.error))
+            .map(|failure| compact_error_text(&failure.provider, &failure.error))
             .collect::<Vec<_>>();
         return Err(SearchProviderError::classify(
             "router",
@@ -276,11 +277,9 @@ async fn search_with_configured_routing(
                 })
             }
             Err(error) => {
-                diagnostics.push(format!(
-                    "{} [{}]: {}",
-                    provider,
-                    error.kind.as_str(),
-                    error.message
+                diagnostics.push(compact_error_text(
+                    &format!("{} [{}]", provider, error.kind.as_str()),
+                    &error.to_string(),
                 ));
                 let fallback_allowed = routing.fallback_on.iter().any(|kind| match kind {
                     crate::config::FallbackKind::Transient => error.kind == ErrorKind::Transient,
@@ -341,26 +340,44 @@ async fn auto_search(
                 })
             }
             Err(error) => {
-                if is_abort_error(&error) || error.kind == ErrorKind::Credential {
-                    // 取消/凭据错误直接上抛(与上游一致:凭据解析失败不静默)
-                    if is_abort_error(&error) {
-                        return Err(error);
-                    }
-                    fallback_errors.push(format!("{}: {error}", provider_label(provider_id)));
-                    continue;
+                if is_abort_error(&error) {
+                    // 取消直接上抛(与上游一致)
+                    return Err(error);
                 }
-                fallback_errors.push(format!("{}: {error}", provider_label(provider_id)));
+                // 凭据错误也不静默,但同样降级为行内诊断
+                fallback_errors.push(compact_error_text(
+                    &provider_label(provider_id),
+                    &error.to_string(),
+                ));
             }
         }
     }
     Err(SearchProviderError::classify(
         "router",
-        format!(
-            "Auto provider search failed:\n  - {}\n\n{}",
-            fallback_errors.join("\n  - "),
-            no_provider_guidance()
-        ),
+        format!("Auto provider search failed:\n  - {}", fallback_errors.join("\n  - ")),
     ))
+}
+
+/// 聚合错误单行规整:压掉行内换行(不破坏 `\n  - ` 列表结构)、去掉与
+/// 行首重复的 provider 前缀、限长。配置指引由工具层在"全部 query 失败"
+/// 时统一追加一次,不进错误串。
+fn compact_error_text(label: &str, text: &str) -> String {
+    const LINE_CAP: usize = 200;
+    // text 已是 "{provider} search failed (...)" 时不再叠加 label,
+    // 避免 "Duckduckgo: DuckDuckGo search failed (...)" 式重复
+    let line = if text.to_lowercase().starts_with(&label.to_lowercase()) {
+        text.to_string()
+    } else {
+        format!("{label}: {text}")
+    };
+    let single_line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single_line.chars().count() > LINE_CAP {
+        let mut truncated: String = single_line.chars().take(LINE_CAP).collect();
+        truncated.push_str("...");
+        truncated
+    } else {
+        single_line
+    }
 }
 
 /// 全部 provider 不可用时的兜底指引(gemini-search.ts:815-824 的 rpi 改写)。
@@ -410,5 +427,30 @@ mod tests {
         assert!(ProviderSelection::from_value(Some(&serde_json::json!([]))).is_err());
         assert!(ProviderSelection::from_value(Some(&serde_json::json!(["auto"]))).is_err());
         assert!(ProviderSelection::from_value(Some(&serde_json::json!(42))).is_err());
+    }
+
+    #[test]
+    fn compact_line_dedupes_prefix_and_collapses_newlines() {
+        // Display 前缀与 label 同名:不叠加
+        let error = SearchProviderError::classify(
+            "duckduckgo",
+            "DuckDuckGo search error 202: <!DOCTYPE html>\n<html>noise</html>",
+        );
+        let line = compact_error_text("Duckduckgo", &error.to_string());
+        assert!(!line.contains("Duckduckgo:"));
+        assert!(!line.contains('\n'));
+        assert!(line.contains("error 202"));
+
+        // Display 前缀与 label 不同名:保留 label
+        let line = compact_error_text("brave", "duckduckgo search failed (transient): boom");
+        assert_eq!(line, "brave: duckduckgo search failed (transient): boom");
+    }
+
+    #[test]
+    fn compact_line_caps_length() {
+        let long = "x".repeat(500);
+        let line = compact_error_text("brave", &long);
+        assert_eq!(line.chars().count(), 200 + 3);
+        assert!(line.ends_with("..."));
     }
 }

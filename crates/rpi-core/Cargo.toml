@@ -6,7 +6,7 @@ license.workspace = true
 
 # 依赖只有 rpi-ai/rpi-agent:rpi-session/rpi-tools/rpi-tui 是可选组件,
 # 由装配方(rpi-cli)经 trait 注入 —— 移除任一可选 crate,本 crate 照常编译
-# (docs/10-implementation-policy.md §1 可拆卸判据)。
+# (可拆卸判据)。
 [dependencies]
 rpi-ai.workspace = true
 rpi-agent.workspace = true

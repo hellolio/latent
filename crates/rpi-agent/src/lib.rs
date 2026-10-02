@@ -19,9 +19,10 @@ pub use hooks::{
     TurnCtx, TurnDecision, TurnUpdate,
 };
 pub use loop_::{
-    create_injection_endpoints, run_agent_loop, trim_tool_result_output, validate_arguments,
-    AgentContext, BudgetKind, InjectionDepth, InjectionReceiver, InjectionSender, LoopConfig,
-    LoopOutput, Phase, RunStop, ToolOutcome, TurnLimits, Wake, DEFAULT_TOOL_RESULT_MAX_CHARS,
+    create_injection_endpoints, run_agent_loop, tool_self_output_limit, trim_tool_result_output,
+    validate_arguments, AgentContext, BudgetKind, InjectionDepth, InjectionReceiver,
+    InjectionSender, LoopConfig, LoopOutput, Phase, RunStop, ToolOutcome, TurnLimits, Wake,
+    DEFAULT_TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MARGIN_CHARS,
 };
 pub use message::{now_ms, AgentMessage, CustomMessage};
 // rpi-ai 类型经 rpi-agent 再导出:下游(rpi-session/rpi-tools)只依赖本 crate 的类型

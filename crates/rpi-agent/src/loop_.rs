@@ -279,6 +279,27 @@ impl LoopConfig {
 /// 各自的行/字节截断,此上限兜底任意工具/扩展的超长输出)。
 pub const DEFAULT_TOOL_RESULT_MAX_CHARS: usize = 20_000;
 
+/// 工具自我约束输出时预留的余量:工具在内容之后还要附续读指引等文本,
+/// 预留后"内容 + 指引"恒不触发上面的头尾裁剪(避免转录中间出现挖洞)。
+pub const TOOL_RESULT_MARGIN_CHARS: usize = 2_000;
+
+/// 工具自我输出下限:agent 上限过小时仍保留有意义的最小预算。
+const TOOL_SELF_OUTPUT_LIMIT_FLOOR: usize = 4_000;
+
+/// 工具自身的输出预算 = agent 转录裁剪上限 - 余量。
+/// 入参 0 表示 agent 层未限制(返回 0,调用方回退自身默认值)。
+pub const fn tool_self_output_limit(tool_result_max_chars: usize) -> usize {
+    if tool_result_max_chars == 0 {
+        return 0;
+    }
+    let derived = tool_result_max_chars.saturating_sub(TOOL_RESULT_MARGIN_CHARS);
+    if derived < TOOL_SELF_OUTPUT_LIMIT_FLOOR {
+        TOOL_SELF_OUTPUT_LIMIT_FLOOR
+    } else {
+        derived
+    }
+}
+
 /// 超长文本头尾保留裁剪:保留前 60%、后 40%(头部常含 read 的文件开头,
 /// 尾部常含 bash 的错误/结果行),中间替换为省略标注。按 char 边界操作,
 /// 多字节字符安全。`max_chars` 以内原样返回。
@@ -1683,6 +1704,19 @@ pub fn validate_arguments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_self_output_limit_derives_from_agent_cap() {
+        // 默认 20k - 2k 余量 = 18k
+        assert_eq!(
+            tool_self_output_limit(DEFAULT_TOOL_RESULT_MAX_CHARS),
+            18_000
+        );
+        // 0 = agent 层未限制 → 0(调用方回退自身默认值)
+        assert_eq!(tool_self_output_limit(0), 0);
+        // 下限保护:极端小配置仍有可用预算
+        assert_eq!(tool_self_output_limit(1_000), 4_000);
+    }
 
     #[test]
     fn trim_tool_result_keeps_head_and_tail_with_marker() {

@@ -12,18 +12,33 @@ use tokio_util::sync::CancellationToken;
 
 use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
-use crate::truncate::{truncate_head, DEFAULT_MAX_BYTES};
+use crate::truncate::{truncate_head, OutputLimits};
 
 const DEFAULT_LIMIT: usize = 1000;
 
 pub struct FindTool {
     cwd: PathBuf,
+    limits: OutputLimits,
+    description: String,
 }
 
 /// 工厂。
 pub fn create_find_tool(cwd: &Path) -> Arc<dyn Tool> {
+    create_find_tool_with_limits(cwd, OutputLimits::default())
+}
+
+/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)。
+pub fn create_find_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn Tool> {
+    let description = format!(
+        "Search for files by glob pattern. Returns matching file paths relative to the search \
+         directory. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} results or {} \
+         bytes (whichever is hit first).",
+        limits.effective_max_bytes()
+    );
     Arc::new(FindTool {
         cwd: cwd.to_path_buf(),
+        limits,
+        description,
     })
 }
 
@@ -52,9 +67,7 @@ impl Tool for FindTool {
     }
 
     fn description(&self) -> &str {
-        "Search for files by glob pattern. Returns matching file paths relative to the search \
-         directory. Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever \
-         is hit first)."
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -160,7 +173,7 @@ impl Tool for FindTool {
 
         let raw = results.join("\n");
         // 结果数已被 limit 封顶,这里只剩字节限
-        let truncation = truncate_head(&raw, usize::MAX, DEFAULT_MAX_BYTES);
+        let truncation = truncate_head(&raw, usize::MAX, self.limits.effective_max_bytes());
         let mut output = truncation.content.clone();
         let mut notices: Vec<String> = Vec::new();
         let mut details = serde_json::Map::new();
@@ -172,7 +185,7 @@ impl Tool for FindTool {
             details.insert("resultLimitReached".into(), json!(limit));
         }
         if truncation.truncated {
-            notices.push(format!("{}KB limit reached", DEFAULT_MAX_BYTES / 1024));
+            notices.push(format!("{} bytes limit reached", self.limits.effective_max_bytes()));
             details.insert(
                 "truncation".into(),
                 serde_json::to_value(&truncation).unwrap_or_default(),
@@ -190,6 +203,16 @@ impl Tool for FindTool {
             },
             terminate: false,
         })
+    }
+}
+
+
+#[cfg(test)]
+fn test_tool(cwd: PathBuf) -> FindTool {
+    FindTool {
+        cwd,
+        limits: OutputLimits::default(),
+        description: String::new(),
     }
 }
 
@@ -241,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn finds_files_by_glob_and_respects_gitignore() {
         let dir = fixture().await;
-        let tool = FindTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let output = exec(&tool, json!({"pattern": "*.ts"})).await.unwrap();
         assert!(output.output.contains("src/a.ts"));
         assert!(output.output.contains("src/nested/b.spec.ts"));
@@ -257,7 +280,7 @@ mod tests {
     #[tokio::test]
     async fn anchored_pattern_and_directories_keep_trailing_slash() {
         let dir = fixture().await;
-        let tool = FindTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         // 含 `/` 的 pattern 锚定到搜索根(fd --full-path 等价)
         let output = exec(&tool, json!({"pattern": "src/**/*.spec.ts"}))
             .await
@@ -277,7 +300,7 @@ mod tests {
     #[tokio::test]
     async fn limit_reached_and_no_results() {
         let dir = fixture().await;
-        let tool = FindTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let output = exec(&tool, json!({"pattern": "*.ts", "limit": 1}))
             .await
             .unwrap();
@@ -291,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn missing_path_is_error() {
         let dir = fixture().await;
-        let tool = FindTool { cwd: dir.clone() };
+        let tool = test_tool(dir.clone());
         let err = exec(&tool, json!({"pattern": "*.ts", "path": "missing"}))
             .await
             .unwrap_err();
@@ -299,3 +322,4 @@ mod tests {
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }
+

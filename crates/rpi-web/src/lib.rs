@@ -1,5 +1,5 @@
 //! 分层:仅依赖 rpi-agent(Tool trait)+ rpi-ai(LLM 注入),宿主能力
-//! (模型解析、工具集切换、后台通知)经 `WebDeps` 注入,不依赖 rpi-core。
+//! (模型解析、后台通知)经 `WebDeps` 注入,不依赖 rpi-core。
 //!
 //! 核心设计(分析文档 §1/§5):搜索结果不直接全文塞给模型 —— 有界输出 +
 //! 存储 + responseId 二次检索;provider 的 `is_available` 纯本地零开销,
@@ -21,7 +21,7 @@ pub mod storage;
 pub mod tools;
 pub mod types;
 
-pub use tools::{create_web_tools, BackgroundNotifier, ToolSetActivator, WebContext};
+pub use tools::{create_web_tools, BackgroundNotifier, WebContext};
 
 /// 有界输出与存储的装配参数(工具层构造)。
 pub struct WebRuntime {

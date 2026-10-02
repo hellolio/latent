@@ -2,7 +2,7 @@
 
 > 一个终端 AI 编码 agent:流式驱动 LLM、并行执行工具、append-only 会话树、进程外扩展系统、四种运行模式共享同一业务核。
 
-本仓库是对 [earendil-works/pi](https://github.com/earendil-works/pi) 的 Rust 复刻,`docs/` 下的 12 篇分析文档是唯一设计权威(核心循环见 `docs/03-agent-loop.md`,模块接线与 Rust 映射见 `docs/09-wiring-and-rust.md`,实现纪律见 `docs/10-implementation-policy.md`)。
+本仓库是对 [earendil-works/pi](https://github.com/earendil-works/pi) 的 Rust 复刻,架构、逐文件索引与开发规范见 `AGENTS.md`。
 
 ---
 
@@ -176,7 +176,7 @@ prompt 等长命令异步执行,abort 等控制命令在 run 期间仍可送达�
 
 ## 架构
 
-7 个 crate、四层严格单向依赖(依赖图与接缝纪律见 `docs/10-implementation-policy.md`):
+7 个 crate、四层严格单向依赖(依赖图见 `AGENTS.md`):
 
 ```
 L4  rpi-cli (bin)  ──── rpi-tui ┐
@@ -206,10 +206,8 @@ cargo test --workspace                  # 27 个测试二进制全绿(含 proper
 cargo clippy --workspace --all-targets  # 零警告
 ```
 
-- **改代码前必读**:`docs/README.md` 的阅读顺序(00 总览 → 03 循环 → 01 类型);`docs/10-implementation-policy.md` 是开发规则。
-- **开发流程**:`.agents/skills/rpi-dev-workflow` 强制流程——读文档 → 编码+边界测试 → 全仓测试与 clippy 零警告 → 独立 reviewer 子代理审查 → 接缝签名变更在 10 §3 登记 → 功能文档追加踩坑记录。
+- **改代码前必读**:`AGENTS.md` 的目录索引、不变量清单与开发规范。
 - **外部依赖一律 pin 精确版本**(如 `rmcp =3.4.1`、`jsonschema =0.58.0`、`nix =0.31.3`、`proptest =1.9.0`)。
-- 各模块的设计细节与踩坑史:`docs/02-ai-provider.md`(provider/retry/overflow)、`docs/03-agent-loop.md`(循环/Agent/注入)、`docs/04-coding-agent.md`(AgentSession)、`docs/05-tools.md`(工具)、`docs/06-session-compaction.md`(会话树)、`docs/07-extensions.md`(扩展)、`docs/08-modes-tui.md`(模式/TUI/RPC)。
 
 ### 明确不做(2026-09-26 决策记录)
 

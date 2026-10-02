@@ -1,4 +1,4 @@
-//! subagent 引擎集成测试(14 文档 §4;docs/12 L1,ScriptedProvider 模式):
+//! subagent 引擎集成测试(ScriptedProvider 模式):
 //! 同步嵌套闭环、递归防护、超时、并行排队、异步 + supervisor 唤醒、
 //! list/stop、后台 Deny 审批。
 

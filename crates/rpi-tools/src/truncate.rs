@@ -6,6 +6,39 @@ pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 /// grep 匹配行的单行长度上限(05 文档 §2)
 pub const GREP_MAX_LINE_LENGTH: usize = 500;
 
+/// 工具输出自我约束上限:与 agent 转录裁剪(tool_result_max_chars)同一配置源
+/// 派生 —— 自我上限 = agent 上限 - 余量,保证"输出 + 提示文本"恒不触发
+/// agent 层的头尾裁剪(避免转录中间挖洞)。装配层经工厂注入,缺省即派生默认值。
+#[derive(Debug, Clone, Copy)]
+pub struct OutputLimits {
+    pub max_lines: usize,
+    pub max_bytes: usize,
+    pub max_chars: usize,
+}
+
+impl Default for OutputLimits {
+    fn default() -> Self {
+        OutputLimits {
+            max_lines: DEFAULT_MAX_LINES,
+            max_bytes: DEFAULT_MAX_BYTES,
+            // agent 默认 20k - 2k 余量(rpi_agent::tool_self_output_limit 的默认派生)
+            max_chars: rpi_agent::tool_self_output_limit(rpi_agent::DEFAULT_TOOL_RESULT_MAX_CHARS),
+        }
+    }
+}
+
+impl OutputLimits {
+    /// 生效字节限:字节 ≤ max_chars 时字符数必然 ≤ max_chars(UTF-8 chars ≤ bytes),
+    /// 故字节限取两者较小即可同时满足行/字节/字符三重预算。
+    /// max_chars == 0 表示未限制(哨兵值,非字面预算),回退 max_bytes。
+    pub fn effective_max_bytes(&self) -> usize {
+        if self.max_chars == 0 {
+            return self.max_bytes;
+        }
+        self.max_bytes.min(self.max_chars)
+    }
+}
+
 /// 单行按字符截断(grep 用;05 文档 truncateLine)。返回 (文本, 是否被截断)。
 pub fn truncate_line(line: &str, max_chars: usize) -> (String, bool) {
     let mut chars = line.chars();
@@ -224,5 +257,32 @@ mod tests {
         let result = truncate_head(&content, 10, 120);
         assert!(!result.truncated, "恰好 120 字节不应报截断");
         assert_eq!(result.content, content);
+    }
+}
+
+#[cfg(test)]
+mod output_limits_tests {
+    use super::*;
+
+    #[test]
+    fn default_derives_from_agent_cap() {
+        let limits = OutputLimits::default();
+        assert_eq!(
+            limits.max_chars,
+            rpi_agent::tool_self_output_limit(rpi_agent::DEFAULT_TOOL_RESULT_MAX_CHARS)
+        );
+        assert_eq!(limits.effective_max_bytes(), limits.max_bytes.min(limits.max_chars));
+    }
+
+    #[test]
+    fn zero_max_chars_means_unlimited_not_zero_budget() {
+        // agent 层"关闭裁剪"(cap=0 → 派生哨兵 0)不得被解释为字面预算 0,
+        // 否则 bash/read 输出会被归零(回归测试)
+        let limits = OutputLimits {
+            max_lines: 2000,
+            max_bytes: 50 * 1024,
+            max_chars: 0,
+        };
+        assert_eq!(limits.effective_max_bytes(), 50 * 1024);
     }
 }

@@ -1187,57 +1187,24 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-// ---- rpi-web:懒激活桥(web_access → set_active_tools_by_name)----
+// ---- rpi-web:4 个 web 工具随会话常驻激活(无懒激活)----
 
 #[tokio::test]
-async fn web_access_activates_web_tools_via_session_bridge() {
+async fn web_tools_active_by_default() {
     let built = build_with(scripted_provider(Vec::new())).await;
-
-    // 默认懒激活:web_access 在激活集,四个 web 工具不在
-    let active = built.session.active_tool_names();
-    assert!(
-        active.iter().any(|name| name == "web_access"),
-        "web_access must be active by default, got {active:?}"
-    );
-    for name in ["web_search", "fetch_content", "source_check", "get_search_content"] {
-        assert!(
-            !active.iter().any(|existing| existing == name),
-            "{name} must be inactive until web_access, got {active:?}"
-        );
-    }
-
-    // 经 web_access 工具激活(走 SessionToolSetActivator 桥)
-    let enable_tool = built
-        .session
-        .tool("web_access")
-        .expect("web_access in candidate pool");
-    enable_tool
-        .execute(
-            rpi_agent::ToolCall {
-                id: "t1".into(),
-                name: "web_access".into(),
-                args: serde_json::json!({}),
-            },
-            tokio_util::sync::CancellationToken::new(),
-            &NoopToolUpdater,
-        )
-        .await
-        .expect("web_access ok");
 
     let active = built.session.active_tool_names();
     for name in ["web_search", "fetch_content", "source_check", "get_search_content"] {
         assert!(
             active.iter().any(|existing| existing == name),
-            "{name} should be activated by web_access, got {active:?}"
+            "{name} must be active from session start, got {active:?}"
         );
     }
-    // 既有工具保持激活(追加,不整体替换)
+    assert!(
+        !active.iter().any(|name| name == "web_access"),
+        "web_access gate tool should no longer exist, got {active:?}"
+    );
+    assert!(built.session.tool("web_access").is_none());
+    assert!(built.session.tool("web_search").is_some());
     assert!(active.iter().any(|name| name == "subagent"));
-}
-
-struct NoopToolUpdater;
-
-#[async_trait::async_trait]
-impl rpi_agent::ToolUpdater for NoopToolUpdater {
-    async fn update(&self, _partial: String) {}
 }

@@ -1,6 +1,6 @@
 //! rpi-ai —— provider 抽象层(基座,零内部依赖)。
 //!
-//! 对外只暴露:工厂函数、`Provider` trait、纯类型(模块契约见 docs/10-implementation-policy.md §2)。
+//! 对外只暴露:工厂函数、`Provider` trait、纯类型。
 //! 关键契约:**失败编码进流**——`Provider::stream` 返回的事件流以终态事件(error/done)
 //! 收尾,不返回 `Result`(00 文档设计原则 5;02 文档流协议)。
 

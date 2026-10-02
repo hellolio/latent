@@ -38,6 +38,9 @@ struct Params {
     proxy: Option<String>,
 }
 
+/// 每条成功条目的切片之外开销(截断 note + url header + 空行)的摊销预留。
+const PER_ENTRY_OVERHEAD: usize = 320;
+
 fn parse_params(args: &serde_json::Value) -> Result<Params, String> {
     let obj = args.as_object().ok_or("arguments must be an object")?;
     let mut urls: Vec<String> = Vec::new();
@@ -211,14 +214,23 @@ impl Tool for FetchContentTool {
             });
         }
 
-        // readable / raw:入库 + 返回首片段(每个 URL 一节)
+        // readable / raw:入库 + 返回首片段。预算按抓取成功的 URL 数均分
+        // (失败条目只有错误信息,不占预算),每条都有内容幸存且附续读指引
         let fetch_id = storage::generate_id();
-        let stored = storage::store_fetched_content_result(
+        storage::store_fetched_content_result(
             &fetch_id,
             extracted.clone(),
             self.context.cache_limits,
         );
-        let metadata = storage::fetch_url_metadata(&stored);
+        let successful = extracted
+            .iter()
+            .filter(|entry| entry.error.is_none())
+            .count();
+        // 每条成功条目还要承载截断 note + url header + 空行(~320 字符),
+        // 预先从总预算扣除再均分,保证全部条目的切片 + 开销仍在预算内
+        let per_url_budget = max_inline
+            .saturating_sub(PER_ENTRY_OVERHEAD * successful)
+            / successful.max(1);
         let mut output = if extracted.len() == 1 {
             String::new()
         } else {
@@ -232,26 +244,46 @@ impl Tool for FetchContentTool {
                 output.push_str(&format!("Error: {error}\n\n"));
                 continue;
             }
-            let end_offset = max_inline.min(entry.content.chars().count());
-            let slice: String = entry.content.chars().take(end_offset).collect();
-            output.push_str(&slice);
-            if end_offset < entry.content.chars().count() {
+            let total_chars = entry.content.chars().count();
+            let end_offset = per_url_budget.min(total_chars);
+            output.push_str(&entry.content.chars().take(end_offset).collect::<String>());
+            if end_offset < total_chars {
                 output.push_str(&format!(
-                    "\n\n---\n[Output truncated.] Showing chars 0-{end_offset} of {}. Use {}({{ responseId: \"{fetch_id}\", urlIndex: {index}, offset: {end_offset}, limit: {max_inline} }}) for the next slice.",
-                    entry.content.chars().count(),
+                    "\n\n---\n[Output truncated.] Showing chars 0-{end_offset} of {total_chars}. Use {}({{ responseId: \"{fetch_id}\", urlIndex: {index}, offset: {end_offset}, limit: {per_url_budget} }}) for the next slice.",
                     names::GET_SEARCH_CONTENT
                 ));
             }
             output.push_str("\n\n");
         }
-        let _ = metadata;
+        // 总量护栏:正常路径均分后已在预算内;万一超限,截断并附检索指引
+        let any_truncated = extracted
+            .iter()
+            .any(|entry| entry.error.is_none() && entry.content.chars().count() > per_url_budget);
+        let guidance = if any_truncated {
+            format!(
+                "\n---\nFull page content is stored as responseId \"{fetch_id}\". Use {}({{ responseId: \"{fetch_id}\", urlIndex: <n>, offset: 0, limit: {per_url_budget} }}) to retrieve stored pages.",
+                names::GET_SEARCH_CONTENT
+            )
+        } else {
+            String::new()
+        };
+        let presentation = crate::bounded::bound_search_presentation(
+            output.trim(),
+            &guidance,
+            &format!(
+                "\nUse {}(responseId \"{fetch_id}\", urlIndex: <n>, offset: ...) to retrieve stored pages.",
+                names::GET_SEARCH_CONTENT
+            ),
+            max_inline,
+        );
         Ok(ToolOutput {
-            output: output.trim().to_string(),
+            output: presentation.text,
             details: json!({
                 "responseId": fetch_id,
                 "mode": match params.mode { FetchMode::Readable => "readable", FetchMode::Raw => "raw", FetchMode::Answer => "answer" },
                 "storedType": StoredType::Fetch,
                 "urlCount": extracted.len(),
+                "truncated": presentation.truncated,
                 "urls": extracted.iter().map(|entry| json!({
                     "url": entry.url,
                     "error": entry.error,
@@ -260,5 +292,28 @@ impl Tool for FetchContentTool {
             }),
             terminate: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 与 execute 内一致的预算公式(每条预扣 note/header 摊销)。
+    fn per_url_budget(max_inline: usize, successful: usize) -> usize {
+        max_inline.saturating_sub(PER_ENTRY_OVERHEAD * successful) / successful.max(1)
+    }
+
+    #[test]
+    fn single_url_gets_nearly_full_budget() {
+        assert_eq!(per_url_budget(18_000, 1), 18_000 - PER_ENTRY_OVERHEAD);
+    }
+
+    #[test]
+    fn budget_is_split_across_successful_urls() {
+        // 5 个 URL → 每条约 3.3k,而非整体 30k 组装后被裁出空洞
+        assert_eq!(per_url_budget(18_000, 5), 3_280);
+        // 失败条目不占额:预算按成功数均分与预扣
+        assert_eq!(per_url_budget(18_000, 6), (18_000 - 6 * 320) / 6);
     }
 }

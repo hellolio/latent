@@ -20,6 +20,17 @@ pub async fn generate_summary(
     cancel: &CancellationToken,
 ) -> (String, serde_json::Value) {
     let started = std::time::Instant::now();
+
+    // 全部 query 失败:没有可摘要的内容,不调摘要模型,直接确定性回退
+    // 并附一次配置指引
+    if !results.is_empty() && results.iter().all(|result| result.error.is_some()) {
+        let (mut text, meta) =
+            deterministic_fallback(results, "all-queries-failed".to_string(), started);
+        text.push_str("\n\n---\n");
+        text.push_str(&crate::router::no_provider_guidance());
+        return (text, meta);
+    }
+
     let prompt = prompts::build_summary_prompt(results);
 
     let generated = tokio::time::timeout(
@@ -101,8 +112,8 @@ mod tests {
                 }),
                 current_model: std::sync::Arc::new(|| None),
             },
-            activator: None,
             notifier: None,
+            tool_result_max_chars: 0,
             cwd: std::env::temp_dir(),
         };
         let results = vec![QueryResultData {
@@ -136,8 +147,8 @@ mod tests {
                     Some(rpi_ai::Model::minimal("main", "mock", "mock"))
                 }),
             },
-            activator: None,
             notifier: None,
+            tool_result_max_chars: 0,
             cwd: std::env::temp_dir(),
         };
         let (text, meta) = generate_summary(&context, &[], &CancellationToken::new()).await;

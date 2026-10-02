@@ -10,16 +10,31 @@ use tokio_util::sync::CancellationToken;
 
 use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
-use crate::truncate::{truncate_head, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+use crate::truncate::{truncate_head, OutputLimits};
 
 pub struct ReadTool {
     cwd: std::path::PathBuf,
+    limits: OutputLimits,
+    description: String,
 }
 
 /// 工厂:cwd 解析相对路径(pi 的 resolveToCwd)。
 pub fn create_read_tool(cwd: &Path) -> Arc<dyn Tool> {
+    create_read_tool_with_limits(cwd, OutputLimits::default())
+}
+
+/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)。
+pub fn create_read_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn Tool> {
+    let description = format!(
+        "Read a text file from the local filesystem. Returns the file content, \
+         truncated to {} lines / {} bytes. Use offset/limit to page through large files.",
+        limits.max_lines,
+        limits.effective_max_bytes()
+    );
     Arc::new(ReadTool {
         cwd: cwd.to_path_buf(),
+        limits,
+        description,
     })
 }
 
@@ -58,8 +73,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file from the local filesystem. Returns the file content, \
-         truncated to 2000 lines / 50KB. Use offset/limit to page through large files."
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -147,7 +161,11 @@ impl Tool for ReadTool {
             lines[start - 1..end].join("\n")
         };
 
-        let truncation = truncate_head(&slice, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+        let truncation = truncate_head(
+            &slice,
+            self.limits.max_lines,
+            self.limits.effective_max_bytes(),
+        );
         let mut output = truncation.content.clone();
         // slice 之前被 offset 跳过部分占用的字节量(单行续读提示的 tail -c 偏移需计入)
         let skipped_bytes: usize = lines[..start - 1].iter().map(|l| l.len() + 1).sum();
@@ -160,7 +178,7 @@ impl Tool for ReadTool {
             output.push_str(&format!(
                 "\n\n[Single line exceeds the byte limit; showing the first {shown} bytes. \
                  Use bash to read further: `tail -c +{next} {path} | head -c {MAX}`]",
-                MAX = DEFAULT_MAX_BYTES
+                MAX = self.limits.effective_max_bytes()
             ));
         } else if truncation.truncated {
             output.push_str(&format!(
@@ -209,6 +227,14 @@ mod tests {
         .await
     }
 
+    fn read_tool(cwd: std::path::PathBuf) -> ReadTool {
+        ReadTool {
+            cwd,
+            limits: OutputLimits::default(),
+            description: String::new(),
+        }
+    }
+
     #[tokio::test]
     async fn reads_file_with_offset_and_continuation_hint() {
         let dir = std::env::temp_dir().join(format!("rpi-read-{}", uuid::Uuid::now_v7()));
@@ -220,7 +246,7 @@ mod tests {
             .join("\n");
         tokio::fs::write(&path, &content).await.unwrap();
 
-        let tool = ReadTool { cwd: dir.clone() };
+        let tool = read_tool(dir.clone());
         // 全量读:截断 + 续读提示
         let output = exec(&tool, serde_json::json!({"path": "sample.txt"}))
             .await
@@ -255,9 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_is_error() {
-        let tool = ReadTool {
-            cwd: std::env::temp_dir(),
-        };
+        let tool = read_tool(std::env::temp_dir());
         let err = exec(&tool, serde_json::json!({"path": "definitely-missing.txt"}))
             .await
             .unwrap_err();
@@ -273,10 +297,10 @@ mod tests {
             .map(|i| format!("line-{i}-padding-xxxxxx"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(content.len() > DEFAULT_MAX_BYTES);
+        assert!(content.len() > 18_000);
         tokio::fs::write(dir.join("multi.txt"), &content).await.unwrap();
 
-        let tool = ReadTool { cwd: dir.clone() };
+        let tool = read_tool(dir.clone());
         let output = exec(&tool, serde_json::json!({"path": "multi.txt"}))
             .await
             .unwrap();
@@ -288,7 +312,7 @@ mod tests {
         assert!(output.output.contains("Use offset="));
 
         // 单行超限:保留 bash 续读提示,且偏移计入 offset 跳过的字节
-        let huge = "z".repeat(DEFAULT_MAX_BYTES * 2);
+        let huge = "z".repeat(90_000);
         tokio::fs::write(dir.join("single.txt"), format!("prefix\n{huge}")).await.unwrap();
         let output = exec(
             &tool,
@@ -317,7 +341,7 @@ mod tests {
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(dir.join("bin.dat"), [b'a', 0, b'b']).await.unwrap();
 
-        let tool = ReadTool { cwd: dir.clone() };
+        let tool = read_tool(dir.clone());
         let err = exec(&tool, serde_json::json!({"path": "bin.dat", "limit": 0}))
             .await
             .unwrap_err();

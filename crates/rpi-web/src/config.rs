@@ -53,6 +53,16 @@ pub struct SsrfSettings {
     pub allow_ranges: Vec<String>,
 }
 
+/// web_search 的工作流(用户配置,不暴露给模型)。
+/// `auto-summary` = 搜索返回 LLM 生成的摘要(全文仍入库可经
+/// get_search_content 取回);默认 `none` 返回原始结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchWorkflow {
+    #[default]
+    None,
+    AutoSummary,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WebSearchConfig {
     // --- provider 凭据与端点(原始串,未解析) ---
@@ -73,6 +83,8 @@ pub struct WebSearchConfig {
     // --- 输出与行为 ---
     /// 有界输出上限(默认 30000,上限 200000)
     pub max_inline_content_chars: Option<usize>,
+    /// web_search 工作流(用户配置;None = 原始结果,AutoSummary = 摘要替代)
+    pub workflow: Option<SearchWorkflow>,
     /// 每次出网请求的默认代理(http/https/socks5h;工具调用可逐次覆盖)
     pub proxy: Option<String>,
     /// 摘要 / answer 模式小模型("provider/model-id");未配置回退当前主模型
@@ -84,6 +96,15 @@ pub struct WebSearchConfig {
     // --- fetch 安全 ---
     pub fetch_domain_policy: Option<FetchDomainPolicy>,
     pub ssrf: Option<SsrfSettings>,
+}
+
+/// SearchWorkflow 的文件形态(kebab-case;非法值 = 整个配置文件解析失败,
+/// 走既有的 stderr 跳过路径)。
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum SearchWorkflowFile {
+    None,
+    AutoSummary,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -101,6 +122,7 @@ struct ConfigFile {
     search_provider: Option<serde_json::Value>,
     search_routing: Option<RoutingFile>,
     max_inline_content_chars: Option<usize>,
+    workflow: Option<SearchWorkflowFile>,
     proxy: Option<String>,
     summary_model: Option<String>,
     cache: Option<CacheFile>,
@@ -181,6 +203,7 @@ fn merge(global: &mut WebSearchConfig, project: WebSearchConfig) {
     take!(search_provider);
     take!(search_routing);
     take!(max_inline_content_chars);
+    take!(workflow);
     take!(proxy);
     take!(summary_model);
     take!(cache_limits);
@@ -212,6 +235,7 @@ fn from_config_file(file: ConfigFile) -> WebSearchConfig {
         search_provider,
         search_routing,
         max_inline_content_chars,
+        workflow,
         proxy,
         summary_model,
         cache,
@@ -230,6 +254,10 @@ fn from_config_file(file: ConfigFile) -> WebSearchConfig {
         search_provider,
         search_routing: search_routing.map(Into::into),
         max_inline_content_chars: max_inline_content_chars.map(|n| n.clamp(1, 200_000)),
+        workflow: workflow.map(|value| match value {
+            SearchWorkflowFile::None => SearchWorkflow::None,
+            SearchWorkflowFile::AutoSummary => SearchWorkflow::AutoSummary,
+        }),
         proxy,
         summary_model,
         cache_limits: cache.map(|limits| CacheLimits {
@@ -247,6 +275,13 @@ fn from_config_file(file: ConfigFile) -> WebSearchConfig {
         ssrf: ssrf.map(|ssrf| SsrfSettings {
             allow_ranges: ssrf.allow_ranges.unwrap_or_default(),
         }),
+    }
+}
+
+impl WebSearchConfig {
+    /// 生效工作流:未配置 = none(原始结果)。
+    pub fn workflow(&self) -> SearchWorkflow {
+        self.workflow.unwrap_or_default()
     }
 }
 
@@ -295,6 +330,7 @@ mod tests {
                 "searchProvider": ["brave", "tavily"],
                 "searchRouting": {"providers": ["searxng", "brave"], "fallbackOn": ["network", "transient"]},
                 "maxInlineContentChars": 50000,
+                "workflow": "auto-summary",
                 "summaryModel": "anthropic/claude-haiku-4-5",
                 "cache": {"maxEntries": 16, "maxBytes": 1048576},
                 "fetchContent": {"domainPolicy": {"allow": ["example.com"], "deny": ["evil.example"]}},
@@ -314,6 +350,7 @@ mod tests {
         assert_eq!(routing.providers, vec!["searxng", "brave"]);
         assert_eq!(routing.fallback_on, vec![FallbackKind::Network, FallbackKind::Transient]);
         assert_eq!(config.max_inline_content_chars, Some(50000));
+        assert_eq!(config.workflow, Some(SearchWorkflow::AutoSummary));
         assert_eq!(config.summary_model.as_deref(), Some("anthropic/claude-haiku-4-5"));
         assert_eq!(
             config.cache_limits,
@@ -331,5 +368,11 @@ mod tests {
         let file: ConfigFile = serde_json::from_str(r#"{"maxInlineContentChars": 999999}"#).unwrap();
         let config = from_config_file(file);
         assert_eq!(config.max_inline_content_chars, Some(200_000));
+    }
+
+    #[test]
+    fn invalid_workflow_rejects_file() {
+        let result = serde_json::from_str::<ConfigFile>(r#"{"workflow": "summary-review"}"#);
+        assert!(result.is_err(), "非法 workflow 值应使配置文件解析失败");
     }
 }
