@@ -159,7 +159,7 @@ pub struct AgentSessionConfig {
     pub permission: Option<Arc<PermissionEngine>>,
     /// 模式提示词共享 cell(可选;ModeHooks 持有同一 Arc):apply_mode 写入
     /// 当前模式的请求级补充指令(如 Plan 节),每请求以 Developer 消息追加在
-    /// 消息数组末尾 —— 系统提示词与工具数组随模式恒定(保 KV 缓存前缀)。
+    /// 消息数组末尾(最新位置)—— 历史前缀恒定保 KV 缓存命中,不进上下文历史。
     /// None = 无模式提示词行为。
     pub mode_section_cell: Option<Arc<Mutex<Option<String>>>>,
 }

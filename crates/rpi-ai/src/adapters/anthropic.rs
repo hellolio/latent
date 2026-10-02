@@ -1055,6 +1055,24 @@ mod tests {
     }
 
     #[test]
+    fn developer_message_at_end_merges_into_tool_result_message() {
+        // 模式节每请求追加在数组末尾:工具轮次末尾是 toolResult(user 角色),
+        // developer 降级文本并进同一条 user 消息(tool_result 块在前,文本随后),
+        // 避免连续 user 被拒
+        let messages = vec![
+            Message::user_text("q"),
+            Message::tool_result("t1", "read", vec![ContentBlock::text("a")], false),
+            Message::developer("mode reminder"),
+        ];
+        let out = convert_messages(&messages, None, false);
+        assert_eq!(out.len(), 2, "{out:?}");
+        let blocks = out[1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "mode reminder");
+    }
+
+    #[test]
     fn merges_consecutive_tool_results() {
         let messages = vec![
             Message::user_text("q"),

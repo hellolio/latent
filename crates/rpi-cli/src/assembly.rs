@@ -747,8 +747,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 决策类埋点:Approval(最外)→ Mode → Extension(最内)→ Passthrough。
     // 审批先问(便宜、人审),批准后才轮到扩展埋点(13 文档 §4.1)。
     // 父链多一层 ModeHooks:可切换模式节(如 Plan)以 Developer 消息追加在
-    // 每请求消息末尾,系统提示词与工具数组随模式恒定(保 KV 缓存前缀);
-    // 子 agent 用不含 Mode 的链,避免父模式提示词误导子会话。
+    // 每请求消息数组末尾(最新位置,用户消息轮与每轮工具调用后都重新追加,
+    // 历史前缀恒定保 KV 缓存命中);子 agent 用不含 Mode 的链,避免父模式
+    // 提示词误导子会话。
     let base_inner_hooks: Arc<dyn rpi_agent::LoopHooks> = if bus.is_empty() {
         Arc::new(rpi_agent::PassthroughHooks)
     } else {

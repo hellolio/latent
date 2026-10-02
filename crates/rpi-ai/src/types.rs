@@ -199,8 +199,9 @@ pub enum Message {
         timestamp: i64,
     },
     Assistant(Box<AssistantMessage>),
-    /// 请求级补充指令(可切换的模式节等):每请求追加在消息数组末尾,不进转录
-    /// (前缀恒定保 KV 缓存命中;适配器映射为 developer/user 角色,见各自实现)
+    /// 请求级补充指令(可切换的模式节等):每请求追加在消息数组末尾(最新位置),
+    /// 不进转录(历史前缀恒定保 KV 缓存命中;适配器映射为 developer/user 角色,
+    /// 见各自实现)
     Developer {
         content: String,
         #[serde(default)]

@@ -68,8 +68,9 @@ pub struct ApprovalHooks {
 }
 
 /// 模式节 hooks(13 文档 §8.2 的迁移形态):把可切换的模式提示词作为请求级
-/// `Message::Developer` 追加在**每请求消息数组末尾**——系统提示词与工具数组
-/// 随模式恒定(保 KV 缓存前缀命中),模式切换只影响尾部一条小消息。
+/// `Message::Developer` 追加在**每请求消息数组末尾(最新位置)**——用户发消息
+/// 后的首轮与每轮工具调用后的请求都重新追加,模型最后看到的是当前模式约束;
+/// 前缀(全部历史)逐字节不变,缓存命中最大化,且不落转录、不进上下文历史。
 /// `mode_text` cell 由 `AgentSession::apply_mode` 运行期写(None = 不追加);
 /// 子 agent 的 hooks 不包本层,避免父模式提示词误导子会话。
 pub struct ModeHooks {
@@ -88,15 +89,10 @@ impl LoopHooks for ModeHooks {
     fn convert_to_llm(&self, msgs: &[AgentMessage]) -> Vec<rpi_ai::Message> {
         let mut out = self.inner.convert_to_llm(msgs);
         if let Some(text) = self.mode_text.lock().unwrap().clone() {
-            // 插在最后一条用户输入之前(倒数第二):模型最后看到的是用户的
-            // 最新请求(保持专注);工具轮次(末尾是 toolResult)不受影响,
-            // 不破坏 tool_use→tool_result 相邻约束。位置随最新用户消息移动,
-            // 每轮缓存命中覆盖到上一轮交换之前 —— 已知情接受的取舍
-            let pos = out
-                .iter()
-                .rposition(|message| matches!(message, rpi_ai::Message::User { .. }))
-                .unwrap_or(out.len());
-            out.insert(pos, rpi_ai::Message::developer(text));
+            // 每请求追加在消息数组末尾(最新位置):用户发消息与每轮工具调用后
+            // 的请求都重新携带当前模式节;历史前缀逐字节不变,缓存命中最大化;
+            // 仅请求级注入,不进转录/上下文历史
+            out.push(rpi_ai::Message::developer(text));
         }
         out
     }

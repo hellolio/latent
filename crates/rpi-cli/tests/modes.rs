@@ -1158,7 +1158,7 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
     .await
     .expect("fresh");
     assert_eq!(fresh.session.mode(), rpi_core::SessionMode::Plan);
-    // 模式提示词已迁出系统提示词(改为每请求末尾 Developer 消息):
+    // 模式提示词已迁出系统提示词(改为每请求消息数组末尾的 Developer 消息):
     // sections 不含 mode 节,且切换模式不重建系统提示词、不过滤工具集
     // (tools 数组恒定保 KV 缓存前缀命中)
     let sections_before = fresh.session.system_prompt_sections();
