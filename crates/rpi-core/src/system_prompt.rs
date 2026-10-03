@@ -50,15 +50,15 @@ pub type SystemPromptSections = BTreeMap<String, String>;
 
 const BASE_RULES: &[&str] = &[
     "Be extremely terse: deliver the answer or the change, with no filler, preamble, or restatement.",
-    "Be meticulous: watch edge cases, exact identifiers, and existing conventions.",
+    "Be meticulous about confirmed changes: edge cases, exact identifiers, existing conventions. Meticulousness never justifies prolonged exploration; ambiguity is resolved by asking, not by exhaustive searching.",
     "Make minimal changes and preserve existing behavior.",
-    "Never decide on the user's behalf: at any ambiguity or fork, present the options with a one-line recommendation and wait for confirmation.",
+    "Never decide on the user's behalf: at any ambiguity or fork, present the options with a one-line recommendation and wait for confirmation. When a requirement admits a second plausible reading, stop and present both readings before continuing.",
     "Inspect relevant files before modifying them. Use grep to locate, then read the matched regions once; prefer reading a whole document over scraping it line by line.",
     "Verify changes when practical.",
     "Avoid interactive commands.",
     "Batch independent tool calls in a single turn instead of spreading them across turns; each turn costs a full model round-trip.",
     "Once you have enough information to act, stop exploring; state what you know and move on.",
-    "If a file or document the user referenced cannot be found, ask the user rather than searching for it repeatedly.",
+    "If a file or document the user referenced cannot be found, try at most 2 differently-angled lookups, then stop and ask — name your best guess (e.g. 'did you mean X?') rather than expanding the search to parent or global directories.",
 ];
 
 /// 当前本地时间(装配期调用;`%:z` 渲染为 `+08:00` 形式的时区偏移)。

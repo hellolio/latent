@@ -222,6 +222,27 @@ class RpiApp:
             f"--- 最后的可见输出 ---\n{last[-2000:]}"
         )
 
+    def expect_visible(self, pattern: str, timeout: float | None = None) -> str:
+        """轮询**当前屏幕**(visible_text),直到 `pattern`(正则)出现。
+
+        与 expect_text 的区别:expect_text 匹配含已滚出历史的累计字节流,
+        模式一旦出现过的内容会立即命中;expect_visible 只认用户此刻看到的
+        屏幕,适用于"按键后屏幕应变为某状态"的断言(如 ctrl+o 重绘)。
+        """
+        deadline = time.monotonic() + (timeout or self.timeout)
+        compiled = re.compile(_squeeze(pattern))
+        last = ""
+        while time.monotonic() < deadline:
+            last = self.visible_text()
+            match = compiled.search(_squeeze(last))
+            if match:
+                return match.group(0)
+            time.sleep(0.05)
+        raise AssertionError(
+            f"等待超时({timeout or self.timeout}s):当前屏幕上未出现 {pattern!r}\n"
+            f"--- 最后的可见屏幕 ---\n{last[-2000:]}"
+        )
+
     def expect_absent(self, pattern: str, after_idle: float = 1.0) -> None:
         """等输出静默 `after_idle` 秒后,断言 `pattern` 未出现过。"""
         deadline = time.monotonic() + after_idle
@@ -249,9 +270,9 @@ class RpiApp:
         self.child.send("\r")
 
     def wait_ready(self, timeout: float | None = None) -> None:
-        """等应用就绪:footer 显示模型名、编辑器提示符出现。之后输入才被接受。"""
+        """等应用就绪:footer 显示模型名、编辑器占位文本出现。之后输入才被接受。"""
         self.expect_text(r"rpi v\d+\.\d+", timeout)
-        self.expect_text(r"❯", timeout)
+        self.expect_text("Ask rpi to do anything", timeout)
 
     def send_key(self, name: str) -> None:
         mapping = {
@@ -260,6 +281,8 @@ class RpiApp:
             "ctrl+c": "\x03",
             "ctrl+d": "\x04",
             "ctrl+o": "\x0f",
+            "up": "\x1b[A",
+            "down": "\x1b[B",
         }
         self.child.send(mapping[name])
 

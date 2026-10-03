@@ -395,9 +395,51 @@ pub async fn switch_new_session(
     Ok(new_path)
 }
 
+/// /session 切回历史会话(rpi 扩展):加载既有 JSONL 续写(append-only,
+/// 同一文件继续追加),按投影重建 seed 消息与设置态(thinking level、激活
+/// 工具集、会话模式)。模型不随文件恢复(与 --continue 一致:沿用当前模型)。
+/// 流式期间调用方须先行拒绝。返回 session 文件路径。
+pub async fn switch_resume_session(
+    session: &AgentSession,
+    holder: &SessionManagerHolder,
+    file: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let manager: Arc<rpi_session::SessionManager> =
+        rpi_session::create_session(Some(file))
+            .map_err(|e| e.to_string())?
+            .into();
+    let path = manager.file_path().map(|p| p.to_path_buf());
+    holder.set(Some(manager.clone()));
+
+    // 清空转录与队列(错误状态一并复位)后按当前分支投影重建上下文
+    session.agent().reset().map_err(|e| e.to_string())?;
+    let context = rpi_session::build_session_context(
+        &manager.branch_entries(),
+        manager.get_leaf_id().as_deref(),
+    );
+    session
+        .agent()
+        .set_messages(context.messages)
+        .map_err(|e| e.to_string())?;
+    let thinking = parse_thinking_level(&context.thinking_level);
+    session.set_thinking_level(thinking).await;
+    if let Some(tools) = context.active_tools {
+        session
+            .set_active_tools_by_name(&tools)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let mode = context
+        .mode
+        .as_deref()
+        .and_then(SessionMode::parse)
+        .unwrap_or_else(|| session.default_mode());
+    session.set_mode(mode).await.map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 /// 会话存储策略:`Memory` 纯内存(测试);`New` 在目录下新建
-/// `<session-id>.jsonl`;`Resume` 打开既有 JSONL 续聊(`--continue`)。
-#[derive(Debug, Clone)]
+/// `<session-id>.jsonl`;`Resume` 打开既有 JSONL 续聊(`--continue`)。#[derive(Debug, Clone)]
 pub enum SessionStore {
     Memory,
     New { dir: std::path::PathBuf },

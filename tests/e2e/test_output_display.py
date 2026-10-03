@@ -25,7 +25,7 @@ def test_reply_commits_with_usage_and_footer():
         app.expect_text(r"↑10")
         app.expect_text(r"↑")
         # 编辑器回到可输入状态
-        app.expect_text(r"❯")
+        app.expect_text("Ask rpi to do anything")
     finally:
         app.close()
 
@@ -60,13 +60,13 @@ def test_two_blank_lines_between_output_and_editor():
         app.sendline("你好")
         app.expect_text("这是 mock LLM 的固定回复")
         app.expect_text("↓7")
-        app.expect_text("❯")
+        app.expect_text("Ask rpi to do anything")
         time.sleep(0.5)
         rows = _screen_rows(app)
-        editor = max(i for i, row in enumerate(rows) if "❯" in row)
-        # ❯ 上方是编辑器背景内边距行,再往上恰有两行纯空行,
+        editor = max(i for i, row in enumerate(rows) if "Ask rpi to do anything" in row)
+        # 占位文本行上方是编辑器背景内边距行,再往上恰有两行纯空行,
         # 空行之上就是最近的输出(用量行)
-        assert _row_has_bg(app, editor - 1), "❯ 上方应是编辑器内边距行"
+        assert _row_has_bg(app, editor - 1), "占位文本上方应是编辑器内边距行"
         assert _row_is_blank(app, editor - 2), "间隔第 1 行应为纯空行"
         assert _row_is_blank(app, editor - 3), "间隔第 2 行应为纯空行"
         assert not _row_is_blank(app, editor - 4), "间隔之上应紧贴输出内容"

@@ -21,7 +21,9 @@ fn test_state() -> InteractiveState {
     InteractiveState::new(rpi_tui::Theme::dark_ansi(), 80)
 }
 
-async fn built_memory_session() -> crate::assembly::BuiltSession {
+async fn built_session_with_store(
+    session_store: crate::assembly::SessionStore,
+) -> crate::assembly::BuiltSession {
     let model = rpi_ai::Model::minimal("m", "mock", "mock");
     crate::assembly::build_session(crate::assembly::BuildOptions {
         provider: Arc::new(rpi_ai::ScriptedProvider::new(&model, vec![])),
@@ -29,7 +31,7 @@ async fn built_memory_session() -> crate::assembly::BuiltSession {
         ui: Arc::new(rpi_core::NoopUi),
         extension_specs: vec![],
         spawn_hook: None,
-        session_store: crate::assembly::SessionStore::Memory,
+        session_store,
         context_snapshot: None,
         active_tools: None,
         search_ignore: Default::default(),
@@ -46,6 +48,10 @@ async fn built_memory_session() -> crate::assembly::BuiltSession {
     })
     .await
     .unwrap()
+}
+
+async fn built_memory_session() -> crate::assembly::BuiltSession {
+    built_session_with_store(crate::assembly::SessionStore::Memory).await
 }
 
 fn ctx_of<'a>(
@@ -857,7 +863,14 @@ async fn execute_help_and_session_commit_lines() {
     assert!(!quit);
     assert!(committed_text(&state).contains("/help"));
 
-    super::handlers::execute_command(&ctx, &mut state, slash::SlashAction::Session).await;
+    super::handlers::execute_command(
+        &ctx,
+        &mut state,
+        slash::SlashAction::Session {
+            arg: Some("info".into()),
+        },
+    )
+    .await;
     let rendered = committed_text(&state);
     assert!(rendered.contains("session"), "{rendered}");
     assert!(rendered.contains("model:"), "{rendered}");
@@ -1256,4 +1269,177 @@ async fn slash_mode_switches_session_mode() {
     assert_eq!(built.session.mode(), rpi_core::SessionMode::FullAccess);
     handle_key(&ctx, &mut state, rpi_tui::Key::BackTab).await;
     assert_eq!(built.session.mode(), rpi_core::SessionMode::Plan);
+}
+
+#[test]
+fn discover_resource_sections_lists_skills_and_subagents() {
+    // 临时目录造定义文件:skill(description 必填,name 缺省目录名)与
+    // agent(name/description 可选)
+    let root =
+        std::env::temp_dir().join(format!("rpi_res_test_{}_{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".rpi/skills/review")).unwrap();
+    std::fs::write(
+        root.join(".rpi/skills/review/SKILL.md"),
+        "---\ndescription: 代码审查流程\n---\n正文",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join(".rpi/agents")).unwrap();
+    std::fs::write(
+        root.join(".rpi/agents/scout.md"),
+        "---\nname: scout\ndescription: 侦察代理\n---\n你是侦察者",
+    )
+    .unwrap();
+
+    let sections = super::discover_resource_sections(&root, None);
+    // 条目只取名称,横向排列由渲染折叠态完成
+    assert_eq!(
+        sections,
+        vec![
+            ("Skills".into(), vec!["review".to_string()]),
+            ("Subagents".into(), vec!["scout".to_string()]),
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn discover_resource_sections_empty_without_defs() {
+    let root = std::env::temp_dir().join(format!("rpi_res_none_{}_{}", std::process::id(), line!()));
+    assert!(super::discover_resource_sections(&root, None).is_empty());
+}
+
+// ---- /session 历史会话切换 ----
+
+#[tokio::test]
+async fn switch_resume_session_restores_messages_and_reuses_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "rpi_switch_resume_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("s.jsonl");
+
+    // 历史会话:两条 user 消息
+    {
+        let manager = rpi_session::create_session_with(Some(&file), "/tmp/proj", None).unwrap();
+        manager
+            .append_message(rpi_agent::AgentMessage::user("历史问题一"))
+            .unwrap();
+        manager
+            .append_message(rpi_agent::AgentMessage::user("历史问题二"))
+            .unwrap();
+    }
+
+    let built = built_memory_session().await;
+    let session = built.session.clone();
+    let path = crate::assembly::switch_resume_session(
+        &session,
+        &built.manager_holder,
+        &file,
+    )
+    .await
+    .unwrap();
+    assert_eq!(path.as_deref(), Some(file.as_path()), "应返回所切文件路径");
+
+    // seed 消息恢复进 agent 转录(set_mode 会追加 ModeSection,只断言 user 消息)
+    let messages = session.agent().messages();
+    let user_texts: Vec<&str> = messages
+        .iter()
+        .filter_map(|message| match message {
+            rpi_agent::AgentMessage::User { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_texts, vec!["历史问题一", "历史问题二"]);
+
+    // 切换后续聊 append 落回同一文件(append-only,不新建)
+    let holder_manager = built.manager_holder.get().unwrap();
+    holder_manager
+        .append_message(rpi_agent::AgentMessage::user("新消息"))
+        .unwrap();
+    let reloaded = rpi_session::create_session_with(Some(&file), "/tmp/proj", None).unwrap();
+    assert!(matches!(
+        reloaded.entries().last().unwrap(),
+        rpi_session::Entry::Message {
+            message: rpi_agent::AgentMessage::User { content, .. },
+            ..
+        } if content == "新消息"
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- 带变体命令的弹窗交互(统一规范:裸命令无实际功能,回车后选择) ----
+
+#[tokio::test]
+async fn variant_command_enter_completes_then_second_enter_executes() {
+    let dir = std::env::temp_dir().join(format!(
+        "rpi_variant_enter_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let built = built_session_with_store(crate::assembly::SessionStore::New { dir: dir.clone() }).await;
+    let resolver = rpi_core::create_model_resolver();
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+
+    for c in "/sess".chars() {
+        handle_key(&ctx, &mut state, rpi_tui::Key::Char(c)).await;
+    }
+    assert!(state.slash_popup.visible(), "输入 /sess 应弹出补全");
+
+    // 部分输入 /sess → Enter:补全命令名并展开变体选择页(不执行)
+    handle_key(&ctx, &mut state, rpi_tui::Key::Enter).await;
+    assert_eq!(state.editor.text(), "/session", "应补全到命令名");
+    assert!(state.select.is_none(), "此步不应执行命令");
+    assert!(
+        state.slash_popup.visible() && state.slash_popup.match_count() == 2,
+        "应进入变体选择页(list/info): {}",
+        state.slash_popup.match_count()
+    );
+
+    // ↓ 选中 info 变体 → Enter:直接执行(选中行带参数 → 提交执行;
+    // info 只打转录行,select 仍为 None)
+    state.slash_popup.move_down();
+    handle_key(&ctx, &mut state, rpi_tui::Key::Enter).await;
+    assert!(
+        committed_text(&state).contains("id:"),
+        "↓+Enter 应执行选中的 /session info"
+    );
+    assert!(state.select.is_none(), "info 不打开选择器");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn bare_variant_commands_show_usage_only() {
+    let built = built_memory_session().await;
+    let resolver = rpi_core::create_model_resolver();
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+
+    // 裸 /session、/mode:只提示用法,无任何实际动作(/subagent 无参打开
+    // 选择器,属 /model 类,不受此规范约束)
+    for action in [
+        slash::SlashAction::Session { arg: None },
+        slash::SlashAction::Mode { arg: None },
+    ] {
+        super::handlers::execute_command(&ctx, &mut state, action).await;
+    }
+    let rendered: String = state
+        .pending
+        .iter()
+        .map(line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("用法: /session list"), "{rendered}");
+    assert!(rendered.contains("用法: /mode <"), "{rendered}");
+    assert!(state.select.is_none(), "裸命令不应打开任何选择器");
 }

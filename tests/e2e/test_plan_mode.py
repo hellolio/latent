@@ -56,7 +56,7 @@ def test_plan_mode_blocks_writes_then_approval_flow():
 
             # /mode confirm:切换会话模式(不打转录提示,状态栏标记变化)
             app.sendline("/mode confirm")
-            _wait_screen(app, "[confirm]")
+            _wait_screen(app, "confirm")
 
             # 重发写入请求:变更类 bash 触发审批 overlay,数字键 1 批准一次
             # (批准的命令在 WorkspaceWrite 沙箱内执行,可写根 = cwd)
@@ -90,7 +90,7 @@ def test_plan_mode_status_bar_marker():
     try:
         app.wait_ready()
         text = app.visible_text()
-        assert "[plan]" in text, f"状态栏应显示 plan 标记: {text}"
+        assert "plan" in text, f"状态栏应显示 plan 标记: {text}"
     finally:
         app.close()
 
@@ -100,16 +100,16 @@ def test_shift_tab_cycles_session_mode():
     app = RpiApp(turns=load_scenario("plan_mode"), session_mode=None)
     try:
         app.wait_ready()
-        assert "[plan]" in app.visible_text()
+        assert "plan" in app.visible_text()
         # Shift+Tab 一档:plan → confirm(无转录提示,状态栏标记变化)
         # 断言轮询当前屏幕:历史输出里含启动时的旧标记,不能用全量匹配
         app.child.send("\x1b[Z")
-        _wait_screen(app, "[confirm]")
+        _wait_screen(app, "confirm")
         # 再一档:confirm → full-access
         app.child.send("\x1b[Z")
-        _wait_screen(app, "[full-access]")
+        _wait_screen(app, "full-access")
         # 再一档回到 plan
         app.child.send("\x1b[Z")
-        _wait_screen(app, "[plan]")
+        _wait_screen(app, "plan")
     finally:
         app.close()

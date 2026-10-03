@@ -250,7 +250,20 @@ fn build_frame(
     partial: Option<&rpi_ai::AssistantMessage>,
 ) -> view::ViewportFrame {
     let budget = usize::from(app.screen_rows().max(1));
-    let mut preview_cap = view::STREAM_PREVIEW_ROWS;
+    // 流式内容(正文/thinking/工具实时输出)全量滚动:预览预算 = 屏高 −
+    // 状态行/间隔/编辑器/footer 保留行数(超出仍由下方 while 循环收缩
+    // 兜底);空闲帧保持 4 行兜底
+    let live_streaming = !state.stream_text.is_empty()
+        || state
+            .pending_thinking
+            .as_ref()
+            .is_some_and(|t| !t.trim().is_empty())
+        || state.pending_tool_output.is_some();
+    let mut preview_cap = if live_streaming {
+        budget.saturating_sub(view::LIVE_PREVIEW_RESERVED)
+    } else {
+        view::STREAM_PREVIEW_ROWS
+    };
     let mut editor_cap = view::MAX_EDITOR_ROWS;
     let mut popup_cap = default_popup_cap(budget as u16);
     let mut frame = view::viewport(state, partial, preview_cap, editor_cap, popup_cap);
@@ -274,8 +287,9 @@ fn default_popup_cap(budget: u16) -> usize {
         .min(rpi_tui::command_popup::MAX_VISIBLE_ROWS as u16) as usize
 }
 
-/// 启动区:横幅 + 分隔线 + 已加载资源分节([Extensions] 等,ctrl+o 展开)。
-/// 只进待提交缓冲;展开态变化时由 redraw 路径按当前状态重组。
+/// 启动区:横幅 + 分隔线 + 已加载资源分节([Skills]/[Subagents]/
+/// [Extensions],ctrl+o 展开)。只进待提交缓冲;展开态变化时由 redraw
+/// 路径按当前状态重组。
 fn commit_startup(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
     state.commit_startup(view::welcome_lines(
         env!("CARGO_PKG_VERSION"),
@@ -283,6 +297,15 @@ fn commit_startup(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
         &state.theme,
         state.width,
     ));
+    // 可加载资源分节(pi 语义):skill 与 subagent 定义是数据文件,与
+    // 装配期(load_skill / subagent 工具)同一发现来源同一目录优先级;
+    // 发现诊断已由装配期打 stderr,这里不重复
+    if let Ok(cwd) = std::env::current_dir() {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        state
+            .resources
+            .extend(discover_resource_sections(&cwd, home.as_deref()));
+    }
     let mut extensions: Vec<String> = Vec::new();
     for diagnostic in ctx.session.main().extension_diagnostics() {
         extensions.push(format!(
@@ -301,6 +324,31 @@ fn commit_startup(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
         rpi_tui::header_view::separator(state.width, &state.theme),
         rpi_tui::UiLine::raw(""),
     ]);
+}
+
+/// 启动区可加载资源分节(纯函数,可测):`[Skills]`/`[Subagents]`,条目
+/// 只取名称(横向逗号排列由 resources 渲染折叠态完成)。空节由调用方
+/// 跳过(`resources` 渲染同样过滤)。
+fn discover_resource_sections(
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Vec<(String, Vec<String>)> {
+    let mut sections = Vec::new();
+    let (skills, _) = rpi_core::discover_skill_defs(cwd, home);
+    if !skills.is_empty() {
+        sections.push((
+            "Skills".into(),
+            skills.iter().map(|s| s.name.clone()).collect(),
+        ));
+    }
+    let (agents, _) = rpi_core::discover_agent_defs(cwd, home);
+    if !agents.is_empty() {
+        sections.push((
+            "Subagents".into(),
+            agents.iter().map(|a| a.name.clone()).collect(),
+        ));
+    }
+    sections
 }
 
 /// 资源分节行(按当前展开态)。

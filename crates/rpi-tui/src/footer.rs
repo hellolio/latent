@@ -1,8 +1,9 @@
-//! 底部状态栏(pi components/footer.ts 的对应物,三行):
-//! 1. cwd(~/ 缩写)+(git 分支);
-//! 2. 右对齐 token 段:↑prompt(缓存明细 U/R 与命中率) │ ↓out │ ctx%
-//!    (>70% warning 黄、>90% error 红)· 用量/窗口 │ $cost,每段独立着色;
-//! 3. 右对齐模型 · thinking。
+//! 底部状态栏(pi components/footer.ts 的对应物,两行):
+//! 1. 左侧 cwd(~/ 缩写)+(git 分支),右侧 token 段:↑prompt(缓存明细
+//!    U/R 与命中率) │ ↓out │ ctx%(>70% warning 黄、>90% error 红)
+//!    · 用量/窗口 │ $cost,每段独立着色;
+//! 2. 左侧 agent 会话标记(`agent:main` 或当前子 agent)+ 模式标记
+//!    (plan 黄 / confirm 默认 / full-access 红),右侧模型 · thinking。
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -43,7 +44,7 @@ pub struct FooterData {
     pub active_agent: Option<String>,
 }
 
-/// 三行 footer。
+/// 两行 footer:路径+token 同行,agent/模式标记紧随其下一行。
 pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let width = width.max(1);
     let dim = Style::new().fg(theme.dim);
@@ -52,44 +53,47 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
         Style::new().fg(theme.footer_cwd),
     )];
     if let Some(branch) = &data.git_branch {
-        first.push(Span::styled(format!(" ({branch})"), dim));
+        first.push(Span::styled(format!(" ({branch})"), Style::new().fg(theme.success)));
     }
     if data.expanded {
         first.push(Span::styled(" · expanded", dim));
     }
-    let line1 = truncate_line(Line::from(first), width);
+    let line1 = left_right_align(Line::from(first), usage_line(data, theme), width);
 
-    let line2 = right_align(usage_line(data, theme), width);
-    let mut line3_spans: Vec<Span<'static>> = Vec::new();
+    // 第二行:左侧 agent 会话标记(主会话显示 agent:main)+ 模式标记,右侧模型
+    // agent 标签双色:"agent:" 前缀弱化,值区分主会话(muted)与激活子 agent
+    let (agent_value, agent_style) = match &data.active_agent {
+        Some(name) => (name.clone(), Style::new().fg(theme.subagent)),
+        None => ("main".to_string(), Style::new().fg(theme.muted)),
+    };
+    let mut left2: Vec<Span<'static>> = vec![
+        Span::styled("agent:", dim),
+        Span::styled(agent_value, agent_style),
+    ];
     if let Some(mode) = &data.mode {
-        // 模式标记:full-access 红色警示,plan 黄色提醒只读
+        // 模式标记:full-access 红色警示,plan 粉红提醒只读
         let style = match mode.as_str() {
             "full-access" => Style::new().fg(theme.error),
-            "plan" => Style::new().fg(theme.warning),
+            "plan" => Style::new().fg(theme.mode_plan),
             _ => Style::new().fg(theme.dim),
         };
-        line3_spans.push(Span::styled(format!("[{mode}] "), style));
+        left2.push(Span::styled(" │ ".to_string(), dim));
+        left2.push(Span::styled(mode.clone(), style));
     }
-    line3_spans.push(Span::styled(
-        format!("{} · t:{}", data.model, data.thinking),
+    let mut right2: Vec<Span<'static>> = vec![Span::styled(
+        format!("{} · thinking:{}", data.model, data.thinking),
         // 模型行与 cwd 同色(此前 muted 过暗,与背景区分度不足)
         Style::new().fg(theme.footer_cwd),
-    ));
-    if let Some(agent) = &data.active_agent {
-        line3_spans.push(Span::styled(
-            format!(" · agent:{agent}"),
-            Style::new().fg(theme.warning),
-        ));
-    }
+    )];
     if data.subagent_active > 0 {
         // 后台 subagent 运行数(14 文档 §4.3 进度可见:footer 状态段,不做活组件)
-        line3_spans.push(Span::styled(
+        right2.push(Span::styled(
             format!(" · ⏷{} subagent", data.subagent_active),
             Style::new().fg(theme.warning),
         ));
     }
-    let line3 = right_align(Line::from(line3_spans), width);
-    vec![line1, line2, line3]
+    let line2 = left_right_align(Line::from(left2), Line::from(right2), width);
+    vec![line1, line2]
 }
 
 /// token 用量段(右对齐显示;session 累计):↑prompt(hit/miss 明细) │
@@ -229,21 +233,31 @@ pub fn turn_usage_line(
     Line::from(spans)
 }
 
-/// 右对齐:左填充空格补满宽度;超宽时右侧截断。
-fn right_align(line: Line<'static>, width: usize) -> Line<'static> {
-    let line = truncate_line(line, width);
-    let current = display_width(&line_text(&line));
-    if current < width {
-        let mut spans = vec![Span::raw(" ".repeat(width - current))];
-        spans.extend(line.spans);
-        return Line::from(spans);
+/// 左右双段对齐:左侧顶格、右侧贴右;合计超宽时整体按宽截断。
+fn left_right_align(
+    left: Line<'static>,
+    right: Line<'static>,
+    width: usize,
+) -> Line<'static> {
+    let left = truncate_line(left, width);
+    let left_w = display_width(&line_text(&left));
+    let right_w = display_width(&line_text(&right));
+    let mut spans = left.spans;
+    if left_w + right_w < width {
+        spans.push(Span::raw(" ".repeat(width - left_w - right_w)));
     }
-    line
+    spans.extend(right.spans);
+    truncate_line(Line::from(spans), width)
 }
 
-/// token 数紧凑格式:≥1000 显示 k(1100 → 1.1k,128000 → 128k)。
+/// token 数紧凑格式:≥1000 显示 k(1100 → 1.1k,128000 → 128k),≥1e6 显示 m。
 fn format_tokens(n: u64) -> String {
-    if n >= 1000 {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        let formatted = format!("{m:.1}");
+        let formatted = formatted.strip_suffix(".0").unwrap_or(&formatted);
+        format!("{formatted}m")
+    } else if n >= 1000 {
         let k = n as f64 / 1000.0;
         let formatted = format!("{k:.1}");
         let formatted = formatted.strip_suffix(".0").unwrap_or(&formatted);
@@ -320,36 +334,79 @@ mod tests {
     }
 
     #[test]
-    fn first_line_has_cwd_branch() {
-        let out = lines(&data(), 60, &theme());
+    fn first_line_has_cwd_left_and_tokens_right() {
+        let out = lines(&data(), 100, &theme());
         let first = line_text(&out[0]);
-        assert_eq!(first, "~/work (main)", "{first}");
+        assert!(first.starts_with("~/work (main)"), "{first}");
+        assert!(first.ends_with("(auto)"), "{first}");
+        assert_eq!(display_width(&first), 100);
+        // git 分支绿色(success)
+        let branch_span = out[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("(main)"))
+            .unwrap_or_else(|| panic!("分支应出现在第一行"));
+        assert_eq!(branch_span.style.fg, Some(theme().success));
     }
 
     #[test]
     fn expanded_state_shown_in_first_line() {
         let mut d = data();
         d.expanded = true;
-        let first = line_text(&lines(&d, 60, &theme())[0]);
-        assert_eq!(first, "~/work (main) · expanded", "{first}");
+        let first = line_text(&lines(&d, 100, &theme())[0]);
+        assert!(first.starts_with("~/work (main) · expanded"), "{first}");
     }
 
     #[test]
-    fn three_lines_usage_right_model_right() {
-        let out = lines(&data(), 80, &theme());
-        assert_eq!(out.len(), 3);
+    fn two_lines_tokens_and_agent_model() {
+        let out = lines(&data(), 100, &theme());
+        assert_eq!(out.len(), 2);
+        let first = line_text(&out[0]);
+        // 第一行左侧路径,右侧 token 段:↑ 为完整 prompt(11k+5.5k+2.2k),
+        // 括号内缓存明细 U(未命中 13.2k)/ R(命中 5.5k)与命中率(≈ 29%)
+        assert!(first.starts_with("~/work (main)"), "{first}");
+        assert!(first.contains("↑ 18.7k (U 13.2k / R 5.5k · 29%)"), "{first}");
+        assert!(first.contains("↓ 149"), "{first}");
+        assert!(first.contains("ctx 10% (12.8k/128k) (auto)"), "{first}");
+        assert!(first.contains("$0.0012"), "{first}");
+        assert_eq!(display_width(&first), 100);
+        // 第二行:左侧 agent:main │ 模式,右侧模型
         let second = line_text(&out[1]);
-        // 右对齐 token 段:↑ 为完整 prompt(11k+5.5k+2.2k),括号内缓存明细
-        // U(未命中 13.2k)/ R(命中 5.5k)与命中率(5.5/18.7 ≈ 29%)
-        assert!(second.contains("↑ 18.7k (U 13.2k / R 5.5k · 29%)"), "{second}");
-        assert!(second.contains("↓ 149"), "{second}");
-        assert!(second.contains("ctx 10% (12.8k/128k) (auto)"), "{second}");
-        assert!(second.contains("$0.0012"), "{second}");
-        assert_eq!(display_width(&second), 80);
-        // 第三行右对齐模型
-        let third = line_text(&out[2]);
-        assert!(third.ends_with("mock/m1 · t:high"), "{third}");
-        assert_eq!(display_width(&third), 80);
+        assert!(second.starts_with("agent:main │ confirm"), "{second}");
+        assert!(second.ends_with("mock/m1 · thinking:high"), "{second}");
+        assert_eq!(display_width(&second), 100);
+    }
+
+    #[test]
+    fn active_agent_shown_at_left_with_mode() {
+        let theme = theme();
+        let mut d = data();
+        d.active_agent = Some("reviewer".into());
+        d.mode = Some("plan".into());
+        let out = lines(&d, 80, &theme);
+        let second = line_text(&out[1]);
+        assert!(second.starts_with("agent:reviewer │ plan"), "{second}");
+        // agent 标签双色:"agent:" 前缀弱化(dim),激活子 agent 值用
+        // subagent 色,主会话值用 muted(均非 warning 黄)
+        let prefix = out[1]
+            .spans
+            .iter()
+            .find(|s| s.content == "agent:")
+            .unwrap_or_else(|| panic!("agent: 前缀应出现在第二行"));
+        assert_eq!(prefix.style.fg, Some(theme.dim));
+        let agent_span = out[1]
+            .spans
+            .iter()
+            .find(|s| s.content == "reviewer")
+            .unwrap_or_else(|| panic!("激活 agent 值应出现在第二行"));
+        assert_eq!(agent_span.style.fg, Some(theme.subagent));
+        let main = lines(&data(), 80, &theme);
+        let main_span = main[1]
+            .spans
+            .iter()
+            .find(|s| s.content == "main")
+            .unwrap_or_else(|| panic!("主会话也应显示 agent:main"));
+        assert_eq!(main_span.style.fg, Some(theme.muted));
     }
 
     #[test]
@@ -359,50 +416,51 @@ mod tests {
         let mut plan = data();
         plan.mode = Some("plan".into());
         let out = lines(&plan, 80, &theme);
-        let plan_span = out[2]
+        let plan_span = out[1]
             .spans
             .iter()
-            .find(|s| s.content.starts_with("[plan]"))
-            .unwrap_or_else(|| panic!("plan 标记应出现在第三行"));
-        assert_eq!(plan_span.style.fg, Some(theme.warning));
+            .find(|s| s.content == "plan")
+            .unwrap_or_else(|| panic!("plan 标记应出现在第二行"));
+        assert_eq!(plan_span.style.fg, Some(theme.mode_plan), "plan 应为粉红");
         // full-access 标记(红色警示)
         let mut yolo = data();
         yolo.mode = Some("full-access".into());
         let out = lines(&yolo, 80, &theme);
-        let yolo_span = out[2]
+        let yolo_span = out[1]
             .spans
             .iter()
-            .find(|s| s.content.starts_with("[full-access]"))
-            .unwrap_or_else(|| panic!("full-access 标记应出现在第三行"));
+            .find(|s| s.content == "full-access")
+            .unwrap_or_else(|| panic!("full-access 标记应出现在第二行"));
         assert_eq!(yolo_span.style.fg, Some(theme.error));
-        // 无模式标记时不渲染
+        // 无模式标记时不渲染(分隔符也不出现)
         let mut no_mode = data();
         no_mode.mode = None;
         let out = lines(&no_mode, 80, &theme);
-        assert!(!line_text(&out[2]).contains("["));
+        assert!(!line_text(&out[1]).contains(" │ confirm"), "无模式标记时应省略分隔段");
+        assert!(line_text(&out[1]).starts_with("agent:main"));
     }
 
     #[test]
     fn usage_colors_are_distinct() {
-        let out = lines(&data(), 80, &theme());
+        let out = lines(&data(), 100, &theme());
         let theme = theme();
-        let second = &out[1];
-        let input_span = second
+        let first = &out[0];
+        let input_span = first
             .spans
             .iter()
             .find(|s| s.content.starts_with("↑ "))
             .unwrap();
         assert_eq!(input_span.style.fg, Some(theme.usage_input));
-        let output_span = second
+        let output_span = first
             .spans
             .iter()
             .find(|s| s.content.starts_with("↓ "))
             .unwrap();
         assert_eq!(output_span.style.fg, Some(theme.usage_output));
-        let cost_span = second.spans.iter().find(|s| s.content.starts_with('$')).unwrap();
+        let cost_span = first.spans.iter().find(|s| s.content.starts_with('$')).unwrap();
         assert_eq!(cost_span.style.fg, Some(theme.usage_cost));
         // 模型行与 cwd 同色(footer_cwd),不再用 muted
-        let model_span = out[2]
+        let model_span = out[1]
             .spans
             .iter()
             .find(|s| s.content.contains("mock/m1"))
@@ -437,17 +495,18 @@ mod tests {
         d.cache_write = 0;
         d.context_tokens = 0;
         d.cost_total = 0.0;
-        let out = lines(&d, 40, &theme());
-        assert_eq!(out.len(), 3);
+        let out = lines(&d, 44, &theme());
+        assert_eq!(out.len(), 2);
         // 零用量也显示 ↑ 0 │ ↓ 0(token 段常驻,右对齐;无缓存读写不加明细括号)
+        let first = line_text(&out[0]);
+        assert!(first.contains("↑ 0"), "{first}");
+        assert!(first.contains("↓ 0"), "{first}");
+        assert!(!first.contains("hit"), "{first}");
+        assert_eq!(display_width(&first), 44);
         let second = line_text(&out[1]);
-        assert!(second.contains("↑ 0"), "{second}");
-        assert!(second.contains("↓ 0"), "{second}");
-        assert!(!second.contains("hit"), "{second}");
-        assert_eq!(display_width(&second), 40);
-        let third = line_text(&out[2]);
-        assert!(third.ends_with("mock/m1 · t:high"), "{third}");
-        assert_eq!(display_width(&third), 40);
+        assert!(second.starts_with("agent:main"), "{second}");
+        assert!(second.ends_with("mock/m1 · thinking:high"), "{second}");
+        assert_eq!(display_width(&second), 44);
     }
 
     #[test]
@@ -456,8 +515,8 @@ mod tests {
         let mut d = data();
         d.cache_read = 0;
         let out = lines(&d, 80, &theme());
-        let second = line_text(&out[1]);
-        assert!(second.contains("(U 13.2k / R 0 · 0%)"), "{second}");
+        let first = line_text(&out[0]);
+        assert!(first.contains("(U 13.2k / R 0 · 0%)"), "{first}");
     }
 
     #[test]
@@ -473,5 +532,9 @@ mod tests {
         assert_eq!(format_tokens(11_000), "11k");
         assert_eq!(format_tokens(1_100), "1.1k");
         assert_eq!(format_tokens(128_000), "128k");
+        assert_eq!(format_tokens(999_999), "1000k");
+        assert_eq!(format_tokens(1_000_000), "1m");
+        assert_eq!(format_tokens(1_100_000), "1.1m");
+        assert_eq!(format_tokens(12_800_000), "12.8m");
     }
 }

@@ -98,6 +98,8 @@ pub enum SelectKind {
     Theme { names: Vec<rpi_tui::ThemeName> },
     /// 内部选择器(/subagent):候选 agent 定义
     SubagentAgent { defs: Vec<rpi_core::AgentDef> },
+    /// 内部选择器(/session):候选历史会话(mtime 倒序)
+    Session { files: Vec<rpi_session::SessionSummary> },
     /// 权限审批(13 文档 §10.3):四决策经 oneshot 回传 ApprovalHooks
     Approval {
         responder: tokio::sync::oneshot::Sender<rpi_core::ApprovalDecision>,
@@ -159,6 +161,10 @@ pub struct InteractiveState {
     /// 结果消息还可能按完成序到达,单槽"最近一次 start"会配错对。
     /// (tool_call_id, name, args)
     pub pending_tools: Vec<(String, String, String)>,
+    /// 执行中工具的实时输出尾窗(ToolExecutionUpdate 持续替换;结果到达
+    /// 即清除,由折叠的 ToolResult 定稿)。并行批显示最近更新者。
+    /// (tool_call_id, tail)
+    pub pending_tool_output: Option<(String, String)>,
     /// 最近一次工具执行的错误标记
     pub last_tool_error: bool,
 }
@@ -194,6 +200,7 @@ impl InteractiveState {
             cwd_display: String::new(),
             git_branch: None,
             pending_tools: Vec::new(),
+            pending_tool_output: None,
             last_tool_error: false,
             resources: Vec::new(),
         }
@@ -255,6 +262,7 @@ impl InteractiveState {
         self.stream_text.clear();
         self.pending_thinking = None;
         self.pending_tools.clear();
+        self.pending_tool_output = None;
         self.last_tool_error = false;
         self.usage = UsageTracker::default();
         self.context_tokens = 0;
@@ -262,9 +270,9 @@ impl InteractiveState {
         self.needs_full_redraw = true;
     }
 
-    /// 消费历史:Enter 提交后的文本(含多行)。
+    /// 消费历史:Enter 提交后的文本(含多行;粘贴占位符展开为完整内容)。
     pub fn take_input(&mut self) -> Option<String> {
-        let text = self.editor.text().trim().to_string();
+        let text = self.editor.expanded_text().trim().to_string();
         if text.is_empty() {
             return None;
         }

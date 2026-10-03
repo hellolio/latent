@@ -876,3 +876,73 @@ fn crash_half_line_is_isolated_and_next_append_survives() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn list_session_files_sorts_and_previews() {
+    let dir = std::env::temp_dir().join(format!("rpi_session_list_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 旧会话:两条消息,预览取首条 user 消息首行
+    let old_path = dir.join("old.jsonl");
+    {
+        let session = create_session_with(Some(&old_path), "/tmp/proj", None).unwrap();
+        session
+            .append_message(AgentMessage::user("first question\nsecond line"))
+            .unwrap();
+        session.append_message(AgentMessage::user("later")).unwrap();
+    }
+    // 新会话:仅落 header,无消息
+    let new_path = dir.join("new.jsonl");
+    {
+        let _session = create_session_with(Some(&new_path), "/tmp/proj", None).unwrap();
+    }
+    // 保证 mtime 有可见差(同一秒内 old/new 顺序不确定)
+    let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    let file = std::fs::File::options().append(true).open(&old_path).unwrap();
+    file.set_modified(old_time).unwrap();
+
+    let list = rpi_session::list_session_files(&dir, None);
+    assert_eq!(list.len(), 2, "应列出全部主会话文件");
+    assert_eq!(list[0].path, new_path, "mtime 新者在前");
+    assert_eq!(list[1].path, old_path);
+    assert_eq!(list[1].preview, "first question", "预览取首条 user 首行");
+    assert_eq!(list[0].preview, "(空会话)", "无消息会话用占位文案");
+    assert!(!list[0].session_id.is_empty());
+
+    // tag 子会话文件(<时间>__<tag>__<id>.jsonl)不参与列表
+    let tag_path = dir.join("20260101-000000__child__abcdef01.jsonl");
+    std::fs::write(&tag_path, "{}\n").unwrap();
+    let list = rpi_session::list_session_files(&dir, None);
+    assert_eq!(list.len(), 2, "tag 子会话应被排除");
+
+    // cwd 过滤:header.cwd 不匹配的会话不进入
+    let list = rpi_session::list_session_files(&dir, Some("/tmp/other"));
+    assert!(list.is_empty(), "cwd 不匹配应过滤全部");
+
+    // find_latest 与列表共享同一候选集
+    assert_eq!(
+        rpi_session::find_latest_session_file(&dir, Some("/tmp/proj")),
+        Some(new_path)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn list_session_files_preview_is_truncated() {
+    let dir = std::env::temp_dir().join(format!("rpi_session_trunc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("long.jsonl");
+    let session = create_session_with(Some(&path), "/tmp/proj", None).unwrap();
+    let long_text = "啊".repeat(200);
+    session.append_message(AgentMessage::user(long_text)).unwrap();
+
+    let list = rpi_session::list_session_files(&dir, None);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].preview.chars().count(), 80, "预览截 80 字符");
+    assert!(list[0].preview.ends_with('…') || list[0].preview.chars().count() < 200);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

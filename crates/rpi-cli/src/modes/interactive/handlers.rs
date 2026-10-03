@@ -12,6 +12,7 @@ use crate::modes::slash;
 
 use super::bash;
 use super::events::UiEvent;
+use super::replay;
 use super::state::{
     InteractiveState, SelectKind, SelectRequest, Status, ToolStatus, TranscriptItem,
 };
@@ -130,12 +131,26 @@ pub async fn handle_key(
                 state.sync_slash_popup();
                 return false;
             }
-            // Enter 一次直达:把输入补全为选中命令的完整文本,落到底部提交
-            // 分支执行(不再要求二次回车;想带参数先 Tab 补全再继续输入)
+            // Enter 分派(非精确匹配):
+            // - 选中行是变体(`命令 参数`):补全并直接执行(一次回车);
+            // - 选中行是带变体的裸命令(含部分输入如 /sess):只补全命令名并
+            //   展开变体选择页、不执行 —— 方向键选定后回车执行;
+            // - 普通命令:补全后落到底部提交分支执行(一次回车直达)。
             rpi_tui::Key::Enter if !state.slash_popup.is_exact_match() => {
-                match state.slash_popup.complete_text() {
-                    Some(text) => state.editor.set_text(text.trim_end()),
-                    None => return false,
+                let Some(text) = state.slash_popup.complete_text() else {
+                    return false;
+                };
+                let completed = text.trim_end().to_string();
+                let is_variant = completed.contains(char::is_whitespace);
+                let has_variants = state
+                    .slash_popup
+                    .selected_entry()
+                    .is_some_and(|entry| !entry.variants.is_empty());
+                state.editor.set_text(&completed);
+                if !is_variant && has_variants {
+                    // query 变为命令名 → 弹窗展开该命令的变体子项(选择页)
+                    state.sync_slash_popup();
+                    return false;
                 }
             }
             rpi_tui::Key::Esc => {
@@ -269,8 +284,18 @@ async fn handle_select_key(
                         let _ = responder.send(Some(index));
                     }
                     SelectKind::SubagentAgent { defs } => {
-                        if let Some(def) = defs.get(index) {
-                            switch_to_subagent(ctx, state, def.clone()).await;
+                        if index < defs.len() {
+                            if let Some(def) = defs.get(index) {
+                                switch_to_subagent(ctx, state, def.clone()).await;
+                            }
+                        } else {
+                            // 末位的 off 选项:退出子 agent,回到主会话
+                            exit_subagent(ctx, state);
+                        }
+                    }
+                    SelectKind::Session { files } => {
+                        if let Some(summary) = files.get(index) {
+                            switch_to_session(ctx, state, &summary.path).await;
                         }
                     }
                     SelectKind::Model { models } => {
@@ -322,7 +347,7 @@ async fn handle_select_key(
                     SelectKind::Select(responder) => {
                         let _ = responder.send(None);
                     }
-                    SelectKind::SubagentAgent { .. } => {}
+                    SelectKind::SubagentAgent { .. } | SelectKind::Session { .. } => {}
                     SelectKind::Model { .. } | SelectKind::Thinking => {}
                     SelectKind::Theme { .. } => {}
                     SelectKind::Approval { responder } => {
@@ -430,6 +455,26 @@ async fn cycle_mode(
 
 /// 切换到平行子 agent 会话:已存在(按名缓存)直接切回,否则现场创建并挂
 /// TUI 事件订阅(转录/审批照常渲染)。
+/// /subagent off(或选择器末位 off 项):切回主会话(子 agent 上下文按名
+/// 缓存保留,可再次 /subagent 切回)。
+fn exit_subagent(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
+    if ctx.session.is_main() {
+        state.commit_ephemeral(warning_line_theme("当前已是主会话", &state.theme));
+    } else {
+        let name = ctx.session.active_agent();
+        ctx.session.switch(None, ctx.session.main());
+        state.active_agent = None;
+        refresh_footer(ctx, state);
+        state.commit_line(plain_dim(
+            &format!(
+                "已切回主会话({} 的上下文保留,可再次 /subagent 切回)",
+                name.as_deref().unwrap_or("?")
+            ),
+            &state.theme,
+        ));
+    }
+}
+
 async fn switch_to_subagent(
     ctx: &InteractiveCtx<'_>,
     state: &mut InteractiveState,
@@ -491,11 +536,26 @@ pub async fn execute_command(
             }
         }
         slash::SlashAction::Quit => return true,
-        slash::SlashAction::Session => {
-            for line in session_info_lines(ctx, state) {
-                state.commit_line(plain_dim(&line, &state.theme));
+        slash::SlashAction::Session { arg } => match arg.as_deref() {
+            Some("list") => open_session_selector(ctx, state).await,
+            Some("info") => {
+                for line in session_info_lines(ctx, state) {
+                    state.commit_line(plain_dim(&line, &state.theme));
+                }
             }
-        }
+            Some(other) => {
+                state.commit_ephemeral(view::error_line(
+                    &format!("未知参数 /session {other}(list = 切换历史会话;info = 会话信息)"),
+                    &state.theme,
+                ));
+            }
+            None => {
+                state.commit_ephemeral(warning_line_theme(
+                    "用法: /session list(切换历史会话)| info(会话信息)",
+                    &state.theme,
+                ));
+            }
+        },
         slash::SlashAction::Compact { arg } => {
             // 流式期间压缩会让 SessionCompactor 先落盘 Compaction entry、
             // 随后 set_messages 失败;摘要 LLM 调用内联 await 会冻结事件循环
@@ -533,41 +593,17 @@ pub async fn execute_command(
                 }
             },
             None => {
-                let mode = ctx.session.current().mode();
+                // 带变体命令的裸调用不做任何事,只提示用法(统一规范)
                 state.commit_ephemeral(warning_line_theme(
-                    &format!(
-                        "当前模式:{}(plan 只读 · confirm 确认 · full-access 全自动;/mode <模式> 或 Shift+Tab 切换)",
-                        mode.label()
-                    ),
+                    "用法: /mode <plan|confirm|full-access>(Shift+Tab 循环切换)",
                     &state.theme,
                 ));
             }
         },
         slash::SlashAction::Subagent { arg } => match arg.as_deref() {
-            Some("off") => {
-                if ctx.session.is_main() {
-                    state.commit_ephemeral(warning_line_theme("当前已是主会话", &state.theme));
-                } else {
-                    let name = ctx.session.active_agent();
-                    ctx.session.switch(None, ctx.session.main());
-                    state.active_agent = None;
-                    refresh_footer(ctx, state);
-                    state.commit_line(plain_dim(
-                        &format!(
-                            "已切回主会话({} 的上下文保留,可再次 /subagent 切回)",
-                            name.as_deref().unwrap_or("?")
-                        ),
-                        &state.theme,
-                    ));
-                }
-            }
-            Some(other) => {
-                state.commit_ephemeral(view::error_line(
-                    &format!("未知参数 /subagent {other}(off = 回主会话;无参数 = 选择 subagent)"),
-                    &state.theme,
-                ));
-            }
-            None => {
+            Some("off") => exit_subagent(ctx, state),
+            // 无参数与 select 等价:打开选择器(候选 = 可用 agent + off 回主会话)
+            Some("select") | None => {
                 if ctx.session.current().agent().is_streaming() {
                     state.commit_ephemeral(view::error_line(
                         "run 进行中不能切换;等待 run 结束或 Esc 中止后再试",
@@ -580,24 +616,26 @@ pub async fn execute_command(
                     return false;
                 };
                 let defs = factory.discover();
-                if defs.is_empty() {
+                // 主会话下无任何 agent 定义才无意义;子 agent 会话至少还能选 off 回主
+                if defs.is_empty() && ctx.session.is_main() {
                     state.commit_ephemeral(view::error_line(
                         "没有可用的 subagent 定义(.rpi/agents/*.md)",
                         &state.theme,
                     ));
                     return false;
                 }
-                let mut list = SelectList::new(
-                    defs.iter()
-                        .map(|d| {
-                            if d.description.is_empty() {
-                                d.name.clone()
-                            } else {
-                                format!("{} — {}", d.name, d.description)
-                            }
-                        })
-                        .collect(),
-                );
+                let mut options: Vec<String> = defs
+                    .iter()
+                    .map(|d| {
+                        if d.description.is_empty() {
+                            d.name.clone()
+                        } else {
+                            format!("{} — {}", d.name, d.description)
+                        }
+                    })
+                    .collect();
+                options.push("off — 退出子 agent,回到主会话".into());
+                let mut list = SelectList::new(options);
                 if let Some(current) = ctx.session.active_agent() {
                     if let Some(index) = defs.iter().position(|d| d.name == current) {
                         list.selected = index;
@@ -608,6 +646,12 @@ pub async fn execute_command(
                     list,
                     kind: SelectKind::SubagentAgent { defs },
                 });
+            }
+            Some(other) => {
+                state.commit_ephemeral(view::error_line(
+                    &format!("未知参数 /subagent {other}(off = 回主会话;无参数 = 选择 subagent)"),
+                    &state.theme,
+                ));
             }
         },
         slash::SlashAction::New => {
@@ -624,7 +668,9 @@ pub async fn execute_command(
                 let _ = ctx.session.current().agent().reset();
                 state.reset_for_new_session();
                 refresh_footer(ctx, state);
-                state.commit_line(plain_dim(
+                // ephemeral:reset 已触发全文重绘,转录重渲染 + 待提交合并
+                // 会把 commit_line 的条目画两遍
+                state.commit_ephemeral(plain_dim(
                     &format!(
                         "new session (subagent {} 内存会话,无文件)",
                         ctx.session.active_agent().as_deref().unwrap_or("?")
@@ -651,7 +697,9 @@ pub async fn execute_command(
                             }
                             None => "new session started".to_string(),
                         };
-                        state.commit_line(plain_dim(&message, &state.theme));
+                        // ephemeral:reset 已触发全文重绘,转录重渲染 + 待提交
+                        // 合并会把 commit_line 的条目画两遍
+                        state.commit_ephemeral(plain_dim(&message, &state.theme));
                     }
                     Err(error) => {
                         state.commit_ephemeral(view::error_line(
@@ -794,8 +842,112 @@ fn open_theme_selector(state: &mut InteractiveState) {
     });
 }
 
-fn session_info_lines(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> Vec<String> {
-    let mut lines = vec!["session".to_string()];
+/// /session 无参数:弹出当前项目的历史会话列表(mtime 倒序)供切换。
+/// 候选目录 = 当前会话文件所在目录(同一项目前缀),cwd 过滤与 `--continue`
+/// 一致;当前会话在列表中预选中。
+async fn open_session_selector(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
+    // 流式期间切换会让进行中的 run 写入错误的 session 文件
+    if ctx.session.current().agent().is_streaming() {
+        state.commit_ephemeral(view::error_line(
+            "run 进行中不能切换会话;等待 run 结束或 Esc 中止后再试",
+            &state.theme,
+        ));
+        return;
+    }
+    if !ctx.session.is_main() {
+        state.commit_ephemeral(warning_line_theme(
+            "子 agent 平行会话无历史文件;/subagent off 回主会话后再切换",
+            &state.theme,
+        ));
+        return;
+    }
+    let Some(manager) = ctx.current_manager() else {
+        state.commit_ephemeral(warning_line_theme(
+            "当前无会话存储,无法切换历史会话",
+            &state.theme,
+        ));
+        return;
+    };
+    let Some(dir) = manager
+        .file_path()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+    else {
+        state.commit_ephemeral(warning_line_theme(
+            "当前无会话存储,无法切换历史会话",
+            &state.theme,
+        ));
+        return;
+    };
+    let cwd = std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let files = rpi_session::list_session_files(&dir, Some(&cwd));
+    if files.is_empty() {
+        state.commit_ephemeral(warning_line_theme(
+            "没有历史会话(当前目录下还没有已保存的会话文件)",
+            &state.theme,
+        ));
+        return;
+    }
+    let current = manager.file_path().map(|path| path.to_path_buf());
+    let mut list = SelectList::new(
+        files
+            .iter()
+            .map(|summary| format!("{}  {}", summary.local_time(), summary.preview))
+            .collect(),
+    );
+    if let Some(index) = files.iter().position(|summary| Some(&summary.path) == current.as_ref()) {
+        list.selected = index;
+    }
+    state.select = Some(SelectRequest {
+        prompt: "切换历史会话(Enter 续聊;当前会话已保存,原样保留)".into(),
+        list,
+        kind: SelectKind::Session { files },
+    });
+}
+
+/// Enter 选定历史会话:终止旧会话的后台 subagent(抑制完成通知)→ 切
+/// manager/重建上下文(assembly)→ 清空转录区并回放历史 → footer 刷新。
+async fn switch_to_session(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    file: &std::path::Path,
+) {
+    let Some(holder) = ctx.manager_holder else {
+        state.commit_ephemeral(warning_line_theme(
+            "当前无会话存储,无法切换历史会话",
+            &state.theme,
+        ));
+        return;
+    };
+    if let Some(registry) = ctx.subagent_registry {
+        registry.abort_all();
+    }
+    match crate::assembly::switch_resume_session(&ctx.session.current(), holder, file).await {
+        Ok(path) => {
+            // 清空转录区/用量后回放历史(replay 与启动恢复同源)
+            state.reset_for_new_session();
+            replay::replay_history(ctx, state);
+            refresh_footer(ctx, state);
+            let message = match &path {
+                Some(path) => format!("resumed session: {}", path.display()),
+                None => "resumed session".to_string(),
+            };
+            // ephemeral:reset 已触发全文重绘,转录重渲染 + 待提交合并会把
+            // commit_line 的条目画两遍
+            state.commit_ephemeral(plain_dim(&message, &state.theme));
+        }
+        Err(error) => {
+            state.commit_ephemeral(view::error_line(
+                &format!("切换会话失败: {error}"),
+                &state.theme,
+            ));
+        }
+    }
+    state.status = Status::Idle;
+}
+
+fn session_info_lines(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> Vec<String> {    let mut lines = vec!["session".to_string()];
     match ctx.current_manager() {
         Some(manager) => {
             lines.push(format!("  id:   {}", manager.session_id()));
@@ -1097,8 +1249,28 @@ async fn handle_session_event(
                 .push((tool_call_id.clone(), tool_name.clone(), args));
             state.status = Status::Tool(tool_name);
         }
-        AgentSessionEvent::Agent(rpi_agent::AgentEvent::ToolExecutionEnd { is_error, .. }) => {
+        AgentSessionEvent::Agent(rpi_agent::AgentEvent::ToolExecutionUpdate {
+            tool_call_id,
+            partial,
+            ..
+        }) => {
+            // bash 等工具的执行期进度:partial 为滚动尾窗快照,直接替换
+            // (预览区随帧重渲染;结果到达后由折叠的 ToolResult 定稿)
+            state.pending_tool_output = Some((tool_call_id, partial));
+        }
+        AgentSessionEvent::Agent(rpi_agent::AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            is_error,
+            ..
+        }) => {
             state.last_tool_error = is_error;
+            if state
+                .pending_tool_output
+                .as_ref()
+                .is_some_and(|(id, _)| *id == tool_call_id)
+            {
+                state.pending_tool_output = None;
+            }
             state.status = Status::Thinking;
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::TurnEnd { message, .. }) => {
@@ -1142,6 +1314,7 @@ async fn handle_session_event(
         AgentSessionEvent::AgentSettled => {
             // 兜底:工具结果未到达时,标题仍要落盘(状态用终态色)
             let leftover = std::mem::take(&mut state.pending_tools);
+            state.pending_tool_output = None;
             for (_, name, args) in leftover {
                 let status = if state.last_tool_error {
                     ToolStatus::Error

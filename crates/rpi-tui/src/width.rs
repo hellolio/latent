@@ -99,6 +99,32 @@ pub fn wrap_to_width(s: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
+/// 按显示宽度硬折行(逐字符,保留全部空白;空输入返回单行空串)。
+/// 与 `wrap_to_width` 的词边界折行不同,本函数不做任何空白归一化——
+/// 输入框等需要"所见即所得"的编辑场景使用(行尾空格、连续空格都
+/// 占位可见,光标列与实际字符一一对应)。
+pub fn wrap_verbatim(s: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut lines = Vec::new();
+    for raw_line in s.split('\n') {
+        let mut current = String::new();
+        let mut current_width = 0;
+        for c in raw_line.chars() {
+            let w = char_width(c);
+            if current_width + w > max_width {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            current.push(c);
+            current_width += w;
+        }
+        lines.push(current);
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +185,19 @@ mod tests {
     fn wrap_cjk_line() {
         // 每行最多 4 列:两个汉字一行
         assert_eq!(wrap_to_width("中文中文", 4), vec!["中文", "中文"]);
+    }
+
+    #[test]
+    fn wrap_verbatim_preserves_all_whitespace() {
+        // 行尾/行首空格保留、连续空格不合并、超宽硬切
+        assert_eq!(wrap_verbatim("a ", 10), vec!["a "]);
+        assert_eq!(wrap_verbatim(" a", 10), vec![" a"]);
+        assert_eq!(wrap_verbatim("a  b", 10), vec!["a  b"]);
+        assert_eq!(wrap_verbatim("abcdef", 3), vec!["abc", "def"]);
+        assert_eq!(wrap_verbatim("ab cdef", 3), vec!["ab ", "cde", "f"]);
+        assert_eq!(wrap_verbatim("a\n\nb", 10), vec!["a", "", "b"]);
+        // 光标前缀列数与实际字符位置一致(空格占位)
+        let rows = wrap_verbatim("ab ", 10);
+        assert_eq!(display_width(&rows[0]), 3);
     }
 }

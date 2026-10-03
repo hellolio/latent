@@ -49,7 +49,7 @@ def test_theme_flag_selects_startup_theme():
         app.wait_ready()
         # 启动即应用主题:无报错、UI 正常
         app.expect_absent("未知主题")
-        app.expect_text(r"❯")
+        app.expect_text("Ask rpi to do anything")
         app.sendline("/theme")
         app.expect_text("选择主题")
     finally:

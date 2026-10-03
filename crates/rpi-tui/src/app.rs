@@ -35,6 +35,11 @@ const SHOW_CURSOR: &str = "\x1b[?25h";
 const RESET_SGR: &str = "\x1b[0m";
 const AUTO_WRAP_OFF: &str = "\x1b[?7l";
 const AUTO_WRAP_ON: &str = "\x1b[?7h";
+/// bracketed paste(\x1b[?2004h/l):开启后终端把粘贴内容包在 `\x1b[200~…`
+/// `\x1b[201~` 里整块送达,粘贴中的换行不再伪装成 Enter 击键——多行粘贴
+/// 由此不会逐行触发提交。crossterm 解析为 `Event::Paste` → `Key::Paste`。
+const BRACKETED_PASTE_ON: &str = "\x1b[?2004h";
+const BRACKETED_PASTE_OFF: &str = "\x1b[?2004l";
 /// kitty keyboard protocol:push disambiguate + report event types +
 /// report alternate keys(flags 1|2|4 = 7,与上游 pi 一致)。disambiguate
 /// 让修饰 Enter/Tab 等以 CSI 13;…u 上报(crossterm 解析出 SHIFT/ALT);
@@ -96,6 +101,7 @@ impl TuiApp<Stdout> {
         // shell 提示符后启动时,首帧才不会错位)
         let mut boot = String::from(AUTO_WRAP_OFF);
         boot.push_str(KEYBOARD_PUSH);
+        boot.push_str(BRACKETED_PASTE_ON);
         boot.push_str(HIDE_CURSOR);
         boot.push_str(&"\r\n".repeat(rows.saturating_sub(1) as usize));
         app.write_raw(boot.as_bytes())?;
@@ -310,6 +316,7 @@ impl<W: Write> TuiApp<W> {
             out.push_str("\r\n");
         }
         out.push_str(AUTO_WRAP_ON);
+        out.push_str(BRACKETED_PASTE_OFF);
         out.push_str(SHOW_CURSOR);
         if self.restores_terminal {
             // 内存 sink(测试)不写,避免污染回放字节流
@@ -403,6 +410,7 @@ impl<W: Write> Drop for TuiApp<W> {
             if self.restores_terminal {
                 let _ = disable_raw_mode();
                 let _ = self.out.write_all(AUTO_WRAP_ON.as_bytes());
+                let _ = self.out.write_all(BRACKETED_PASTE_OFF.as_bytes());
                 let _ = self.out.write_all(SHOW_CURSOR.as_bytes());
                 let _ = self.out.write_all(KEYBOARD_POP.as_bytes());
                 let _ = self.out.flush();
@@ -827,7 +835,8 @@ mod tests {
         // 锦定手写转义与 crossterm 官方命令字节一致,防两处漂移
         use ratatui::crossterm::Command;
         use ratatui::crossterm::event::{
-            KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+            DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+            PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
         };
         let mut push = String::new();
         // 与上游 pi 一致:disambiguate + 事件类型 + alternate keys(不启用
@@ -842,5 +851,13 @@ mod tests {
         let mut pop = String::new();
         PopKeyboardEnhancementFlags.write_ansi(&mut pop).unwrap();
         assert_eq!(pop, KEYBOARD_POP);
+        let mut paste_on = String::new();
+        EnableBracketedPaste.write_ansi(&mut paste_on).unwrap();
+        assert_eq!(paste_on, BRACKETED_PASTE_ON);
+        let mut paste_off = String::new();
+        DisableBracketedPaste.write_ansi(&mut paste_off).unwrap();
+        assert_eq!(paste_off, BRACKETED_PASTE_OFF);
+        // 启动序列开启、收尾序列关闭
+        assert!(paste_on != paste_off);
     }
 }

@@ -203,30 +203,63 @@ pub fn create_session_in_dir(
 /// `<dir>/<项目目录>/*.jsonl`;更深层与 `<stem>.ctx/` 快照目录不进入)。
 /// 非法/损坏文件跳过;目录不存在或无匹配返回 None。
 pub fn find_latest_session_file(dir: impl AsRef<Path>, cwd: Option<&str>) -> Option<PathBuf> {
+    list_session_files(dir, cwd).into_iter().next().map(|s| s.path)
+}
+
+/// 可续聊会话的摘要(列表展示用)。
+pub struct SessionSummary {
+    pub path: PathBuf,
+    pub modified: std::time::SystemTime,
+    pub session_id: String,
+    /// 首条 user 消息单行截断预览;无消息会话为 "(空会话)"
+    pub preview: String,
+}
+
+impl SessionSummary {
+    /// 修改时间的本地可读格式(`MM-dd HH:MM`,列表展示用)。
+    pub fn local_time(&self) -> String {
+        let millis = self
+            .modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0) as i64;
+        chrono::DateTime::from_timestamp_millis(millis)
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "??-?? ??:??".into())
+    }
+}
+
+/// 按修改时间倒序列出候选会话文件(最新在前;`--continue`/`-l`/TUI
+/// 会话切换共用同一候选集与排序)。扫描与过滤规则同 `find_latest_session_file`。
+pub fn list_session_files(dir: impl AsRef<Path>, cwd: Option<&str>) -> Vec<SessionSummary> {
     let dir = dir.as_ref();
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+    let mut candidates: Vec<SessionSummary> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return candidates;
+    };
+    for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
             // 新版式:项目子目录;读不了的子目录跳过
             if let Ok(subs) = std::fs::read_dir(&path) {
                 for sub in subs.flatten() {
-                    consider_session_file(&sub.path(), cwd, &mut best);
+                    consider_session_file(&sub.path(), cwd, &mut candidates);
                 }
             }
         } else {
-            consider_session_file(&path, cwd, &mut best);
+            consider_session_file(&path, cwd, &mut candidates);
         }
     }
-    best.map(|(_, path)| path)
+    candidates.sort_by_key(|summary| std::cmp::Reverse(summary.modified));
+    candidates
 }
 
-/// 单个候选文件的 --continue 判定(时间戳取最新者胜出)。
-fn consider_session_file(
-    path: &Path,
-    cwd: Option<&str>,
-    best: &mut Option<(std::time::SystemTime, PathBuf)>,
-) {
+/// 单个候选文件的 --continue 判定(收进倒序列表)。
+fn consider_session_file(path: &Path, cwd: Option<&str>, out: &mut Vec<SessionSummary>) {
     if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
         return;
     }
@@ -241,15 +274,71 @@ fn consider_session_file(
     let Ok(modified) = path.metadata().and_then(|meta| meta.modified()) else {
         return;
     };
+    let session_id;
     if let Some(cwd) = cwd {
         match read_session_header(path) {
-            Ok(header) if header.kind == "session" && header.cwd == cwd => {}
+            Ok(header) if header.kind == "session" && header.cwd == cwd => {
+                session_id = header.id;
+            }
             _ => return,
         }
+    } else {
+        session_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_string();
     }
-    if best.as_ref().is_none_or(|(latest, _)| modified > *latest) {
-        *best = Some((modified, path.to_path_buf()));
+    out.push(SessionSummary {
+        path: path.to_path_buf(),
+        modified,
+        session_id,
+        preview: first_user_message_preview(path),
+    });
+}
+
+/// 首条 user 消息文本的单行预览(截 80 字符);无消息会话返回占位文案。
+fn first_user_message_preview(path: &Path) -> String {
+    const PLACEHOLDER: &str = "(空会话)";
+    const MAX_CHARS: usize = 80;
+    let Ok(file) = std::fs::File::open(path) else {
+        return PLACEHOLDER.to_string();
+    };
+    use std::io::BufRead;
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        let Ok(entry) = serde_json::from_str::<Entry>(line.trim()) else {
+            continue;
+        };
+        if let Entry::Message {
+            message:
+                rpi_agent::AgentMessage::User {
+                    content, ..
+                },
+            ..
+        } = &entry
+        {
+            let single_line = content.lines().next().unwrap_or("").trim();
+            if single_line.is_empty() {
+                continue;
+            }
+            return truncate_chars(single_line, MAX_CHARS).to_string();
+        }
     }
+    PLACEHOLDER.to_string()
+}
+
+/// 按字符数截断(中英文一律按 char 计)。
+fn truncate_chars(text: &str, max: usize) -> &str {
+    if text.chars().count() <= max {
+        return text;
+    }
+    let cut = text
+        .char_indices()
+        .nth(max)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    &text[..cut]
 }
 
 fn read_session_header(path: &Path) -> Result<SessionHeader, SessionError> {

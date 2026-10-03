@@ -73,6 +73,10 @@ pub struct Theme {
     pub usage_ctx: Color,
     /// 单回合用量行:reasoning token(与 ctx 同色系,两者不同行显示)
     pub usage_reasoning: Color,
+    /// footer 模式标记:plan(粉红,与 warning 黄区分的只读提醒)
+    pub mode_plan: Color,
+    /// footer 激活的平行子 agent 标记(与 plan 粉、success 绿区分的独立色相)
+    pub subagent: Color,
     /// 补全弹窗边框(与 dim 区分的独立角色)
     pub popup_border: Color,
     /// 深色/浅色主题标记(驱动 syntect 高亮主题选择)

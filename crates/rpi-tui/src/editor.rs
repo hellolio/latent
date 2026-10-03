@@ -6,10 +6,25 @@
 //! 编辑器内消费(提交语义由上层决定)。
 
 use crate::key::Key;
-use crate::width::{display_width, wrap_to_width};
+use crate::width::{display_width, wrap_verbatim};
 
 const MAX_UNDO: usize = 100;
 const MAX_KILL_RING: usize = 10;
+/// 粘贴折叠阈值:行数或字符数任一超限即折叠为单行占位摘要。
+pub const PASTE_COLLAPSE_MIN_LINES: usize = 3;
+pub const PASTE_COLLAPSE_MIN_CHARS: usize = 200;
+
+/// 大段粘贴的完整内容(缓冲区里只放占位摘要,提交时经 `expanded_text`
+/// 展开;记录随会话保活以支撑历史回看后的再次展开)。
+struct PasteEntry {
+    id: usize,
+    lines: usize,
+    content: String,
+}
+
+fn paste_token(id: usize, lines: usize) -> String {
+    format!("[Pasted text #{id} +{lines} lines]")
+}
 
 /// 多行编辑器状态。
 #[derive(Default)]
@@ -23,6 +38,9 @@ pub struct Editor {
     history_index: Option<usize>,
     /// 历史浏览前的草稿
     draft: Option<String>,
+    /// 已折叠的大段粘贴(按 id 与占位符对应)
+    pastes: Vec<PasteEntry>,
+    next_paste_id: usize,
 }
 
 #[derive(Clone)]
@@ -96,7 +114,7 @@ impl Editor {
             }
             Key::Paste(text) => {
                 self.push_undo();
-                self.insert_text(text);
+                self.insert_paste(text);
                 true
             }
             Key::ShiftEnter | Key::Ctrl('j') | Key::AltEnter => {
@@ -235,9 +253,10 @@ impl Editor {
         }
     }
 
-    /// 提交时把当前文本压入历史(空文本不记)。
+    /// 提交时把当前文本压入历史(空文本不记)。历史记录展开后的完整内容:
+    /// 回看时占位符不再出现,所见即所发。
     pub fn commit_history(&mut self) {
-        let text = self.text();
+        let text = self.expanded_text();
         if !text.trim().is_empty() && self.history.last().map(|h| h != &text).unwrap_or(true) {
             self.history.push(text);
         }
@@ -245,22 +264,57 @@ impl Editor {
         self.draft = None;
     }
 
-    /// 可视化视图:逻辑行按宽度折行成视觉行(最多 max_rows 行,超出取尾部),
-    /// 并给出光标在视觉行中的 (行, 显示列)。
+    /// 粘贴入口:大段内容(行数/字符数超阈值)折叠为单行占位摘要,完整
+    /// 内容记录在案待提交时展开;短内容原样插入。终端粘贴的行分隔是
+    /// `\r`(`\r\n`),先统一归一为 `\n` 再入缓冲。
+    fn insert_paste(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let line_count = normalized.lines().count();
+        let char_count = normalized.chars().count();
+        if line_count >= PASTE_COLLAPSE_MIN_LINES || char_count >= PASTE_COLLAPSE_MIN_CHARS {
+            let id = self.next_paste_id + 1;
+            self.next_paste_id = id;
+            self.pastes.push(PasteEntry {
+                id,
+                lines: line_count,
+                content: normalized,
+            });
+            self.insert_text(&paste_token(id, line_count));
+        } else {
+            self.insert_text(&normalized);
+        }
+    }
+
+    /// 全文,粘贴占位符展开为完整内容(提交与历史记录的唯一取文口)。
+    /// 占位符被用户编辑破坏时不展开,原样保留。
+    pub fn expanded_text(&self) -> String {
+        let mut text = self.text();
+        for paste in &self.pastes {
+            let token = paste_token(paste.id, paste.lines);
+            if text.contains(&token) {
+                text = text.replace(&token, &paste.content);
+            }
+        }
+        text
+    }
+
+    /// 可视化视图:逻辑行按宽度硬折行成视觉行(最多 max_rows 行,超出取
+    /// 尾部),并给出光标在视觉行中的 (行, 显示列)。折行不做空白归一化
+    /// (wrap_verbatim):空格占位可见,光标列与实际字符一一对应。
     pub fn view(&self, width: usize, max_rows: usize) -> EditorView {
         let width = width.max(1);
         let mut rows: Vec<String> = Vec::new();
         let mut cursor: Option<(usize, usize)> = None;
         for (line_index, line) in self.lines.iter().enumerate() {
             let text: String = line.iter().collect();
-            let wrapped = wrap_to_width(&text, width);
+            let wrapped = wrap_verbatim(&text, width);
             for (row_in_line, row_text) in wrapped.iter().enumerate() {
                 rows.push(row_text.clone());
                 // 光标落点:光标所在逻辑行的第 N 视觉行
                 if line_index == self.cursor.0 {
                     let col = self.cursor.1;
                     let before: String = line[..col.min(line.len())].iter().collect();
-                    let before_rows = wrap_to_width(&before, width);
+                    let before_rows = wrap_verbatim(&before, width);
                     let cursor_row_in_line = before_rows.len().saturating_sub(1);
                     if cursor_row_in_line == row_in_line {
                         let row_prefix = before_rows.last().map(String::as_str).unwrap_or("");
@@ -447,6 +501,49 @@ mod tests {
     }
 
     #[test]
+    fn large_paste_collapses_to_placeholder_and_expands() {
+        let mut editor = Editor::new();
+        let content = (1..=5).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        editor.handle_key(&Key::Paste(content.clone()));
+        // 缓冲区只有占位摘要(单行),完整内容不出现在 text() 里
+        assert_eq!(editor.text(), "[Pasted text #1 +5 lines]");
+        assert_eq!(editor.line_count(), 1);
+        assert!(!editor.text().contains("line5"));
+        // 提交取文口展开为完整内容
+        assert_eq!(editor.expanded_text(), content);
+    }
+
+    #[test]
+    fn small_paste_inserts_inline_without_placeholder() {
+        let mut editor = Editor::new();
+        editor.handle_key(&Key::Paste("ab\ncd".into()));
+        // 2 行 < 阈值:原样保留,无占位符
+        assert_eq!(editor.text(), "ab\ncd");
+        assert_eq!(editor.expanded_text(), "ab\ncd");
+    }
+
+    #[test]
+    fn char_heavy_single_line_paste_collapses() {
+        let mut editor = Editor::new();
+        let content = "x".repeat(250);
+        editor.handle_key(&Key::Paste(content.clone()));
+        assert_eq!(editor.text(), "[Pasted text #1 +1 lines]");
+        assert_eq!(editor.expanded_text(), content);
+    }
+
+    #[test]
+    fn paste_history_records_expanded_content() {
+        let mut editor = Editor::new();
+        let content = (1..=4).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        editor.handle_key(&Key::Paste(content.clone()));
+        editor.commit_history();
+        editor.clear();
+        // ↑ 回看历史:展开后的完整内容(不再有占位符)
+        editor.handle_key(&Key::Up);
+        assert_eq!(editor.text(), content);
+    }
+
+    #[test]
     fn paste_middle_of_line_splits() {
         let mut editor = Editor::new();
         editor.set_text("ab");
@@ -552,6 +649,23 @@ mod tests {
         assert_eq!(view.rows, vec!["aaa", "b", "ccc"]);
         // 两次 Up:ccc → b → aaa,列保留
         assert_eq!(view.cursor, Some((0, 1)));
+    }
+
+    #[test]
+    fn view_preserves_spaces_and_cursor_after_them() {
+        // 空格占位可见(不做空白归一化):行尾空格保留在视觉行里,
+        // 光标列停在其后——输入空格有即时视觉反馈
+        let mut editor = Editor::new();
+        editor.set_text("ab ");
+        let view = editor.view(20, 6);
+        assert_eq!(view.rows, vec!["ab ".to_string()]);
+        assert_eq!(view.cursor, Some((0, 3)));
+
+        // 连续空格同样保留
+        editor.set_text("a  b");
+        let view = editor.view(20, 6);
+        assert_eq!(view.rows, vec!["a  b".to_string()]);
+        assert_eq!(view.cursor, Some((0, 4)));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! - `rpi --mode json "prompt"`                           事件 JSONL 上线
 //! - `rpi --mode rpc`                                     stdio JSONL RPC(编辑器集成)
 //! - `rpi --provider <id> [--model <id>] "prompt"`        指定真实 provider
+//! - `rpi -r` / `rpi -l`                                  续聊最近会话 / 列出历史会话
 //! - `rpi --mcp-mock-server`                              MCP 扩展自检服务端
 
 use std::io::IsTerminal;
@@ -45,6 +46,8 @@ enum Args {
         model: Option<String>,
         theme: Option<String>,
         cont: bool,
+        resume_index: Option<usize>,
+        list: bool,
         session_mode: Option<String>,
         sandbox_writes: Vec<String>,
         sandbox_network: bool,
@@ -68,6 +71,8 @@ fn parse_args(args: &[String]) -> Args {
     let mut theme: Option<String> = None;
     let mut mock = false;
     let mut cont = false;
+    let mut resume_index: Option<usize> = None;
+    let mut list = false;
     let mut session_mode: Option<String> = None;
     let mut sandbox_writes: Vec<String> = Vec::new();
     let mut sandbox_network = false;
@@ -101,8 +106,21 @@ fn parse_args(args: &[String]) -> Args {
                 mock = true;
                 i += 1;
             }
-            "--continue" | "-c" => {
+            // -r/--resume 是 -c/--continue 的别名;紧跟的纯数字 = -l 列表序号
+            "--continue" | "-c" | "--resume" | "-r" => {
                 cont = true;
+                let next = args.get(i + 1).map(String::as_str).unwrap_or_default();
+                if !next.is_empty() && next.chars().all(|c| c.is_ascii_digit()) {
+                    resume_index = next.parse().ok();
+                    if resume_index.is_none_or(|n| n == 0) {
+                        return Args::Invalid(format!("无效的会话序号: {next}"));
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            "--list" | "-l" => {
+                list = true;
                 i += 1;
             }
             "--session-mode" if i + 1 < args.len() => {
@@ -159,6 +177,8 @@ fn parse_args(args: &[String]) -> Args {
         model,
         theme,
         cont,
+        resume_index,
+        list,
         session_mode,
         sandbox_writes,
         sandbox_network,
@@ -176,20 +196,26 @@ async fn run(args: &[String]) -> Result<(), String> {
             print_help();
             std::process::exit(2);
         }
-        Args::Run {
-            mode,
-            provider,
-            model,
-            theme,
-            cont,
-            session_mode,
-            sandbox_writes,
-            sandbox_network,
-            prompt,
-        } => {
-            let (provider, model) = resolve_provider_and_model(provider, model)?;
-            let extension_specs = load_mcp_server_specs();
-            let session_store = resolve_session_store(cont)?;
+    Args::Run {
+        mode,
+        provider,
+        model,
+        theme,
+        cont,
+        resume_index,
+        list,
+        session_mode,
+        sandbox_writes,
+        sandbox_network,
+        prompt,
+    } => {
+        if list {
+            print_session_list();
+            return Ok(());
+        }
+        let (provider, model) = resolve_provider_and_model(provider, model)?;
+        let extension_specs = load_mcp_server_specs();
+        let session_store = resolve_session_store(cont, resume_index)?;
             // settings 运行期开关在入口解析一次,装配层不读用户配置文件
             let mut settings = rpi_cli::assembly::load_session_settings();
             // CLI flag > settings(13 文档 §12 优先级)
@@ -288,8 +314,12 @@ async fn run(args: &[String]) -> Result<(), String> {
 }
 
 /// 会话存储:默认在 `~/.rpi/sessions/<项目前缀>/` 新建 `<时间>__<session-id>.jsonl`;
-/// `--continue` 续聊当前项目最近的会话文件。HOME 缺失时降级为内存会话。
-fn resolve_session_store(cont: bool) -> Result<rpi_cli::assembly::SessionStore, String> {
+/// `--continue`/`-r` 续聊当前项目最近的会话文件(resume_index 指定 `-l`
+/// 列表中的序号,1 起)。HOME 缺失时降级为内存会话。
+fn resolve_session_store(
+    cont: bool,
+    resume_index: Option<usize>,
+) -> Result<rpi_cli::assembly::SessionStore, String> {
     use rpi_cli::assembly::SessionStore;
     let Some(home) = dirs_home() else {
         if cont {
@@ -301,20 +331,56 @@ fn resolve_session_store(cont: bool) -> Result<rpi_cli::assembly::SessionStore, 
     let sessions_dir = home.join(".rpi/sessions");
     if cont {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-        let file = rpi_session::find_latest_session_file(
-            &sessions_dir,
-            Some(cwd.to_string_lossy().as_ref()),
-        )
-        .ok_or_else(|| {
-            format!(
+        let sessions = rpi_session::list_session_files(&sessions_dir, Some(cwd.to_string_lossy().as_ref()));
+        if sessions.is_empty() {
+            return Err(format!(
                 "没有可续聊的会话({} 下没有当前项目的会话文件)",
                 sessions_dir.display()
+            ));
+        }
+        let index = resume_index.unwrap_or(1);
+        let summary = sessions.get(index - 1).ok_or_else(|| {
+            format!(
+                "会话序号 {index} 超出范围(共 {} 个,先用 rpi -l 查看列表)",
+                sessions.len()
             )
         })?;
-        println!("续聊会话:{}", file.display());
-        Ok(SessionStore::Resume { file })
+        println!("续聊会话:{}", summary.path.display());
+        Ok(SessionStore::Resume {
+            file: summary.path.clone(),
+        })
     } else {
         Ok(SessionStore::New { dir: sessions_dir })
+    }
+}
+
+/// `-l`/`--list`:打印当前项目的历史会话列表(最新在前,序号供 `rpi -r <n>`)。
+fn print_session_list() {
+    let Some(home) = dirs_home() else {
+        eprintln!("rpi: --list 需要 HOME 目录");
+        std::process::exit(1);
+    };
+    let sessions_dir = home.join(".rpi/sessions");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let sessions =
+        rpi_session::list_session_files(&sessions_dir, Some(cwd.to_string_lossy().as_ref()));
+    if sessions.is_empty() {
+        println!(
+            "没有历史会话({} 下没有当前项目的会话文件)",
+            sessions_dir.display()
+        );
+        return;
+    }
+    println!("当前项目的历史会话(最新在前;`rpi -r <序号>` 续聊对应会话):");
+    for (index, summary) in sessions.iter().enumerate() {
+        println!(
+            "  {:>3}. {}  {}  {}",
+            index + 1,
+            summary.local_time(),
+            &summary.session_id[..summary.session_id.len().min(8)],
+            summary.preview
+        );
+        println!("        {}", summary.path.display());
     }
 }
 
@@ -404,6 +470,8 @@ fn print_help() {
          \x20 rpi --provider <id> [--model <id>] \"prompt\"            指定真实 provider\n\
          \x20 rpi --model <provider>/<id> \"prompt\"                    provider/model 形式\n\
          \x20 rpi --continue [\"prompt\"]                               续聊当前项目最近的会话\n\
+         \x20 rpi -r [序号]                                            同 --continue(序号 = -l 列表序号)\n\
+         \x20 rpi -l                                                   列出当前项目的历史会话\n\
          \x20 rpi --mcp-mock-server                                   MCP 扩展自检服务端\n\
          \n\
          provider 示例:anthropic / openai / deepseek / openrouter / groq …\n\

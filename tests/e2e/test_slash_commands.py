@@ -18,13 +18,13 @@ def test_local_slash_commands_without_llm_requests():
         app.sendline("/help")
         app.expect_text("命令:")
         app.expect_text("/quit")
-        # /session:会话信息(id/file)
-        app.sendline("/session")
+        # /session info:会话信息(id/file);裸 /session 打开历史会话选择器
+        app.sendline("/session info")
         app.expect_text("id:")
         app.expect_text("file:")
         # /thinking high:footer 级别指示更新
         app.sendline("/thinking high")
-        app.expect_text("t:high")
+        app.expect_text("thinking:high")
         # /model 带参数:直接切换(成功路径无确认消息;同一模型切回不报错)
         app.sendline("/model e2e/e2e-model")
         time.sleep(0.5)

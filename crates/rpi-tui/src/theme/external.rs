@@ -87,6 +87,10 @@ pub fn from_name(name: ThemeName) -> Theme {
         usage_cost: p.warning,
         usage_ctx: p.accent,
         usage_reasoning: p.accent,
+        // 粉红:secondary(多主题为紫/品红系)向 error(红)偏移;subagent
+        // 独立色相直接取 secondary,与 plan 粉、success 绿区分
+        mode_plan: blend(p.secondary, p.error, 0.4),
+        subagent: p.secondary,
         popup_border: blend(p.bg, p.fg, 0.45),
         is_dark: p.is_dark(),
     };
@@ -99,6 +103,8 @@ pub fn from_name(name: ThemeName) -> Theme {
 fn refine(name: ThemeName, t: &mut Theme) {
     match name {
         ThemeName::TokyoNight => {
+            t.mode_plan = Color::Rgb(0xff, 0x79, 0xc6); // pink
+            t.subagent = Color::Rgb(0xbb, 0x9a, 0xf7); // purple
             // 去蓝化:accent/提示符/目录用橙色(pi 风格),大面积背景用
             // 低饱和石墨色,弱文字(dim)提亮保证可读
             t.accent = Color::Rgb(0xff, 0x9e, 0x64); // orange
@@ -111,6 +117,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.dim = Color::Rgb(0x7e, 0x85, 0x97); // 中性灰,弱文字可读
         }
         ThemeName::CatppuccinMocha => {
+            t.mode_plan = Color::Rgb(0xf5, 0xc2, 0xe7); // pink
             t.user_bg = Color::Rgb(0x31, 0x32, 0x44); // surface0
             t.border_idle = Color::Rgb(0x45, 0x47, 0x5a); // surface1
             t.md_code_block_border = t.border_idle;
@@ -120,6 +127,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0xcb, 0xa6, 0xf7); // mauve
         }
         ThemeName::CatppuccinLatte => {
+            t.mode_plan = Color::Rgb(0xea, 0x76, 0xcb); // pink
             t.user_bg = Color::Rgb(0xdf, 0xdf, 0xe1); // surface0
             t.border_idle = Color::Rgb(0xcc, 0xd0, 0xda); // surface1
             t.md_code_block_border = t.border_idle;
@@ -129,6 +137,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0x88, 0x39, 0xef); // mauve
         }
         ThemeName::Dracula => {
+            t.mode_plan = Color::Rgb(0xff, 0x79, 0xc6); // pink
             t.user_bg = Color::Rgb(0x44, 0x47, 0x5a); // selection
             t.border_idle = Color::Rgb(0x44, 0x47, 0x5a);
             t.md_code_block_border = t.border_idle;
@@ -138,6 +147,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0xff, 0x79, 0xc6); // pink
         }
         ThemeName::Nord => {
+            t.mode_plan = Color::Rgb(0xb4, 0x8e, 0xad); // aurora purple
             t.user_bg = Color::Rgb(0x3b, 0x42, 0x52); // polar night 2
             t.border_idle = Color::Rgb(0x43, 0x4c, 0x5e); // polar night 3
             t.md_code_block_border = t.border_idle;
@@ -147,6 +157,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0xb4, 0x8e, 0xad); // aurora purple
         }
         ThemeName::RosePine => {
+            t.mode_plan = Color::Rgb(0xeb, 0xbc, 0xba); // rose
             t.user_bg = Color::Rgb(0x1f, 0x1d, 0x2e); // surface
             t.border_idle = Color::Rgb(0x26, 0x23, 0x3a); // overlay
             t.md_code_block_border = t.border_idle;
@@ -156,6 +167,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0xc4, 0xa7, 0xe7); // iris
         }
         ThemeName::GruvboxDark => {
+            t.mode_plan = Color::Rgb(0xd3, 0x86, 0x9b); // purple
             t.user_bg = Color::Rgb(0x3c, 0x38, 0x36); // bg1
             t.border_idle = Color::Rgb(0x50, 0x49, 0x45); // bg2
             t.md_code_block_border = t.border_idle;
@@ -165,6 +177,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0xd3, 0x86, 0x9b); // purple
         }
         ThemeName::GruvboxLight => {
+            t.mode_plan = Color::Rgb(0x8f, 0x3f, 0x71); // purple
             t.user_bg = Color::Rgb(0xeb, 0xdb, 0xb2); // bg1
             t.border_idle = Color::Rgb(0xd5, 0xc4, 0xa1); // bg2
             t.md_code_block_border = t.border_idle;
@@ -174,6 +187,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0x8f, 0x3f, 0x71); // purple
         }
         ThemeName::OneDarkPro => {
+            t.mode_plan = Color::Rgb(0xc6, 0x78, 0xdd); // purple
             t.user_bg = Color::Rgb(0x31, 0x37, 0x3b); // selection
             t.border_idle = Color::Rgb(0x3e, 0x44, 0x51);
             t.md_code_block_border = t.border_idle;
@@ -183,6 +197,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0xc6, 0x78, 0xdd); // purple
         }
         ThemeName::SolarizedDark => {
+            t.mode_plan = Color::Rgb(0xd3, 0x36, 0x82); // magenta
             t.user_bg = Color::Rgb(0x07, 0x36, 0x42); // base02
             t.border_idle = Color::Rgb(0x58, 0x6e, 0x75); // base01
             t.md_code_block_border = t.border_idle;
@@ -192,6 +207,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0x6c, 0x71, 0xc4); // violet
         }
         ThemeName::SolarizedLight => {
+            t.mode_plan = Color::Rgb(0xd3, 0x36, 0x82); // magenta
             t.user_bg = Color::Rgb(0xee, 0xe8, 0xd5); // base2
             t.border_idle = Color::Rgb(0x93, 0xa1, 0xa1); // base1
             t.md_code_block_border = t.border_idle;
@@ -201,6 +217,7 @@ fn refine(name: ThemeName, t: &mut Theme) {
             t.usage_cache = Color::Rgb(0x6c, 0x71, 0xc4); // violet
         }
         ThemeName::MonokaiPro => {
+            t.mode_plan = Color::Rgb(0xf9, 0x26, 0x72); // pink/red
             t.user_bg = Color::Rgb(0x41, 0x41, 0x41); // dim selection
             t.border_idle = Color::Rgb(0x52, 0x52, 0x52);
             t.md_code_block_border = t.border_idle;

@@ -47,6 +47,8 @@ pub fn dark() -> Theme {
         usage_cost: Color::Rgb(0xe0, 0xaf, 0x68),
         usage_ctx: Color::Rgb(0x7a, 0xa2, 0xf7),
         usage_reasoning: Color::Rgb(0x7a, 0xa2, 0xf7),
+        mode_plan: Color::Rgb(0xff, 0x79, 0xc6),
+        subagent: Color::Rgb(0xbb, 0x9a, 0xf7),
         popup_border: Color::Rgb(0x6b, 0x73, 0x94),
         is_dark: true,
     }
@@ -92,6 +94,9 @@ pub fn dark_ansi() -> Theme {
         usage_cost: Color::Yellow,
         usage_ctx: Color::Blue,
         usage_reasoning: Color::Blue,
+        // 16 色下的粉红 = Magenta;subagent 用 Cyan 与 plan/git 绿区分
+        mode_plan: Color::Magenta,
+        subagent: Color::Cyan,
         popup_border: Color::DarkGray,
         is_dark: true,
     }

@@ -78,7 +78,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | 文件 | 说明 |
 |---|---|
 | `src/entry.rs` | 会话 entry 类型：14 种变体（pi 11 种 + rpi 扩展 tool_set_change/mode_change/context_ref），8 位 hex id + parentId 构成树；时间戳毫秒整数 |
-| `src/manager.rs` | `SessionManager`：append-only JSONL 树唯一权威；`branch()` 移动 leaf 指针零拷贝分叉；崩溃半行恢复；`find_latest_session_file`（--continue，排除子会话 tag 文件） |
+| `src/manager.rs` | `SessionManager`：append-only JSONL 树唯一权威；`branch()` 移动 leaf 指针零拷贝分叉；崩溃半行恢复；`find_latest_session_file`/`list_session_files`（--continue/-l/TUI 会话切换共用候选集，按 mtime 倒序、排除子会话 tag 文件） |
 | `src/projection.rs` | 上下文重建三算法（纯函数）：leaf→root 回溯、最新 compaction 虚拟展开、context_edit 投影（只投影 index==0 的 compaction）；哪些 entry 进/不进模型上下文 |
 | `src/compaction.rs` | 自动压缩全套：触发阈值（窗口 − reserve，reserve 支持绝对值/百分比双轨）、token 估算（usage 优先 + chars/4 启发式）、切点算法（**绝不在 toolResult 处切**）、序列化（tool result 截 2000 字符）、`Summarizer` trait 注入接缝、length/error 摘要拒绝入库 |
 | `tests/session_tree_and_compaction.rs` | 16 个集成测试：分叉投影、多压缩、切点边界、端到端 run_compaction、半行恢复 |
@@ -157,7 +157,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `src/markdown.rs` | Markdown 渲染（标题/列表/围栏代码块 syntect 高亮/GFM 表格/行内样式） |
 | `src/command_popup.rs` | 斜杠命令补全弹窗（前缀>子串>模糊打分；`/mode` 展开变体子项） |
 | `src/tool_card.rs` | 工具调用卡片：命令本身完整折行（不随 ctrl+o 变化），输出折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，上下各一行同色内边距；成功绿/失败红为压暗低饱和色调，运行中中性） |
-| `src/footer.rs` | 三行状态栏：cwd+git 分支 / token 段（↑prompt 含缓存明细 U/R 与命中率 / ↓out / ctx% 变色 / $cost）/ model·thinking；mode 标记 plan 黄、full-access 红 |
+| `src/footer.rs` | 两行状态栏：上=左 cwd+git 分支 + 右 token 段（↑prompt 含缓存明细 U/R 与命中率 / ↓out / ctx% 变色 / $cost）；下=左 agent:main(或当前子 agent)│模式标记（plan 黄、full-access 红）+ 右 model·thinking |
 | `src/theme/` | 语义主题：ratatui-themes 映射 + 逐主题微调（Tokyo Night/Catppuccin/Dracula…），16 色降级 ANSI |
 | `src/highlight.rs` / `text.rs` / `width.rs` / `key.rs` / `loader.rs` / `select_list.rs` / `header.rs` | syntect 高亮单例 / span 感知折行截断 / 零依赖 CJK 宽度表 / 按键语义归一 / spinner / 单选列表 / 启动横幅 |
 
@@ -165,10 +165,10 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 
 | 文件 | 说明 |
 |---|---|
-| `src/main.rs` | CLI 入口：flag 解析（--mode/--mock/--provider/--model/--theme/--continue/--session-mode/--plan/--yolo/--sandbox-*/--mcp-mock-server）、模式自动判定（两端 TTY → interactive 否则 print）、装配分支 |
+| `src/main.rs` | CLI 入口：flag 解析（--mode/--mock/--provider/--model/--theme/--continue|-c|-r [序号]/-l|--list/--session-mode/--plan/--yolo/--sandbox-*/--mcp-mock-server）、模式自动判定（两端 TTY → interactive 否则 print）、装配分支 |
 | `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子 + PI_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.rpi/settings.json` 优先） |
 | `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
-| `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent/session/quit；未识别 `/xxx` 本地警告不发给模型 |
+| `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent（无参打开 agent+off 选择器）/session（list/info）/quit；带变体命令裸调用只提示用法，部分输入回车展开变体选择页、方向键选定后回车执行；未识别 `/xxx` 本地警告不发给模型 |
 | `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`）、UI 状态机（`state.rs`）、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，rpi 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
 | `src/mcp_mock.rs` | mock MCP 扩展服务端（`rpi --mcp-mock-server`）：订阅 tool_call 拦截危险 bash + 注册 echo 工具 + elicitation 确认，供扩展全链路验收 |
 | `tests/modes.rs` | 四模式集成测试（ScriptedProvider 不联网）：json 剥 partial、rpc 反向通道、PI_* 注入、Plan 只读 bash、JSONL 重建 == 内存 context、ModeChange 持久化等 |
@@ -190,7 +190,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `harness.py` | 驱动核心 `RpiApp`：隔离临时 HOME + pexpect 真 PTY 启动 rpi + pyte 解析屏幕；API：`wait_ready`/`sendline`/`send_key`/`expect_text`（正则、忽略空白）/`expect_absent`/`visible_text`/`transcript`/`wait_for_requests`/`quit`；`finally` 必须 `close()` |
 | `mock_llm.py` | 本地 mock LLM：伪装 anthropic-messages SSE 端点，按场景 JSON 逐 turn 返回（`{"text":…}` / `{"tool_calls":[…]}` / `{"error":…, "status":500}` 三种 turn），记录请求体供反向断言 |
 | `conftest.py` / `pytest.ini` / `requirements.txt` | sys.path 注入 / DeprecationWarning 过滤 / pexpect+pyte+pytest（装全局环境，不建 venv） |
-| `test_*.py`（24 个场景） | startup 横幅、ask_and_reply 问答、tool_roundtrip 工具闭环、abort/abort_then_continue、ctrl_c 双击退出、steering 注入、continue 恢复、provider_error 重试、session_half_line 崩溃恢复、bash_tool 截断、bash_sanitize 净化对齐、parallel_tools 源序、tool_validation 非法参数、ctrl_o 折叠、write_edit 落盘、compact 空对话回归、new_session、plan_mode 审批流、theme、output_display CJK 回归、slash_commands、shift_enter 多行输入、quit |
+| `test_*.py`（25 个场景） | startup 横幅、ask_and_reply 问答、tool_roundtrip 工具闭环、abort/abort_then_continue、ctrl_c 双击退出、steering 注入、continue 恢复、provider_error 重试、session_half_line 崩溃恢复、bash_tool 截断、bash_sanitize 净化对齐、parallel_tools 源序、tool_validation 非法参数、ctrl_o 折叠、write_edit 落盘、compact 空对话回归、new_session、plan_mode 审批流、theme、output_display CJK 回归、slash_commands、shift_enter 多行输入、session_resume（-r/-l//session 切换）、quit |
 | `scenarios/*.json` | 21 个 mock 响应脚本（格式见 `scenarios/README.md`） |
 
 ## 配置文件体系

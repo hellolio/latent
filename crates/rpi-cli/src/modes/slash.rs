@@ -43,18 +43,18 @@ pub const COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "mode",
-        args: "[plan|confirm|full-access]",
-        description: "查看/切换会话模式(Shift+Tab 循环)",
+        args: "<plan|confirm|full-access>",
+        description: "切换会话模式(Shift+Tab 循环)",
     },
     SlashCommand {
         name: "subagent",
         args: "[off]",
-        description: "切换到平行子 agent 会话(上下文隔离);off = 回主会话",
+        description: "平行子 agent 会话;无参打开选择器,off 回主会话",
     },
     SlashCommand {
         name: "session",
-        args: "",
-        description: "显示会话信息与统计",
+        args: "<list|info>",
+        description: "list = 切换历史会话;info = 显示会话信息",
     },
     SlashCommand {
         name: "quit",
@@ -74,7 +74,7 @@ pub enum SlashAction {
     New,
     Mode { arg: Option<String> },
     Subagent { arg: Option<String> },
-    Session,
+    Session { arg: Option<String> },
     Quit,
 }
 
@@ -85,8 +85,11 @@ pub const MODE_VARIANTS: &[(&str, &str)] = &[
     ("full-access", "全自动:无审批、无沙箱"),
 ];
 
-/// `/subagent` 的参数变体(补全弹窗;无参数 = 弹出 agent 选择器)。
-pub const SUBAGENT_VARIANTS: &[(&str, &str)] = &[("off", "退出子 agent,回到主会话")];
+/// `/session` 的参数变体(声明序即弹窗展示序)。
+pub const SESSION_VARIANTS: &[(&str, &str)] = &[
+    ("list", "切换历史会话(列表选择)"),
+    ("info", "显示当前会话信息与统计"),
+];
 
 /// 补全弹窗条目(静态命令表 + `/mode` 参数变体)。
 pub fn popup_entries() -> Vec<rpi_tui::CommandEntry> {
@@ -101,9 +104,9 @@ pub fn popup_entries() -> Vec<rpi_tui::CommandEntry> {
                         .map(|(name, desc)| ((*name).to_string(), (*desc).to_string()))
                         .collect(),
                 )
-            } else if command.name == "subagent" {
+            } else if command.name == "session" {
                 entry.with_variants(
-                    SUBAGENT_VARIANTS
+                    SESSION_VARIANTS
                         .iter()
                         .map(|(name, desc)| ((*name).to_string(), (*desc).to_string()))
                         .collect(),
@@ -142,7 +145,9 @@ pub fn parse(input: &str) -> SlashInput {
     match name.as_str() {
         "help" => SlashInput::Command(SlashAction::Help),
         "quit" => SlashInput::Command(SlashAction::Quit),
-        "session" => SlashInput::Command(SlashAction::Session),
+        "session" => SlashInput::Command(SlashAction::Session {
+            arg: arg.map(str::to_string),
+        }),
         "model" => SlashInput::Command(SlashAction::Model {
             arg: arg.map(str::to_string),
         }),
@@ -196,7 +201,13 @@ mod tests {
         assert_eq!(parse("/quit"), SlashInput::Command(SlashAction::Quit));
         assert_eq!(
             parse("  /session  "),
-            SlashInput::Command(SlashAction::Session)
+            SlashInput::Command(SlashAction::Session { arg: None })
+        );
+        assert_eq!(
+            parse("/session info"),
+            SlashInput::Command(SlashAction::Session {
+                arg: Some("info".into())
+            })
         );
         assert_eq!(
             parse("/compact"),
