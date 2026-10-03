@@ -13,6 +13,9 @@ ratatui = { version = "0.30.2" }
 # 主题源:与 ratatui 0.30 共用同一 ratatui-core,Color/Style 类型互通
 ratatui-themes = "0.3.0"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+# 扩展语法集(嵌入数据 = syntect 默认集 + TypeScript/TOML 等补充语法),
+# 后端 feature 与精确版本的说明见根 Cargo.toml 登记处
+two-face = { workspace = true }
 
 # macOS 本地修饰键查询(readkey 内部封装 CoreGraphics FFI,本仓不写
 # unsafe):不支持 kitty 协议的终端(WezTerm 默认配置、Terminal.app 等)

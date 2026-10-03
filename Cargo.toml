@@ -60,6 +60,12 @@ readkey = "=0.2.2"
 # (07 §8.7 风险条款:新 spec 支持为 beta → pin 精确版本 + in-memory 测试锁行为)
 rmcp = { version = "=3.4.1", features = ["client", "server", "elicitation", "transport-async-rw", "transport-child-process"] }
 
+# rpi-tui 代码高亮扩展语法集:补齐 syntect 默认集缺失的 TypeScript/TSX/
+# TOML/Kotlin/Zig 等(默认集是老版 Sublime 包,现代语言大面积退化为纯文本);
+# syntect-default-fancy 与 syntect 依赖的 default-fancy 后端保持一致,
+# 避免两套 regex 后端同时编入;钉死精确版本(嵌入语法定义随版本变化)
+two-face = { version = "=0.5.2", default-features = false, features = ["syntect-default-fancy"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

@@ -1,7 +1,8 @@
 //! 代码块语法高亮(syntect):VS Code 同源 TextMate 语法,输出 ratatui
-//! spans。主题跟随界面主题的明暗:深色 → base16-ocean.dark,浅色 →
-//! InspiredGitHub。首次使用时惰性加载语法集(启动开销 ~100ms,无代码块
-//! 的会话不付出成本)。
+//! spans。语法集用 two-face 扩展包(syntect 默认集 + TypeScript/TOML 等
+//! 补充语法,默认集是老版 Sublime 包,现代语言会退化为纯文本)。主题跟随
+//! 界面主题的明暗:深色 → base16-ocean.dark,浅色 → InspiredGitHub。
+//! 首次使用时惰性加载语法集(启动开销 ~100ms,无代码块的会话不付出成本)。
 
 use std::sync::OnceLock;
 
@@ -11,7 +12,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
-/// 高亮器(syntect 默认语法集 + 按明暗选择的高亮主题)。
+/// 高亮器(two-face 扩展语法集 + 按明暗选择的高亮主题)。
 pub struct Highlighter {
     syntax_set: SyntaxSet,
     theme: Theme,
@@ -25,7 +26,7 @@ const LIGHT_SYNTAX_THEME: &str = "InspiredGitHub";
 
 impl Highlighter {
     fn load(syntax_theme: &str) -> Self {
-        let syntax_set = SyntaxSet::load_defaults_newlines();
+        let syntax_set = two_face::syntax::extra_newlines();
         let mut theme_set = ThemeSet::load_defaults();
         let theme = theme_set.themes.remove(syntax_theme).unwrap_or_default();
         Highlighter { syntax_set, theme }
@@ -96,6 +97,25 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "plain text");
+    }
+
+    #[test]
+    fn extended_languages_beyond_default_set_are_highlighted() {
+        // syntect 默认集(老版 Sublime 包)缺这些语言,靠 two-face 补齐;
+        // 缺失时整块退化为纯文本单色
+        let samples = [
+            ("ts", "const x: string = \"hi\";"),
+            ("tsx", "const el = <div className=\"a\">hi</div>;"),
+            ("toml", "[section]\nkey = \"value\""),
+            ("kotlin", "fun main() { val x = \"hi\" }"),
+            ("zig", "pub fn main() void {}"),
+        ];
+        for (lang, code) in samples {
+            let lines = Highlighter::shared(true).highlight(code, Some(lang));
+            let fg: std::collections::HashSet<_> =
+                lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.style.fg).collect();
+            assert!(fg.len() > 1, "{lang} 应有语法高亮(two-face 语法集缺失?): {fg:?}");
+        }
     }
 
     #[test]

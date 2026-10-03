@@ -531,6 +531,8 @@ pub async fn execute_command(
 ) -> bool {
     match action {
         slash::SlashAction::Help => {
+            // 与上文留一行间隔(commit_blank 去重,不会双写)
+            state.commit_blank();
             for line in slash::help_lines() {
                 state.commit_line(plain_dim(&line, &state.theme));
             }
@@ -539,6 +541,8 @@ pub async fn execute_command(
         slash::SlashAction::Session { arg } => match arg.as_deref() {
             Some("list") => open_session_selector(ctx, state).await,
             Some("info") => {
+                // 与上文留一行间隔(commit_blank 去重,不会双写)
+                state.commit_blank();
                 for line in session_info_lines(ctx, state) {
                     state.commit_line(plain_dim(&line, &state.theme));
                 }

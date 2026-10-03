@@ -80,11 +80,15 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
         left2.push(Span::styled(" │ ".to_string(), dim));
         left2.push(Span::styled(mode.clone(), style));
     }
-    let mut right2: Vec<Span<'static>> = vec![Span::styled(
-        format!("{} · thinking:{}", data.model, data.thinking),
-        // 模型行与 cwd 同色(此前 muted 过暗,与背景区分度不足)
-        Style::new().fg(theme.footer_cwd),
-    )];
+    let mut right2: Vec<Span<'static>> = vec![
+        Span::styled(
+            data.model.clone(),
+            // 模型行与 cwd 同色(此前 muted 过暗,与背景区分度不足)
+            Style::new().fg(theme.footer_cwd),
+        ),
+        // thinking 段弱化(与 ctx 段的 (auto) 标记同色)
+        Span::styled(format!(" · thinking:{}", data.thinking), dim),
+    ];
     if data.subagent_active > 0 {
         // 后台 subagent 运行数(14 文档 §4.3 进度可见:footer 状态段,不做活组件)
         right2.push(Span::styled(
@@ -466,6 +470,13 @@ mod tests {
             .find(|s| s.content.contains("mock/m1"))
             .unwrap();
         assert_eq!(model_span.style.fg, Some(theme.footer_cwd));
+        // thinking 段弱化,与 ctx 段的 (auto) 标记同色(dim)
+        let thinking_span = out[1]
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with(" · thinking:"))
+            .unwrap_or_else(|| panic!("thinking 段应独立成 span"));
+        assert_eq!(thinking_span.style.fg, Some(theme.dim));
     }
 
     #[test]
