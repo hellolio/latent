@@ -232,6 +232,7 @@ pub fn estimate_tokens(message: &AgentMessage) -> usize {
         } => command.len() + output.len(),
         AgentMessage::BranchSummary { summary, .. }
         | AgentMessage::CompactionSummary { summary, .. } => summary.len(),
+        AgentMessage::ModeSection { content, .. } => content.len(),
         AgentMessage::Custom(custom) => custom.kind.len() + custom.data.to_string().len(),
     };
     chars.div_ceil(4)
@@ -251,6 +252,7 @@ pub fn is_cut_point_message(message: &AgentMessage) -> bool {
             | AgentMessage::Custom(_)
             | AgentMessage::BranchSummary { .. }
             | AgentMessage::CompactionSummary { .. }
+            | AgentMessage::ModeSection { .. }
     )
 }
 
@@ -262,6 +264,7 @@ fn is_turn_start_message(message: &AgentMessage) -> bool {
             | AgentMessage::Custom(_)
             | AgentMessage::BranchSummary { .. }
             | AgentMessage::CompactionSummary { .. }
+            | AgentMessage::ModeSection { .. }
     )
 }
 
@@ -547,6 +550,9 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
             AgentMessage::BranchSummary { summary, .. }
             | AgentMessage::CompactionSummary { summary, .. } => {
                 parts.push(format!("[User]: {summary}"));
+            }
+            AgentMessage::ModeSection { content, .. } => {
+                parts.push(format!("[Mode constraint]: {content}"));
             }
             _ => {}
         }

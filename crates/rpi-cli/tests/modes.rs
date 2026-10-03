@@ -267,9 +267,9 @@ async fn rpc_mode_dispatches_commands_and_streams_events() {
             .unwrap_or_else(|| panic!("缺 id={id} 的应答:{output}"))
     };
 
-    // get_state:ok + 状态字段
+    // get_state:ok + 状态字段(转录含装配期 append 的模式节)
     assert_eq!(by_id(1)["ok"], true);
-    assert_eq!(by_id(1)["result"]["messageCount"], 0);
+    assert_eq!(by_id(1)["result"]["messageCount"], 1);
     assert_eq!(by_id(1)["result"]["isStreaming"], false);
 
     // prompt:ok + stopReason;事件流与应答在同一 stdout
@@ -523,10 +523,12 @@ async fn switch_new_session_starts_fresh_file_and_keeps_old() {
         .expect("文件会话应产生新文件");
     assert_ne!(new_file, old_file, "应切换到新的 session 文件");
     assert!(new_file.exists());
-    assert!(
-        built.session.agent().messages().is_empty(),
-        "切换后转录应为空"
-    );
+    let fresh_messages = built.session.agent().messages();
+    assert_eq!(fresh_messages.len(), 1, "切换后转录只含新会话模式节");
+    assert!(matches!(
+        fresh_messages[0],
+        rpi_agent::AgentMessage::ModeSection { .. }
+    ));
 
     // 旧文件原样保留(header + user + assistant,不追加)
     let old_after = std::fs::read_to_string(&old_file).unwrap();
@@ -649,10 +651,14 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
     {
         let resumed = rpi_session::create_session(Some(&file)).unwrap();
         let messages = session_messages(&resumed.entries());
-        // 转录纯净:只存状态类消息(user/assistant),无 system baseline
-        assert_eq!(messages.len(), 2, "user + assistant");
-        assert!(matches!(messages[0], rpi_agent::AgentMessage::User { .. }));
-        assert!(matches!(messages[1], rpi_agent::AgentMessage::Assistant(_)));
+        // 转录:模式节(装配期 apply_mode append)+ user + assistant
+        assert_eq!(messages.len(), 3, "modeSection + user + assistant");
+        assert!(matches!(
+            messages[0],
+            rpi_agent::AgentMessage::ModeSection { .. }
+        ));
+        assert!(matches!(messages[1], rpi_agent::AgentMessage::User { .. }));
+        assert!(matches!(messages[2], rpi_agent::AgentMessage::Assistant(_)));
 
         let leaf_before = resumed.get_leaf_id().unwrap();
         drop(resumed);
@@ -664,11 +670,11 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         let manager = built.session_manager.clone().unwrap();
         assert_eq!(manager.session_id(), session_id, "resume 不换 session id");
         let messages = session_messages(&manager.entries());
-        // resume 后续聊接在同一树上:不重复注入任何声明消息
-        assert_eq!(messages.len(), 4, "两轮对话");
-        assert!(matches!(&messages[2], rpi_agent::AgentMessage::User { .. }));
+        // resume 后续聊接在同一树上:模式与历史节点一致,不重复追加
+        assert_eq!(messages.len(), 5, "modeSection + 两轮对话");
+        assert!(matches!(&messages[3], rpi_agent::AgentMessage::User { .. }));
         assert!(matches!(
-            &messages[3],
+            &messages[4],
             rpi_agent::AgentMessage::Assistant(_)
         ));
         let _ = leaf_before;
@@ -732,15 +738,19 @@ async fn context_snapshot_recorded_per_request_and_excluded_from_projection() {
     let jsonl = std::fs::read_to_string(&session_file).unwrap();
     assert!(jsonl.contains("\"type\":\"context_ref\""), "entry 已落盘");
 
-    // 投影排除:重建上下文只有 user + assistant
+    // 投影排除:重建上下文只有 modeSection(装配期 append)+ user + assistant
     let context = rpi_session::build_session_context(
         &manager.branch_entries(),
         manager.get_leaf_id().as_deref(),
     );
-    assert_eq!(context.messages.len(), 2, "context_ref 不进上下文");
-    assert!(matches!(&context.messages[0], rpi_agent::AgentMessage::User { .. }));
+    assert_eq!(context.messages.len(), 3, "context_ref 不进上下文");
     assert!(matches!(
-        &context.messages[1],
+        &context.messages[0],
+        rpi_agent::AgentMessage::ModeSection { .. }
+    ));
+    assert!(matches!(&context.messages[1], rpi_agent::AgentMessage::User { .. }));
+    assert!(matches!(
+        &context.messages[2],
         rpi_agent::AgentMessage::Assistant(_)
     ));
 
@@ -871,9 +881,17 @@ async fn empty_active_tools_installs_nothing_and_declares_nothing() {
     built.session.prompt("你好").await.expect("prompt");
     built.session.wait_idle().await;
     let messages = built.session.agent().messages();
-    assert_eq!(messages.len(), 2, "user + assistant,无任何合成声明消息");
-    assert!(matches!(messages[0], rpi_agent::AgentMessage::User { .. }));
-    assert!(matches!(messages[1], rpi_agent::AgentMessage::Assistant(_)));
+    assert_eq!(
+        messages.len(),
+        3,
+        "modeSection + user + assistant,无任何合成声明消息"
+    );
+    assert!(matches!(
+        messages[0],
+        rpi_agent::AgentMessage::ModeSection { .. }
+    ));
+    assert!(matches!(messages[1], rpi_agent::AgentMessage::User { .. }));
+    assert!(matches!(messages[2], rpi_agent::AgentMessage::Assistant(_)));
 }
 
 /// transcript 统一(文档验收 Test 1–3):完整 run(user → assistant(tool call)

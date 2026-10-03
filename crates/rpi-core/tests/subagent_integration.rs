@@ -128,7 +128,6 @@ async fn fixture(
             compactor: None,
             subscribers: None,
             permission: Some(engine),
-            mode_section_cell: None,
         })
         .await
         .unwrap(),

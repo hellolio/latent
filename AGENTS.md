@@ -67,7 +67,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `src/tool.rs` | 接缝 #3：`trait Tool`（name/schema/execution_mode/prompt_snippet/execute）；错误走 `Err(ToolError)` 不编码进 content；`ToolOutput.terminate` 提前结束 |
 | `src/hooks.rs` | 接缝 #2：`trait LoopHooks`（唯一必填 `convert_to_llm`，不得 panic）；`ToolBlock`（block 拦截 / args 改参两用）；`PassthroughHooks` 把 BashExecution/BranchSummary/CompactionSummary 包成 XML user 消息 |
 | `src/event.rs` | `AgentEvent` 10 种 + `MessageDeltaPayload` 类型化增量 + `SharedPartial` 流式快照读口；`trait Subscriber` 串行 await 按订阅序保序 |
-| `src/message.rs` | `AgentMessage`：user/assistant/toolResult + 四个自定义变体（BashExecution/BranchSummary/CompactionSummary/Custom 逃生口） |
+| `src/message.rs` | `AgentMessage`：user/assistant/toolResult + 五个自定义变体（BashExecution/BranchSummary/CompactionSummary/ModeSection/Custom 逃生口） |
 | `tests/loop_integration.rs` | 循环集成测试（1500+ 行）：工具配对不变量（每 toolCall 恰一 toolResult，abort/panic/截断路径无缺口）、I3 硬退出 requeue、I4 并行双保序、I5 截断防振荡、护栏各项、转录纯净性 |
 | `tests/loop_properties.rs` | proptest property test：随机 turn 序列下配对/双保序/abort 配对/截断防振荡不变量 |
 | `tests/stream_deltas.rs` | 流式增量验收：事件序、thinking/toolcall args 逐块 delta、SharedPartial 单调增长、TurnEnd 携带 usage |
@@ -111,7 +111,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `src/retry.rs` | provider 重试薄装配（`RetryHooks` 上报 AutoRetryStart/End 事件；quota 类不重试） |
 | `src/permission/types.rs` | `SessionMode`（Plan/Confirm/FullAccess，默认 Plan，Shift+Tab 循环）、`ToolRiskClass` 静态分类、`Verdict`（Allow/Ask/Deny）、沙箱策略映射 |
 | `src/permission/engine.rs` | `PermissionEngine` 判定引擎：FullAccess 全放 → 会话级审批缓存 → 按风险类分模式判定；可写根 = cwd + TMPDIR + /tmp + 配置 |
-| `src/permission/hooks.rs` | 审批流（before_tool_call 最外层装饰器）：Ask 时 await UI 应答；通道关闭 = Deny 不 fail-open；模式节以 Developer 消息插在最新一条 user 消息之前（保 KV 缓存前缀） |
+| `src/permission/hooks.rs` | 审批流（before_tool_call 最外层装饰器）：Ask 时 await UI 应答；通道关闭 = Deny 不 fail-open。模式节不经 hooks：`apply_mode` 把当前模式提示词作为持久 `ModeSection` 消息 append 进转录（位置永久固定，append-only 保 KV 缓存前缀；压缩/溢出恢复后经 `ensure_mode_node` 补追加） |
 | `src/permission/shell.rs` | shell 只读判定（1400+ 行纯函数）：mini shell lexer、内置只读前缀表、按 `;|&&` 分段校验、awk/sed/find/git 专用安全解析器 |
 | `src/permission/interp.rs` | awk/sed 脚本词法分析：拒绝管道/system/重定向等写副作用 |
 | `src/extensions/mod.rs` | 扩展接缝：`Extension` trait（编译期）、`ExtensionRegistry`、`ExtensionUi`（select/confirm/input/notify 反向通道）、`ExtensionActions` |
@@ -165,7 +165,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | 文件 | 说明 |
 |---|---|
 | `src/main.rs` | CLI 入口：flag 解析（--mode/--mock/--provider/--model/--theme/--continue/--session-mode/--plan/--yolo/--sandbox-*/--mcp-mock-server）、模式自动判定（两端 TTY → interactive 否则 print）、装配分支 |
-| `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/模式/扩展三层 hooks 洋葱（Approval 最外 → Mode → Extension）+ 沙箱 spawn 钩子 + PI_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.rpi/settings.json` 优先） |
+| `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子 + PI_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.rpi/settings.json` 优先） |
 | `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
 | `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent/session/quit；未识别 `/xxx` 本地警告不发给模型 |
 | `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`）、UI 状态机（`state.rs`）、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，rpi 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |

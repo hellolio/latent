@@ -10,7 +10,7 @@ pub mod shell;
 pub mod types;
 
 pub use engine::{ApprovalRules, PermissionEngine};
-pub use hooks::{ApprovalHooks, ApprovalUi, HeadlessApproval, HeadlessApprovalUi, ModeHooks};
+pub use hooks::{ApprovalHooks, ApprovalUi, HeadlessApproval, HeadlessApprovalUi};
 pub use types::{mode_section,
     classify_tool, mode_baseline_tools, normalize_command, policy_for_mode, ApprovalDecision,
     ApprovalKey, ApprovalReason, ApprovalRequest, SessionMode, SandboxConfig, SandboxPolicy,

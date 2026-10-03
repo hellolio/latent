@@ -136,7 +136,6 @@ async fn build_session(
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
-        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -312,7 +311,6 @@ async fn overflow_recovery_trims_and_retries() {
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
-        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -392,7 +390,6 @@ async fn extension_registered_tool_joins_session() {
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
-        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -487,7 +484,6 @@ async fn overflow_recovery_uses_unified_compactor() {
         compactor: Some(compactor.clone()),
         subscribers: None,
         permission: None,
-        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -551,7 +547,6 @@ async fn auto_compact_triggers_at_threshold_after_run() {
         compactor: Some(compactor.clone()),
         subscribers: None,
         permission: None,
-        mode_section_cell: None,
     })
     .await
     .unwrap();
@@ -579,4 +574,119 @@ async fn auto_compact_triggers_at_threshold_after_run() {
         2,
         "每次成功 run 后都应检查阈值"
     );
+}
+
+// ---- 模式节 append-only(替代旧的"每请求尾插 Developer 消息")----
+
+use rpi_core::SessionMode;
+
+/// 模式切换把 ModeSection 消息 append 进转录并落盘;同模式重复切换去重;
+/// 切换到新模式再追加一条(旧节点保留,entering/exiting 成对自描述)。
+#[tokio::test]
+async fn set_mode_appends_mode_section_and_dedupes() {
+    let m = model();
+    let (session, _log, sink, _provider) = build_session(
+        vec![ScriptedTurn::text(&m, "回复")],
+        vec![],
+        None,
+        SystemPromptOptions::default(),
+    )
+    .await;
+
+    session.set_mode(SessionMode::Plan).await.unwrap();
+    session.set_mode(SessionMode::Plan).await.unwrap();
+    let messages = session.agent().messages();
+    assert_eq!(messages.len(), 1, "同模式重复切换只追加一条节点");
+    assert!(matches!(&messages[0], AgentMessage::ModeSection { content, .. } if content.contains("entering Plan mode")));
+
+    session.set_mode(SessionMode::FullAccess).await.unwrap();
+    let messages = session.agent().messages();
+    assert_eq!(messages.len(), 2, "新模式节点追加,旧节点保留");
+    assert!(matches!(&messages[1], AgentMessage::ModeSection { content, .. } if content.contains("exiting Plan mode")));
+
+    // 持久化:sink 收到两条 ModeSection(mode_change entry 走 trait 默认空实现)
+    let persisted = sink.0.lock().unwrap();
+    assert_eq!(persisted.len(), 2);
+    assert!(persisted.iter().all(|m| matches!(m, AgentMessage::ModeSection { .. })));
+}
+
+/// 压缩会吞掉切点之前的模式节点:compact 后若转录中无当前模式节点则补追加。
+#[tokio::test]
+async fn compact_reappends_current_mode_section() {
+    struct DropAllCompactor;
+    #[async_trait]
+    impl rpi_core::ContextCompactor for DropAllCompactor {
+        async fn compact(&self, _model: &Model) -> Result<Vec<AgentMessage>, String> {
+            Ok(vec![AgentMessage::user("压缩后的上下文")])
+        }
+    }
+
+    let m = model();
+    let provider = Arc::new(ScriptedProvider::new(&m, vec![ScriptedTurn::text(&m, "回复")]));
+    let session = create_agent_session(AgentSessionConfig {
+        provider,
+        model: m.clone(),
+        hooks: Arc::new(PassthroughHooks),
+        ui: Arc::new(NoopUi),
+        extensions: rpi_core::ExtensionRegistry::default(),
+        tools: vec![],
+        active_tool_names: None,
+        system_prompt: SystemPromptOptions::default(),
+        limits: rpi_agent::TurnLimits::default(),
+        stream_options: Default::default(),
+        session_sink: None,
+        seed_messages: Vec::new(),
+        compactor: Some(Arc::new(DropAllCompactor)),
+        subscribers: None,
+        permission: None,
+    })
+    .await
+    .unwrap();
+
+    session.set_mode(SessionMode::Plan).await.unwrap();
+    session.compact().await.unwrap();
+    let messages = session.agent().messages();
+    assert_eq!(
+        messages.len(),
+        2,
+        "压缩投影 + 补追加的当前模式节点,实际 {messages:?}"
+    );
+    assert!(matches!(&messages[0], AgentMessage::User { .. }));
+    assert!(matches!(
+        &messages[1],
+        AgentMessage::ModeSection { content, .. } if content.contains("entering Plan mode")
+    ));
+}
+
+/// resume 老会话文件(无 ModeSection 消息,只有 mode_change entry):恢复后
+/// 按当前模式补一条节点 —— 老格式会话文件的向后兼容路径。
+#[tokio::test]
+async fn resume_without_mode_section_appends_node() {
+    let m = model();
+    let provider = Arc::new(ScriptedProvider::new(&m, Vec::new()));
+    let session = create_agent_session(AgentSessionConfig {
+        provider,
+        model: m.clone(),
+        hooks: Arc::new(PassthroughHooks),
+        ui: Arc::new(NoopUi),
+        extensions: rpi_core::ExtensionRegistry::default(),
+        tools: vec![],
+        active_tool_names: None,
+        system_prompt: SystemPromptOptions::default(),
+        limits: rpi_agent::TurnLimits::default(),
+        stream_options: Default::default(),
+        session_sink: None,
+        // 老格式转录:只有对话消息,没有模式节
+        seed_messages: vec![AgentMessage::user("之前的问题")],
+        compactor: None,
+        subscribers: None,
+        permission: None,
+    })
+    .await
+    .unwrap();
+
+    session.apply_mode_without_persist(SessionMode::Plan).await.unwrap();
+    let messages = session.agent().messages();
+    assert_eq!(messages.len(), 2, "历史 + 补追加的模式节点");
+    assert!(matches!(&messages[1], AgentMessage::ModeSection { content, .. } if content.contains("entering Plan mode")));
 }

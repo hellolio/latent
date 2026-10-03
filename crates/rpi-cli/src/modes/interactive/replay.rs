@@ -135,6 +135,12 @@ fn replay_message(message: &AgentMessage, theme: &rpi_tui::Theme) -> Vec<Transcr
                 ratatui::style::Style::new().fg(theme.dim),
             )),
         )],
+        AgentMessage::ModeSection { content, .. } => vec![TranscriptItem::Line(
+            ratatui::text::Line::from(ratatui::text::Span::styled(
+                format!("── 模式切换: {}", first_line(content)),
+                ratatui::style::Style::new().fg(theme.dim),
+            )),
+        )],
         AgentMessage::Custom(_) => vec![TranscriptItem::Blank],
     }
 }

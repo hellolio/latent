@@ -15,7 +15,7 @@ use rpi_agent::{AgentEvent, RunStop};
 use rpi_core::{
     create_agent_session, create_extension_event_bus, ApprovalHooks, ApprovalRules, ApprovalUi,
     AgentSession, AgentSessionConfig, AgentSessionEvent, ExtensionHooks, ExtensionUi, HeadlessApproval,
-    HeadlessApprovalUi, McpServerSpec, ModeHooks, NoopUi, PermissionEngine, SandboxConfig,
+    HeadlessApprovalUi, McpServerSpec, NoopUi, PermissionEngine, SandboxConfig,
     SessionMode,
     SessionSharedSubscriber, SessionSink, SessionSubscriber, SandboxPolicy as CoreSandboxPolicy,
     SystemPromptOptions,
@@ -747,12 +747,10 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 共享订阅者(审批事件/重试事件/总线共用同一列表)
     let subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>> = Arc::new(Mutex::new(Vec::new()));
 
-    // 决策类埋点:Approval(最外)→ Mode → Extension(最内)→ Passthrough。
+    // 决策类埋点:Approval(最外)→ Extension(最内)→ Passthrough。
     // 审批先问(便宜、人审),批准后才轮到扩展埋点(13 文档 §4.1)。
-    // 父链多一层 ModeHooks:可切换模式节(如 Plan)以 Developer 消息追加在
-    // 每请求消息数组末尾(最新位置,用户消息轮与每轮工具调用后都重新追加,
-    // 历史前缀恒定保 KV 缓存命中);子 agent 用不含 Mode 的链,避免父模式
-    // 提示词误导子会话。
+    // 模式节不经 hooks:apply_mode 把当前模式提示词作为持久 ModeSection
+    // 消息 append 进转录(位置永久固定,append-only 保 KV 缓存前缀)。
     let base_inner_hooks: Arc<dyn rpi_agent::LoopHooks> = if bus.is_empty() {
         Arc::new(rpi_agent::PassthroughHooks)
     } else {
@@ -761,7 +759,6 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             bus.clone(),
         ))
     };
-    let mode_section_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let approval_ui: Arc<dyn ApprovalUi> = approval_ui
         .unwrap_or_else(|| Arc::new(HeadlessApprovalUi { policy: HeadlessApproval::Deny }));
     let approval_ui_for_factory = approval_ui.clone();
@@ -772,7 +769,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         subscribers.clone(),
     ));
     let hooks: Arc<dyn rpi_agent::LoopHooks> = Arc::new(ApprovalHooks::new(
-        Arc::new(ModeHooks::new(base_inner_hooks, mode_section_cell.clone())),
+        base_inner_hooks,
         engine.clone(),
         approval_ui,
         subscribers.clone(),
@@ -1056,14 +1053,15 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             compactor: Some(compactor),
             subscribers: Some(subscribers.clone()),
             permission: Some(engine.clone()),
-            mode_section_cell: Some(mode_section_cell.clone()),
         })
         .await
         .map_err(|e| e.to_string())?,
     );
 
     // 会话模式应用(13 文档 §8.1/§9.3):新会话文件落 ModeChange entry 自描述;
-    // resume 只恢复不落盘(entry 已有)    session.set_default_mode(default_session_mode);
+    // resume 只恢复不落盘(entry 已有)。模式节消息由 apply_mode append 进转录:
+    // 新会话/老会话文件缺节点时追加,resume 历史已有相同节点则去重跳过
+    session.set_default_mode(default_session_mode);
     if matches!(session_store, SessionStore::New { .. }) {
         session.set_mode(effective_mode).await.map_err(|e| e.to_string())?;
     } else {

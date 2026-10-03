@@ -33,8 +33,8 @@ def test_plan_mode_blocks_writes_then_approval_flow():
         try:
             app.wait_ready()
 
-            # 新会话默认 Plan:模式指令以请求级 Developer 消息投递(ce27e32 起
-            # 模式节迁出 system 提示词,保 KV 缓存前缀恒定;文本为 Plan 进入句)
+            # 新会话默认 Plan:模式指令以持久 ModeSection 消息 append 在转录
+            # (位置固定,append-only 保 KV 缓存前缀;文本为 Plan 进入句)
             app.sendline("帮我写一个文件")
             bodies = app.wait_for_requests(1)
             assert (
@@ -60,6 +60,14 @@ def test_plan_mode_blocks_writes_then_approval_flow():
             # 重发写入请求:变更类 bash 触发审批 overlay,数字键 1 批准一次
             # (批准的命令在 WorkspaceWrite 沙箱内执行,可写根 = cwd)
             app.sendline("继续,按计划执行")
+            # 第三次请求(新回合):旧进入句仍经历史携带(位置固定不动),
+            # /mode confirm 时追加的退出句也在请求中 —— append-only 验收点
+            bodies = app.wait_for_requests(3)
+            tail = str(bodies[2])
+            assert (
+                "You are entering Plan mode" in tail
+            ), "旧模式节应持久留在历史中随请求携带"
+            assert "You are exiting Plan mode" in tail, "切换模式后应追加新节点"
             app.expect_text("审批 bash")
             app.sendline("1")
 

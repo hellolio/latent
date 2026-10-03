@@ -3,7 +3,7 @@
 //! 封闭 enum + `Custom` 逃生口(09 B2)。转录只保留**状态类**消息(用户/助手/
 //! 工具结果等);系统提示词与工具 schema 属"能力规则",永远经请求级字段
 //! (`Context.system` / `tools`)动态下发,不以消息形式进转录或 session。
-//! 四种自定义消息由 `convert_to_llm` 折叠为 LLM 消息。
+//! 五种自定义消息由 `convert_to_llm` 折叠为 LLM 消息。
 
 use serde::{Deserialize, Serialize};
 
@@ -69,6 +69,14 @@ pub enum AgentMessage {
         #[serde(default)]
         timestamp: i64,
     },
+    /// 模式节(Plan/Confirm/FullAccess 约束提示词):模式切换时 append 进转录,
+    /// 位置永久固定(convert_to_llm → developer 消息);append-only 保 KV 缓存前缀
+    #[serde(rename_all = "camelCase")]
+    ModeSection {
+        content: String,
+        #[serde(default)]
+        timestamp: i64,
+    },
     /// 扩展/自定义消息逃生口;`kind` 做判别,details 边界统一 `serde_json::Value`(09 B5.4)
     Custom(CustomMessage),
 }
@@ -123,6 +131,11 @@ impl AgentMessage {
             _ => None,
         }
     }
+
+    /// 模式节消息便捷构造。
+    pub fn mode_section(content: impl Into<String>) -> Self {
+        AgentMessage::ModeSection { content: content.into(), timestamp: now_ms() }
+    }
 }
 
 #[cfg(test)]
@@ -145,12 +158,17 @@ mod tests {
             AgentMessage::BashExecution { command: "ls".into(), output: "out".into(), exit_code: Some(0), timestamp: 0 },
             AgentMessage::BranchSummary { summary: "s".into(), timestamp: 0 },
             AgentMessage::CompactionSummary { summary: "c".into(), timestamp: 0 },
+            AgentMessage::mode_section("You are entering Plan mode"),
         ];
         for message in messages {
             let value = serde_json::to_value(&message).unwrap();
             let back: AgentMessage = serde_json::from_value(value).unwrap();
             assert_eq!(back, message);
         }
+        assert_eq!(
+            serde_json::to_value(AgentMessage::mode_section("x")).unwrap()["role"],
+            "mode_section"
+        );
         let assistant_value = serde_json::to_value(AgentMessage::Assistant(Box::new({
             let mut m = rpi_ai::AssistantMessage::pending(&model);
             m.stop_reason = rpi_ai::StopReason::Stop;

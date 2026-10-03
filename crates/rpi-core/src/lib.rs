@@ -26,7 +26,7 @@ pub use model::{create_model_resolver, default_model_for, ModelResolver};
 pub use permission::{
     classify_tool, mode_baseline_tools, mode_section, normalize_command, policy_for_mode,
     ApprovalDecision, ApprovalHooks, ApprovalKey, ApprovalReason, ApprovalRequest, ApprovalUi,
-    ApprovalRules, HeadlessApproval, HeadlessApprovalUi, ModeHooks, PermissionEngine, SandboxConfig,
+    ApprovalRules, HeadlessApproval, HeadlessApprovalUi, PermissionEngine, SandboxConfig,
     SandboxPolicy, SessionMode, ToolRiskClass, Verdict,
 };
 pub use retry::{create_retrying_provider, RetryHooks};

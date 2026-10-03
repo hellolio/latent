@@ -10,7 +10,7 @@ use rpi_agent::{LoopHooks, PassthroughHooks, Tool};
 use rpi_ai::Model;
 
 use crate::permission::{
-    ApprovalHooks, ApprovalRules, ApprovalUi, HeadlessApproval, HeadlessApprovalUi, ModeHooks,
+    ApprovalHooks, ApprovalRules, ApprovalUi, HeadlessApproval, HeadlessApprovalUi,
     PermissionEngine, SandboxConfig,
 };
 use crate::session::{create_agent_session, AgentSession, SessionSharedSubscriber};
@@ -73,9 +73,8 @@ impl SubagentSessionFactory {
             None => fallback_model,
         };
 
-        // 独立引擎 + 独立 mode cell:模式/审批缓存/模式节随本会话走,
-        // 与主会话及其他平行会话互不影响(平权)
-        let mode_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        // 独立引擎:模式/审批缓存随本会话走,与主会话及其他平行会话互不影响
+        // (平权);模式节由 create_agent_session 的 apply_mode append 进转录
         let engine = Arc::new(PermissionEngine::new(
             self.engine.mode(),
             self.sandbox.clone(),
@@ -84,10 +83,7 @@ impl SubagentSessionFactory {
             self.sandbox_available,
         ));
         let hooks: Arc<dyn LoopHooks> = Arc::new(ApprovalHooks::new(
-            Arc::new(ModeHooks::new(
-                Arc::new(PassthroughHooks),
-                mode_cell.clone(),
-            )),
+            Arc::new(PassthroughHooks),
             engine.clone(),
             self.approval_ui.clone(),
             subscribers.clone(),
@@ -119,7 +115,6 @@ impl SubagentSessionFactory {
                 compactor: None,
                 subscribers: Some(subscribers),
                 permission: Some(engine),
-                mode_section_cell: Some(mode_cell),
             })
             .await
             .map_err(|e| e.to_string())?,
@@ -128,9 +123,8 @@ impl SubagentSessionFactory {
         session
             .agent()
             .set_system_prompt(Some(def.system_prompt.clone()));
-        // 初始模式与主会话装配行为一致:应用当前模式(写自己的 mode cell,
-        // Plan 等模式节随本会话注入,位置同主会话 = 用户最新输入之前);
-        // 落盘会话写 ModeChange entry,纯内存会话不写
+        // 初始模式与主会话装配行为一致:应用当前模式(Plan 等模式节 append
+        // 进转录,位于用户输入之前);落盘会话写 ModeChange entry,纯内存会话不写
         if store_was_persisted {
             session
                 .set_mode(self.engine.mode())
@@ -380,14 +374,14 @@ mod tests {
         assert_eq!(system, "You are a reviewer.", "系统提示词 = md 正文");
         assert_eq!(tools, &vec!["write".to_string()]);
         // 主引擎处于 Plan 模式:子会话与主会话行为一致 —— 模式节(进入句)
-        // 追加在消息数组末尾(最新位置),而非系统提示词里
+        // 作为持久 ModeSection 消息 append 在转录(user 之前),非系统提示词
         assert_eq!(roles.len(), 3, "{roles:?}");
         assert!(roles[0].starts_with("system:You are a reviewer."));
-        assert_eq!(roles[1], "user:hi", "用户输入在历史末尾");
         assert!(
-            roles[2].starts_with("developer:You are entering Plan mode"),
-            "模式节应为 Plan 进入提示词,追加在最新位置:{roles:?}"
+            roles[1].starts_with("developer:You are entering Plan mode"),
+            "模式节应为 Plan 进入提示词,append 在用户输入之前:{roles:?}"
         );
+        assert_eq!(roles[2], "user:hi", "用户输入在历史末尾");
         // 定义 model 缺省 → 继承 fallback(主会话模型)
         assert_eq!(session.agent().state_snapshot().model.unwrap().id, "mock-1");
 

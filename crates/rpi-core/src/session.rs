@@ -157,11 +157,6 @@ pub struct AgentSessionConfig {
     /// 权限引擎(可选):未装配 = 无权限行为(现状退化,可拆卸判据)。
     /// `set_mode` 经此触达引擎切档;ApprovalHooks 持有同一 Arc。
     pub permission: Option<Arc<PermissionEngine>>,
-    /// 模式提示词共享 cell(可选;ModeHooks 持有同一 Arc):apply_mode 写入
-    /// 当前模式的请求级补充指令(如 Plan 节),每请求以 Developer 消息追加在
-    /// 消息数组末尾(最新位置)—— 历史前缀恒定保 KV 缓存命中,不进上下文历史。
-    /// None = 无模式提示词行为。
-    pub mode_section_cell: Option<Arc<Mutex<Option<String>>>>,
 }
 
 /// 运行期可变状态(锁保护;无全局状态)。
@@ -211,8 +206,6 @@ pub struct AgentSession {
     compactor: Option<Arc<dyn ContextCompactor>>,
     /// 权限引擎(可选;见 AgentSessionConfig.permission)
     permission: Option<Arc<PermissionEngine>>,
-    /// 模式提示词共享 cell(与 ModeHooks 共享;apply_mode 写)
-    mode_section_cell: Option<Arc<Mutex<Option<String>>>>,
     runtime: Mutex<SessionRuntime>,
     /// 装配期收集的扩展诊断(init 失败跳过等,07 §8.5),面向 mode 可见。
     extension_diagnostics: Vec<ExtensionDiagnostic>,
@@ -291,7 +284,6 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
         compactor: config.compactor,
         permission: config.permission,
         extension_diagnostics,
-        mode_section_cell: config.mode_section_cell,
         runtime: Mutex::new(SessionRuntime {
             system_prompt: state,
             system_prompt_options: options,
@@ -495,14 +487,15 @@ impl AgentSession {
         Ok(())
     }
 
-    /// 切换会话模式(13 文档 §8.4,模式切换的唯一入口):工具集 + 系统提示词
-    /// mode 节 + 引擎切档 + entry 落盘,一次完成。落盘内联 await(理由同
+    /// 切换会话模式(13 文档 §8.4,模式切换的唯一入口):引擎切档 + mode 节
+    /// append 进转录 + entry 落盘,一次完成。落盘内联 await(理由同
     /// set_model:spawn 异步写会让 entry 排在后续消息之后)。
     pub async fn set_mode(&self, mode: SessionMode) -> Result<(), CoreError> {
         self.apply_mode(mode, true).await
     }
 
-    /// 恢复场景的 mode 应用(不落 entry;resume 回填用)。
+    /// 恢复场景的 mode 应用(不落 mode_change entry;resume 回填用)。
+    /// 模式节消息照常追加(历史里已有相同节点则去重跳过)。
     pub async fn apply_mode_without_persist(&self, mode: SessionMode) -> Result<(), CoreError> {
         self.apply_mode(mode, false).await
     }
@@ -527,15 +520,12 @@ impl AgentSession {
     }
 
     async fn apply_mode(&self, mode: SessionMode, persist: bool) -> Result<(), CoreError> {
-        // 模式切换三件事:写模式提示词 cell、引擎切档、entry 落盘。
+        // 模式切换:引擎切档 + entry 落盘 + 模式节 append。
         // 系统提示词与激活工具集**不随模式变化**(tools 数组恒定保 KV 缓存
         // 前缀命中);Plan 的只读约束由权限引擎在运行时强制(bash 只读检查 /
         // write Deny / 沙箱 ReadOnly 包装;无沙箱平台没有 OS 层兜底,只读
         // 判定就是最后保证 —— 通过即执行),拒绝原因进转录模型可自行换路径。
         self.runtime.lock().unwrap().mode = mode;
-        if let Some(cell) = &self.mode_section_cell {
-            *cell.lock().unwrap() = crate::permission::mode_section(mode);
-        }
 
         // 引擎切档(清审批缓存)
         if let Some(engine) = &self.permission {
@@ -548,7 +538,58 @@ impl AgentSession {
                 }
             }
         }
+        self.append_mode_section_node(mode).await;
         Ok(())
+    }
+
+    /// 模式节 append-only(替代旧的"每请求重插消息数组末尾"):把当前模式的
+    /// 约束提示词作为持久 `ModeSection` 消息追加进转录并落盘,位置永久固定在
+    /// 追加点 —— 相邻请求公共前缀 = 全部历史,KV 缓存前缀命中最大化。旧节点
+    /// 自然留在历史(entering/exiting 文本成对自描述)。与转录末尾已有节点
+    /// 内容相同则去重跳过(重复切换 / resume 回放收敛)。
+    async fn append_mode_section_node(&self, mode: SessionMode) {
+        let Some(content) = crate::permission::mode_section(mode) else {
+            return;
+        };
+        let last = self
+            .agent
+            .messages()
+            .into_iter()
+            .rev()
+            .find_map(|message| match message {
+                AgentMessage::ModeSection { content, .. } => Some(content),
+                _ => None,
+            });
+        if last.as_deref() == Some(content.as_str()) {
+            return;
+        }
+        self.append_transcript_message(AgentMessage::mode_section(content))
+            .await;
+    }
+
+    /// 压缩/溢出恢复后的模式节兜底:压缩投影会把切点之前的 ModeSection 吞进
+    /// 摘要,若转录中已无当前模式节点则补追加一条(内容相同则去重跳过)。
+    pub async fn ensure_mode_node(&self) {
+        let mode = self.mode();
+        self.append_mode_section_node(mode).await;
+    }
+
+    /// 向转录追加一条持久消息(内存 + sink 落盘;run 期间拒绝,与
+    /// record_bash_execution 同约束)。
+    async fn append_transcript_message(&self, message: AgentMessage) {
+        let mut messages = self.agent.messages();
+        messages.push(message.clone());
+        if let Err(error) = self.agent.set_messages(messages) {
+            // run 期间模式切换:引擎已切档,节点追加顺延到下次模式变更/
+            // 压缩兜底,不使切换失败
+            eprintln!("[rpi] mode section append skipped (agent busy): {error}");
+            return;
+        }
+        if let Some(sink) = &self.session_sink {
+            if let Err(error) = sink.append(&message).await {
+                eprintln!("[rpi] session sink mode section append failed: {error}");
+            }
+        }
     }
 
     /// 切换激活工具集:重建系统提示词 sections(请求级字段)+ 换可执行工具集,
@@ -654,6 +695,8 @@ impl AgentSession {
         self.agent
             .set_messages(messages)
             .map_err(|e| e.to_string())?;
+        // 压缩投影可能吞掉当前模式节点,补追加保约束在上下文中
+        self.ensure_mode_node().await;
         Ok(count)
     }
 
@@ -716,7 +759,11 @@ impl AgentSession {
                     Some(compactor) => match self.agent.state_snapshot().model {
                         Some(model) => match compactor.compact(&model).await {
                             Ok(messages) => match self.agent.set_messages(messages) {
-                                Ok(()) => self.agent.continue_run().await,
+                                Ok(()) => {
+                                    // 压缩投影可能吞掉当前模式节点,补追加
+                                    self.ensure_mode_node().await;
+                                    self.agent.continue_run().await
+                                }
                                 Err(error) => Err(error),
                             },
                             Err(error) => Err(AgentError::Other(error)),
@@ -727,6 +774,8 @@ impl AgentSession {
                         let message_count = self.agent.messages().len();
                         self.agent.drop_last_message();
                         self.agent.trim_oldest_messages(message_count / 2 + 1);
+                        // 裁剪可能裁掉模式节点,补追加
+                        self.ensure_mode_node().await;
                         self.agent.continue_run().await
                     }
                 };
@@ -766,11 +815,14 @@ impl AgentSession {
         })
         .await;
         let result = match compactor.compact(&model).await {
-            Ok(messages) => self
-                .agent
-                .set_messages(messages)
-                .map_err(|e| e.to_string())
-                .map(|_| ()),
+            Ok(messages) => {
+                let set = self.agent.set_messages(messages).map_err(|e| e.to_string());
+                if set.is_ok() {
+                    // 压缩投影可能吞掉当前模式节点,补追加
+                    self.ensure_mode_node().await;
+                }
+                set.map(|_| ())
+            }
             Err(error) => Err(error),
         };
         self.broadcast(&AgentSessionEvent::AutoRetryEnd {

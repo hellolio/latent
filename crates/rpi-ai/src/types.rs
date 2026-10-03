@@ -199,9 +199,9 @@ pub enum Message {
         timestamp: i64,
     },
     Assistant(Box<AssistantMessage>),
-    /// 请求级补充指令(可切换的模式节等):每请求追加在消息数组末尾(最新位置),
-    /// 不进转录(历史前缀恒定保 KV 缓存命中;适配器映射为 developer/user 角色,
-    /// 见各自实现)
+    /// 指令型消息(模式节等):位于消息序列中的任意位置,适配器映射为
+    /// developer/user 角色(见各自实现)。rpi 的模式节以持久 ModeSection
+    /// 消息经 convert_to_llm 折叠为本变体,位置 append-only 保 KV 缓存前缀
     Developer {
         content: String,
         #[serde(default)]

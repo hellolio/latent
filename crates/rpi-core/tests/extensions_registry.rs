@@ -87,7 +87,6 @@ async fn failing_extension_is_skipped_with_diagnostic_and_partial_tools_dropped(
         stream_options: Default::default(),
         subscribers: None,
         permission: None,
-        mode_section_cell: None,
         session_sink: None,
         compactor: None,
         seed_messages: Vec::new(),

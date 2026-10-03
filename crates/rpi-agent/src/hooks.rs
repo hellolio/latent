@@ -219,6 +219,9 @@ impl LoopHooks for PassthroughHooks {
                     "<compaction_summary>\n{}\n</compaction_summary>",
                     summary
                 ))),
+                AgentMessage::ModeSection { content, timestamp: _ } => {
+                    Some(Message::developer(content.clone()))
+                }
                 AgentMessage::Custom(_) => None,
             })
             .collect()
