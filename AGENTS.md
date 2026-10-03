@@ -105,14 +105,14 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | 文件 | 说明 |
 |---|---|
 | `src/session.rs` | 业务核 `AgentSession`：prompt/steer/follow_up、模式切换、激活工具集切换、overflow 恢复（`run_with_recovery`）与自动压缩（`maybe_auto_compact`）、`SessionSink`/`ContextCompactor` trait、事件翻译层 `SessionBridge` |
-| `src/system_prompt.rs` | 系统提示词命名 sections 机制（preamble/tools/rules/project_context/cwd/addendum）；提示词不持久化，恢复时按配置重组 |
+| `src/system_prompt.rs` | 系统提示词命名 sections 机制（preamble/tools/rules/project_context/env/addendum）；env 节含工作目录与当前本地时间，rules 节支持 system-prompt.md `<rules>` 标记块自定义追加；提示词不持久化，恢复时按配置重组 |
 | `src/model.rs` | `ModelResolver`：`provider/model` spec 解析、内置默认模型表、/model 候选清单 |
 | `src/config.rs` | models.json/settings.json 配置体系：全局 `~/.rpi` 先读、项目 `.rpi` 逐字段覆盖合并；apiKey 按环境变量名解析 |
 | `src/retry.rs` | provider 重试薄装配（`RetryHooks` 上报 AutoRetryStart/End 事件；quota 类不重试） |
 | `src/permission/types.rs` | `SessionMode`（Plan/Confirm/FullAccess，默认 Plan，Shift+Tab 循环）、`ToolRiskClass` 静态分类、`Verdict`（Allow/Ask/Deny）、沙箱策略映射 |
 | `src/permission/engine.rs` | `PermissionEngine` 判定引擎：FullAccess 全放 → 会话级审批缓存 → 按风险类分模式判定；可写根 = cwd + TMPDIR + /tmp + 配置 |
 | `src/permission/hooks.rs` | 审批流（before_tool_call 最外层装饰器）：Ask 时 await UI 应答；通道关闭 = Deny 不 fail-open。模式节不经 hooks：`apply_mode` 把当前模式提示词作为持久 `ModeSection` 消息 append 进转录（位置永久固定，append-only 保 KV 缓存前缀；压缩/溢出恢复后经 `ensure_mode_node` 补追加） |
-| `src/permission/shell.rs` | shell 只读判定（1400+ 行纯函数）：mini shell lexer、内置只读前缀表、按 `;|&&` 分段校验、awk/sed/find/git 专用安全解析器 |
+| `src/permission/shell.rs` | shell 命令三态判定（只读/联网查询/明确写/未知，1400+ 行纯函数）：mini shell lexer、内置只读前缀表 + 明确写前缀表 + 联网查询前缀表、按 `;|&&` 分段校验、awk/sed/find/git 专用安全解析器 |
 | `src/permission/interp.rs` | awk/sed 脚本词法分析：拒绝管道/system/重定向等写副作用 |
 | `src/extensions/mod.rs` | 扩展接缝：`Extension` trait（编译期）、`ExtensionRegistry`、`ExtensionUi`（select/confirm/input/notify 反向通道）、`ExtensionActions` |
 | `src/extensions/event_bus.rs` | 事件分发：15 观察类 + 6 决策类事件；block 短路、改参链（改参后重新过 schema）、fail-open/closed 按注册声明、断连诊断 |
@@ -201,7 +201,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | web-search.json | `.rpi/web-search.json` / `~/.rpi/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
 | skills | `.rpi/skills/<name>/SKILL.md` / `~/.rpi/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |
 | agents | `.rpi/agents/<name>.md` / `~/.rpi/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
-| system-prompt.md | `.rpi/system-prompt.md` | 替换系统提示词身份句（动态节保留） |
+| system-prompt.md | `.rpi/system-prompt.md` / `~/.rpi/…` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
 
 会话文件写 `~/.rpi/sessions/`（`<项目前缀>__<tag>__<id>.jsonl`）；`contextSnapshot` 开启时请求快照落旁路 `.ctx/` 目录，不进模型上下文。
 

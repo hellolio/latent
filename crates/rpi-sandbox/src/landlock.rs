@@ -34,13 +34,7 @@ pub fn kernel_support_detected() -> bool {
 impl Sandbox for LandlockSandbox {
     fn wrap_command(&self, command: &str, cwd: &Path) -> Result<String, String> {
         let roots = crate::writable_roots_for(&self.policy, cwd);
-        let network = matches!(
-            &self.policy,
-            SandboxPolicy::WorkspaceWrite {
-                network_access: true,
-                ..
-            }
-        );
+        let network = crate::policy_network_access(&self.policy);
         let mut argv: Vec<String> = vec![
             shell_quote(&self.helper_exe.display().to_string()),
             HELPER_FLAG.into(),
@@ -214,9 +208,23 @@ mod tests {
 
     #[test]
     fn allow_net_flag_reflects_policy() {
-        let wrapped = LandlockSandbox::new(SandboxPolicy::ReadOnly, PathBuf::from("/usr/bin/rpi"))
-            .wrap_command("ls", Path::new("/tmp"))
-            .unwrap();
+        let wrapped = LandlockSandbox::new(
+            SandboxPolicy::ReadOnly {
+                network_access: false,
+            },
+            PathBuf::from("/usr/bin/rpi"),
+        )
+        .wrap_command("ls", Path::new("/tmp"))
+        .unwrap();
         assert!(!wrapped.contains("--allow-net"));
+        let networked = LandlockSandbox::new(
+            SandboxPolicy::ReadOnly {
+                network_access: true,
+            },
+            PathBuf::from("/usr/bin/rpi"),
+        )
+        .wrap_command("curl https://example.com", Path::new("/tmp"))
+        .unwrap();
+        assert!(networked.contains("--allow-net"));
     }
 }

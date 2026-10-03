@@ -28,13 +28,7 @@ pub fn bwrap_in_path() -> bool {
 impl Sandbox for BwrapSandbox {
     fn wrap_command(&self, command: &str, cwd: &Path) -> Result<String, String> {
         let roots = crate::writable_roots_for(&self.policy, cwd);
-        let network = matches!(
-            &self.policy,
-            SandboxPolicy::WorkspaceWrite {
-                network_access: true,
-                ..
-            }
-        );
+        let network = crate::policy_network_access(&self.policy);
         let mut argv: Vec<String> = vec![
             "bwrap".into(),
             "--unshare-all".into(),
@@ -86,13 +80,22 @@ mod tests {
 
     #[test]
     fn readonly_wraps_with_ro_bind_and_no_network() {
-        let wrapped = BwrapSandbox::new(SandboxPolicy::ReadOnly)
-            .wrap_command("ls", Path::new("/tmp"))
-            .unwrap();
+        let wrapped = BwrapSandbox::new(SandboxPolicy::ReadOnly {
+            network_access: false,
+        })
+        .wrap_command("ls", Path::new("/tmp"))
+        .unwrap();
         assert!(wrapped.starts_with("bwrap --unshare-all"));
         assert!(!wrapped.contains("--share-net"));
         assert!(wrapped.contains("--ro-bind / /"));
         assert!(wrapped.ends_with("-c 'ls'"));
+        // 联网查询放行的只读策略(Plan 模式):share-net
+        let networked = BwrapSandbox::new(SandboxPolicy::ReadOnly {
+            network_access: true,
+        })
+        .wrap_command("curl https://example.com", Path::new("/tmp"))
+        .unwrap();
+        assert!(networked.contains("--share-net"));
     }
 
     #[test]

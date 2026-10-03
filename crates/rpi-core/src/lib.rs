@@ -44,5 +44,5 @@ pub use subagent::{
 };
 pub use system_prompt::{
     build_system_prompt_sections, build_system_prompt_state, sections_to_text,
-    SystemPromptOptions, SystemPromptSections, SystemPromptState,
+    split_prompt_and_rules, SystemPromptOptions, SystemPromptSections, SystemPromptState,
 };

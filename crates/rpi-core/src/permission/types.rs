@@ -203,10 +203,14 @@ pub struct SandboxConfig {
     pub network_access: bool,
 }
 
-/// 会话模式 → 沙箱策略(13 文档 §2.1 收敛映射)。
+/// 会话模式 → 沙箱策略(13 文档 §2.1 收敛映射)。Plan 的 ReadOnly 沙箱
+/// 放开网络:Plan 模式允许联网查询命令(curl/ping/dns 查询),只读约束
+/// 只针对文件系统。
 pub fn policy_for_mode(mode: SessionMode, sandbox: &SandboxConfig) -> SandboxPolicy {
     match mode {
-        SessionMode::Plan => SandboxPolicy::ReadOnly,
+        SessionMode::Plan => SandboxPolicy::ReadOnly {
+            network_access: true,
+        },
         SessionMode::Confirm => SandboxPolicy::WorkspaceWrite {
             writable_roots: sandbox.writable_roots.clone(),
             network_access: sandbox.network_access,
@@ -219,7 +223,11 @@ pub fn policy_for_mode(mode: SessionMode, sandbox: &SandboxConfig) -> SandboxPol
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SandboxPolicy {
-    ReadOnly,
+    /// 全盘只读;network_access 控制网络(Plan 模式联网查询放行 = true)
+    ReadOnly {
+        #[serde(default)]
+        network_access: bool,
+    },
     WorkspaceWrite {
         #[serde(default)]
         writable_roots: Vec<String>,
@@ -258,7 +266,7 @@ pub fn mode_baseline_tools(mode: SessionMode, _sandbox_available: bool) -> Vec<S
 /// 位置永久固定;不并入系统提示词)。
 /// Plan 进/出各一句:进 Plan 提示只读+产出计划;切出后的 Confirm/FullAccess
 /// 沿用退出句(后半句"可写"恒为真,提醒模型可以动手)。
-pub const PLAN_MODE_ENTER_SECTION: &str = "You are entering Plan mode: files cannot be created, modified, or deleted; inspect the codebase and produce an implementation plan.";
+pub const PLAN_MODE_ENTER_SECTION: &str = "You are entering Plan mode: files cannot be created, modified, or deleted, and commands that clearly write files or system state are blocked; read-only inspection and network queries (curl/ping/DNS lookups) are allowed. Inspect the codebase and produce an implementation plan.";
 
 pub const PLAN_MODE_EXIT_SECTION: &str = "You are exiting Plan mode: you may now create, modify, and delete files; implement the agreed plan.";
 
@@ -326,7 +334,12 @@ mod tests {
             writable_roots: vec!["../shared".into()],
             network_access: true,
         };
-        assert_eq!(policy_for_mode(SessionMode::Plan, &sandbox), SandboxPolicy::ReadOnly);
+        assert_eq!(
+            policy_for_mode(SessionMode::Plan, &sandbox),
+            SandboxPolicy::ReadOnly {
+                network_access: true
+            }
+        );
         assert_eq!(
             policy_for_mode(SessionMode::Confirm, &sandbox),
             SandboxPolicy::WorkspaceWrite {

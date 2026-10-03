@@ -85,7 +85,7 @@ impl Sandbox for SeatbeltSandbox {
                 .iter()
                 .map(|root| root.display().to_string())
                 .collect::<Vec<_>>(),
-            matches!(&self.policy, SandboxPolicy::WorkspaceWrite { network_access: true, .. }),
+            crate::policy_network_access(&self.policy),
         );
         for root in &roots {
             for always_readonly in [".git", ".rpi", ".env"] {
@@ -120,10 +120,12 @@ mod tests {
     }
 
     #[test]
-    fn readonly_profile_denies_network_and_has_no_write_roots() {
-        let wrapped = sandbox(SandboxPolicy::ReadOnly)
-            .wrap_command("ls", Path::new("/tmp"))
-            .unwrap();
+    fn readonly_profile_network_flag_and_no_write_roots() {
+        let wrapped = sandbox(SandboxPolicy::ReadOnly {
+            network_access: false,
+        })
+        .wrap_command("ls", Path::new("/tmp"))
+        .unwrap();
         assert!(wrapped.starts_with(SEATBELT_EXEC));
         assert!(wrapped.contains("(deny default)"));
         assert!(wrapped.contains("(allow file-read*)"));
@@ -133,6 +135,13 @@ mod tests {
         assert!(wrapped.contains("(allow file-write* (subpath \"/"));
         // 除 TMPDIR 外无可写根(工作区/系统目录不可写)
         assert!(!wrapped.contains("file-write* (subpath \"/Users"));
+        // 联网查询放行的只读策略(Plan 模式):网络开,文件系统仍只读
+        let networked = sandbox(SandboxPolicy::ReadOnly {
+            network_access: true,
+        })
+        .wrap_command("curl https://example.com", Path::new("/tmp"))
+        .unwrap();
+        assert!(networked.contains("(allow network*)"));
     }
 
     #[test]
@@ -160,9 +169,11 @@ mod tests {
 
     #[test]
     fn command_is_single_quote_escaped() {
-        let wrapped = sandbox(SandboxPolicy::ReadOnly)
-            .wrap_command("echo 'hi'", Path::new("/tmp"))
-            .unwrap();
+        let wrapped = sandbox(SandboxPolicy::ReadOnly {
+            network_access: false,
+        })
+        .wrap_command("echo 'hi'", Path::new("/tmp"))
+        .unwrap();
         assert!(wrapped.contains("'echo '\\''hi'\\'''"), "{wrapped}");
     }
 

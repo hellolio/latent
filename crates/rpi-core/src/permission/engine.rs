@@ -8,7 +8,7 @@ use std::sync::{Mutex, RwLock};
 
 use rpi_agent::ToolCallCtx;
 
-use crate::permission::shell::is_readonly_command_with_rules;
+use crate::permission::shell::{classify_shell_command, is_readonly_command_with_rules, ShellSafety};
 use crate::permission::shell_detail;
 use crate::permission::types::{
     policy_for_mode, ApprovalKey, ApprovalReason, ApprovalRequest, SandboxConfig, SandboxPolicy,
@@ -27,7 +27,7 @@ pub struct ApprovalRules {
 pub struct PermissionEngine {
     /// 当前模式(运行期可切换;与 set_mode 同锁)
     mode: RwLock<SessionMode>,
-    /// Confirm 模式的 WorkspaceWrite 细节(Plan 固定 ReadOnly,FullAccess 固定关)
+    /// Confirm 模式的 WorkspaceWrite 细节(Plan 固定 ReadOnly+联网,FullAccess 固定关)
     sandbox: SandboxConfig,
     rules: ApprovalRules,
     /// 会话级批准缓存(ApproveForSession 写入;set_mode 清空)
@@ -153,20 +153,25 @@ impl PermissionEngine {
                     .unwrap_or("");
                 match mode {
                     SessionMode::Plan => {
-                        // 无沙箱平台没有 OS 层兜底,只读判定就是最后保证:
-                        // 判定通过即放行,不通过直接拒绝
-                        if is_readonly_command_with_rules(
+                        // 三态判定:只读与联网查询直接放行(只读另有 OS 层
+                        // ReadOnly 沙箱兜底);明确写(写前缀/落盘重定向)
+                        // 即使有沙箱也不放行;未知命令在沙箱可用时放行、由
+                        // 沙箱裁决 —— 无沙箱平台没有 OS 层兜底,保守拒绝。
+                        match classify_shell_command(
                             command,
                             &self.rules.allow_commands,
                             &self.rules.deny_commands,
                         ) {
-                            // 只读放行,OS 层 ReadOnly 沙箱兜底
-                            Verdict::Allow
-                        } else {
-                            Verdict::Deny(format!(
+                            ShellSafety::ReadOnly | ShellSafety::NetworkQuery => Verdict::Allow,
+                            ShellSafety::Write => Verdict::Deny(format!(
+                                "Plan mode blocks commands that modify files or system state: {}",
+                                shell_detail(command)
+                            )),
+                            ShellSafety::Unknown if self.sandbox_available => Verdict::Allow,
+                            ShellSafety::Unknown => Verdict::Deny(format!(
                                 "Plan mode allows read-only commands only: {}",
                                 shell_detail(command)
-                            ))
+                            )),
                         }
                     }
                     SessionMode::Confirm => {
@@ -338,15 +343,47 @@ mod tests {
             Verdict::Deny(reason) => assert!(reason.contains("Plan"), "{reason}"),
             other => panic!("期望 Deny,得到 {other:?}"),
         }
+        // 明确写前缀:即使有沙箱也不放行
         assert_eq!(
             engine.evaluate(&ctx("bash", serde_json::json!({"command": "rm -rf build"})), ToolRiskClass::Shell),
-            Verdict::Deny("Plan mode allows read-only commands only: rm -rf build".into())
+            Verdict::Deny("Plan mode blocks commands that modify files or system state: rm -rf build".into())
         );
         // 只读命令放行(沙箱兜底)
         assert_eq!(
             engine.evaluate(&ctx("bash", serde_json::json!({"command": "git log"})), ToolRiskClass::Shell),
             Verdict::Allow
         );
+        // 联网查询放行(Plan 模式调研用)
+        assert_eq!(
+            engine.evaluate(&ctx("bash", serde_json::json!({"command": "curl -s https://api.example.com"})), ToolRiskClass::Shell),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn plan_mode_unknown_command_follows_sandbox_availability() {
+        let ctx = ctx("bash", serde_json::json!({"command": "make test"}));
+        // 有沙箱:未知命令放行,由 ReadOnly 沙箱裁决实际副作用
+        let sandboxed = PermissionEngine::new(
+            SessionMode::Plan,
+            SandboxConfig::default(),
+            ApprovalRules::default(),
+            std::env::temp_dir(),
+            true,
+        );
+        assert_eq!(sandboxed.evaluate(&ctx, ToolRiskClass::Shell), Verdict::Allow);
+        // 无沙箱:没有 OS 层兜底,保守拒绝
+        let degraded = PermissionEngine::new(
+            SessionMode::Plan,
+            SandboxConfig::default(),
+            ApprovalRules::default(),
+            std::env::temp_dir(),
+            false,
+        );
+        match degraded.evaluate(&ctx, ToolRiskClass::Shell) {
+            Verdict::Deny(reason) => assert!(reason.contains("read-only"), "{reason}"),
+            other => panic!("期望 Deny,得到 {other:?}"),
+        }
     }
 
     #[test]
@@ -388,7 +425,7 @@ mod tests {
             Verdict::Allow
         );
         match engine.evaluate(&ctx("bash", serde_json::json!({"command": "rm -rf build"})), ToolRiskClass::Shell) {
-            Verdict::Deny(reason) => assert!(reason.contains("read-only"), "{reason}"),
+            Verdict::Deny(reason) => assert!(reason.contains("blocks commands"), "{reason}"),
             other => panic!("期望 Deny,得到 {other:?}"),
         }
     }

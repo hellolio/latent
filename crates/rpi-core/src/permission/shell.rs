@@ -124,6 +124,130 @@ const READONLY_PREFIXES: &[&[&str]] = &[
 /// `$()`/`-exec` 嵌套递归上限(防御病态嵌套)。
 const MAX_SUBSTITUTION_DEPTH: usize = 4;
 
+/// shell 命令安全判定结果(比只读二值判定更细,供 Plan 模式放行策略用)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellSafety {
+    /// 可证明只读(内置只读表 / 专用解析器 / allow 规则)
+    ReadOnly,
+    /// 联网查询(curl/ping/dig 等,无本地写形态;Plan 模式放行)
+    NetworkQuery,
+    /// 明确写操作(写前缀表 / 输出重定向落盘 / 表内命令写形态 / deny 规则)
+    Write,
+    /// 无法判定(未知命令、展开命令名、解析失败)。Plan+沙箱放行交沙箱
+    /// 裁决,无沙箱拒绝;Confirm 不放行、照常走审批。
+    Unknown,
+}
+
+/// 明确写操作前缀表:命中即"明确知道是写操作"——Plan 模式即使有沙箱
+/// 也不放行。只收主形态明确的命令;python/make/xargs 等执行体不确定的
+/// 命令不进表(归 Unknown 交沙箱裁决)。只读表优先于本表,`kill -l`、
+/// `git stash list`、`git clean -n` 等只读形态不受影响。
+const WRITE_PREFIXES: &[&[&str]] = &[
+    // 文件系统变更
+    &["rm"],
+    &["rmdir"],
+    &["mv"],
+    &["cp"],
+    &["ln"],
+    &["mkdir"],
+    &["touch"],
+    &["chmod"],
+    &["chown"],
+    &["chgrp"],
+    &["dd"],
+    &["tee"],
+    &["shred"],
+    &["truncate"],
+    &["install"],
+    &["mkfs"],
+    // 进程控制(kill -l 只读形态由只读表先命中)
+    &["kill"],
+    &["pkill"],
+    &["killall"],
+    // git 写子命令(status/log/diff/stash list/clean -n 等只读形态由只读表先命中)
+    &["git", "add"],
+    &["git", "commit"],
+    &["git", "push"],
+    &["git", "pull"],
+    &["git", "fetch"],
+    &["git", "merge"],
+    &["git", "rebase"],
+    &["git", "reset"],
+    &["git", "restore"],
+    &["git", "checkout"],
+    &["git", "switch"],
+    &["git", "clean"],
+    &["git", "stash"],
+    &["git", "cherry-pick"],
+    &["git", "revert"],
+    &["git", "apply"],
+    &["git", "am"],
+    &["git", "rm"],
+    &["git", "mv"],
+    &["git", "init"],
+    &["git", "clone"],
+    &["git", "gc"],
+    &["git", "prune"],
+    &["git", "repack"],
+    &["git", "worktree"],
+    &["git", "submodule"],
+    &["git", "bisect"],
+    // 包管理写操作
+    &["npm", "install"],
+    &["npm", "uninstall"],
+    &["npm", "remove"],
+    &["npm", "ci"],
+    &["npm", "update"],
+    &["npm", "publish"],
+    &["npm", "link"],
+    &["npm", "unlink"],
+    &["pip", "install"],
+    &["pip", "uninstall"],
+    &["pip3", "install"],
+    &["pip3", "uninstall"],
+    &["cargo", "install"],
+    &["cargo", "uninstall"],
+    &["cargo", "add"],
+    &["cargo", "remove"],
+    &["cargo", "new"],
+    &["cargo", "init"],
+    &["cargo", "clean"],
+    &["brew", "install"],
+    &["brew", "uninstall"],
+    &["brew", "upgrade"],
+    &["brew", "reinstall"],
+    &["brew", "link"],
+    &["brew", "unlink"],
+    &["apt", "install"],
+    &["apt", "remove"],
+    &["apt", "upgrade"],
+    &["apt", "autoremove"],
+    &["apt-get", "install"],
+    &["apt-get", "remove"],
+    &["apt-get", "upgrade"],
+    &["apt-get", "update"],
+];
+
+/// 联网查询前缀表(Plan 模式放行;Confirm 照常审批)。curl 的落盘/上传
+/// 形态(`-o`/`-O`/`--output`/`-T`/`--upload-file`)是明确本地写,不算查询;
+/// wget 默认下载落盘,不进表(归 Unknown 交沙箱裁决)。
+const NETWORK_QUERY_PREFIXES: &[&[&str]] = &[
+    &["curl"],
+    &["ping"],
+    &["ping6"],
+    &["dig"],
+    &["nslookup"],
+    &["host"],
+    &["whois"],
+    &["traceroute"],
+    &["tracepath"],
+];
+
+/// 三态判定一条 shell 命令(Plan 模式放行策略的依据)。
+pub fn classify_shell_command(command: &str, allow: &[String], deny: &[String]) -> ShellSafety {
+    check_command_class(command, allow, deny, 0)
+}
+
 /// 判定一条 shell 命令是否只读(可安全免审)。
 ///
 /// 规则(13 文档 §6.2):
@@ -139,7 +263,10 @@ pub fn is_readonly_command_with_rules(
     allow: &[String],
     deny: &[String],
 ) -> bool {
-    check_command(command, allow, deny, 0)
+    matches!(
+        classify_shell_command(command, allow, deny),
+        ShellSafety::ReadOnly
+    )
 }
 
 /// 无规则便捷形态(测试与内置使用)。
@@ -147,26 +274,50 @@ pub fn is_readonly_command(command: &str) -> bool {
     is_readonly_command_with_rules(command, &[], &[])
 }
 
-fn check_command(command: &str, allow: &[String], deny: &[String], depth: usize) -> bool {
+/// 词法失败时区分"明确写"(输出重定向落盘)与"无法判定"。
+fn check_command_class(command: &str, allow: &[String], deny: &[String], depth: usize) -> ShellSafety {
     if depth > MAX_SUBSTITUTION_DEPTH {
-        return false;
+        return ShellSafety::Unknown;
     }
-    let Some(tokens) = tokenize(command, allow, deny, depth) else {
-        return false;
+    let mut redirect_write = false;
+    let Some(tokens) = tokenize(command, allow, deny, depth, &mut redirect_write) else {
+        return if redirect_write {
+            ShellSafety::Write
+        } else {
+            ShellSafety::Unknown
+        };
     };
+    let mut merged = ShellSafety::ReadOnly;
     let mut segment: Vec<ShellWord> = Vec::new();
     for token in tokens {
         match token {
             Tok::Word(word) => segment.push(word),
             Tok::Seq | Tok::Pipe | Tok::Or | Tok::And => {
-                if !segment_is_readonly(&segment, allow, deny, depth) {
-                    return false;
-                }
+                merged = merge_safety(merged, segment_class(&segment, allow, deny, depth));
                 segment.clear();
             }
         }
     }
-    segment_is_readonly(&segment, allow, deny, depth)
+    merge_safety(merged, segment_class(&segment, allow, deny, depth))
+}
+
+/// 布尔形态便捷包装(命令替换内层递归校验用:内层非只读 = 外层无法放行)。
+fn check_command(command: &str, allow: &[String], deny: &[String], depth: usize) -> bool {
+    matches!(
+        check_command_class(command, allow, deny, depth),
+        ShellSafety::ReadOnly
+    )
+}
+
+/// 段级安全合并:Write 否定优先,Unknown 次之(无法判定不能洗白整条命令),
+/// ReadOnly 可被 NetworkQuery 升级。
+fn merge_safety(a: ShellSafety, b: ShellSafety) -> ShellSafety {
+    match (a, b) {
+        (ShellSafety::Write, _) | (_, ShellSafety::Write) => ShellSafety::Write,
+        (ShellSafety::ReadOnly, rest) | (rest, ShellSafety::ReadOnly) => rest,
+        (ShellSafety::Unknown, _) | (_, ShellSafety::Unknown) => ShellSafety::Unknown,
+        _ => ShellSafety::NetworkQuery,
+    }
 }
 
 // ---- mini shell lexer ----
@@ -198,7 +349,13 @@ impl ShellWord {
     }
 }
 
-fn tokenize(command: &str, allow: &[String], deny: &[String], depth: usize) -> Option<Vec<Tok>> {
+fn tokenize(
+    command: &str,
+    allow: &[String],
+    deny: &[String],
+    depth: usize,
+    redirect_write: &mut bool,
+) -> Option<Vec<Tok>> {
     let mut tokens = Vec::new();
     let mut word = ShellWord::new();
     let mut in_word = false;
@@ -288,6 +445,8 @@ fn tokenize(command: &str, allow: &[String], deny: &[String], depth: usize) -> O
                 if c == '>' {
                     // 输出重定向:仅 /dev/null 与 fd 复制(>&N)无害
                     if !take_output_redirect(&mut chars) {
+                        // 落盘重定向是明确写,供三态判定区分
+                        *redirect_write = true;
                         return None;
                     }
                 } else {
@@ -504,62 +663,135 @@ fn take_output_redirect(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
 
 // ---- 分段校验 ----
 
-/// 单段命令的只读判定:deny 否定优先,再走包装剥离 + 内置表/专用解析器,
-/// 最后查 allow 规则。
-fn segment_is_readonly(
+/// 单段命令的三态判定:deny 否定优先 → allow 规则 → 包装剥离 + 内置表/
+/// 专用解析器 → 写前缀表 → 联网查询表,落不进任何一类的归 Unknown。
+fn segment_class(
     words: &[ShellWord],
     allow: &[String],
     deny: &[String],
     depth: usize,
-) -> bool {
+) -> ShellSafety {
     if words.is_empty() {
-        return false;
+        return ShellSafety::Unknown;
     }
     let normalized = words
         .iter()
         .map(|word| word.text.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    // 否定优先于白名单
+    // 否定优先于白名单;命中 deny 规则按明确写处理(判定层面即拒绝)
     if deny
         .iter()
         .any(|rule| prefix_matches(&normalized, &normalize_command(rule)))
     {
-        return false;
+        return ShellSafety::Write;
     }
     let stripped = strip_wrappers(words);
     if stripped.is_empty() || stripped[0].has_expansion {
         // 命令名来自展开,值运行期才确定
-        return false;
+        return ShellSafety::Unknown;
     }
     let texts: Vec<&str> = stripped.iter().map(|word| word.text.as_str()).collect();
-    // 脚本型命令:安全性取决于参数内容,整体解析
+    // 脚本型命令:安全性取决于参数内容,整体解析;解析不通过归 Unknown
+    // (可能是明确写形态也可能是拿不准,由沙箱/审批兜底)
     match texts[0] {
-        "awk" => return awk_words_are_safe(&stripped),
-        "sed" => return sed_words_are_safe(&stripped),
-        "find" | "fd" => return find_words_are_safe(&stripped, allow, deny, depth),
-        "nvram" => return nvram_words_are_safe(&stripped),
-        "ifconfig" => return ifconfig_words_are_safe(&stripped),
-        "route" => return route_words_are_safe(&stripped),
-        "arp" => return arp_words_are_safe(&stripped),
-        "dscl" => return dscl_words_are_safe(&stripped),
+        "awk" => return bool_safety(awk_words_are_safe(&stripped)),
+        "sed" => return bool_safety(sed_words_are_safe(&stripped)),
+        "find" | "fd" => {
+            return bool_safety(find_words_are_safe(&stripped, allow, deny, depth))
+        }
+        "nvram" => return bool_safety(nvram_words_are_safe(&stripped)),
+        "ifconfig" => return bool_safety(ifconfig_words_are_safe(&stripped)),
+        "route" => return bool_safety(route_words_are_safe(&stripped)),
+        "arp" => return bool_safety(arp_words_are_safe(&stripped)),
+        "dscl" => return bool_safety(dscl_words_are_safe(&stripped)),
         _ => {}
+    }
+    // allow 规则:用户显式声明的免审命令按只读放行
+    if allow
+        .iter()
+        .any(|rule| prefix_matches(&normalized, &normalize_command(rule)))
+    {
+        return ShellSafety::ReadOnly;
     }
     // 无参 mount 只打印挂载点(带参是真挂载,不进表)
     if texts.len() == 1 && texts[0] == "mount" {
-        return true;
+        return ShellSafety::ReadOnly;
     }
-    // deny 规则也可能只匹配元字符剥离后的形式;再查一次(前缀已保证元字符不存在)
     if READONLY_PREFIXES
         .iter()
         .any(|prefix| token_prefix_matches(&texts, prefix))
-        && !has_write_flag(&texts)
     {
-        return true;
+        // 表内命令自带的写形态(`sort -o`/`sysctl -w`/`git tag v1`)是明确写
+        return if has_write_flag(&texts) {
+            ShellSafety::Write
+        } else {
+            ShellSafety::ReadOnly
+        };
     }
-    allow
+    if WRITE_PREFIXES
         .iter()
-        .any(|rule| prefix_matches(&normalized, &normalize_command(rule)))
+        .any(|prefix| token_prefix_matches(&texts, prefix))
+    {
+        return ShellSafety::Write;
+    }
+    // curl 的落盘/上传形态是明确本地写,先于联网查询判定
+    if texts[0] == "curl" && curl_has_write_form(&texts) {
+        return ShellSafety::Write;
+    }
+    if is_network_query_segment(&texts) {
+        return ShellSafety::NetworkQuery;
+    }
+    ShellSafety::Unknown
+}
+
+/// 专用解析器布尔结果 → 三态(不通过归 Unknown 而非 Write:解析失败
+/// 不等于证明了写副作用)。
+fn bool_safety(safe: bool) -> ShellSafety {
+    if safe {
+        ShellSafety::ReadOnly
+    } else {
+        ShellSafety::Unknown
+    }
+}
+
+/// curl 的落盘/上传形态(`-o`/`-O`/`--output`/`-T`/`--upload-file` 等):
+/// 明确写本地文件,不算联网查询。
+fn curl_has_write_form(tokens: &[&str]) -> bool {
+    tokens[1..].iter().any(|arg| {
+        arg.starts_with("-o")
+            || arg.starts_with("-O")
+            || *arg == "-J"
+            || arg.starts_with("-T")
+            || arg.starts_with("--output")
+            || arg.starts_with("--upload-file")
+            || arg.starts_with("--remote-name")
+    })
+}
+
+/// 单段命令是否联网查询(Plan 模式放行;curl 的落盘/上传形态除外)。
+fn is_network_query_segment(tokens: &[&str]) -> bool {
+    if !NETWORK_QUERY_PREFIXES
+        .iter()
+        .any(|prefix| token_prefix_matches(tokens, prefix))
+    {
+        return false;
+    }
+    tokens[0] != "curl" || !curl_has_write_form(tokens)
+}
+
+/// 单段命令的只读判定(deny 否定优先,再走包装剥离 + 内置表/专用解析器,
+/// 最后查 allow 规则)。
+fn segment_is_readonly(
+    words: &[ShellWord],
+    allow: &[String],
+    deny: &[String],
+    depth: usize,
+) -> bool {
+    matches!(
+        segment_class(words, allow, deny, depth),
+        ShellSafety::ReadOnly
+    )
 }
 
 /// 表内命令自带的写文件 flag(`sort -o`)或写内核态(`sysctl -w`)使该段非只读;
@@ -1003,6 +1235,67 @@ mod tests {
         assert!(is_readonly_command("wc -l foo.txt"));
         // cargo check 会执行依赖的 build.rs,不进只读表
         assert!(!is_readonly_command("cargo check"));
+    }
+
+    #[test]
+    fn classify_tri_state() {
+        use ShellSafety::{NetworkQuery, ReadOnly, Unknown, Write};
+        // 只读
+        assert_eq!(classify_shell_command("git log", &[], &[]), ReadOnly);
+        // 联网查询:Plan 模式放行
+        assert_eq!(
+            classify_shell_command("curl -s https://api.example.com/v1 | head -5", &[], &[]),
+            NetworkQuery
+        );
+        assert_eq!(classify_shell_command("ping -c 2 example.com", &[], &[]), NetworkQuery);
+        assert_eq!(classify_shell_command("dig +short example.com", &[], &[]), NetworkQuery);
+        // curl 落盘/上传形态是明确写
+        assert_eq!(
+            classify_shell_command("curl -o out.bin https://example.com", &[], &[]),
+            Write
+        );
+        assert_eq!(
+            classify_shell_command("curl -T file https://example.com/up", &[], &[]),
+            Write
+        );
+        // 落盘重定向是明确写(词法层识别)
+        assert_eq!(classify_shell_command("curl https://example.com > out.txt", &[], &[]), Write);
+        // 明确写前缀
+        assert_eq!(classify_shell_command("rm -rf build", &[], &[]), Write);
+        assert_eq!(classify_shell_command("git push origin main", &[], &[]), Write);
+        assert_eq!(classify_shell_command("npm install", &[], &[]), Write);
+        // 只读形态不被写前缀误伤(只读表先命中)
+        assert_eq!(classify_shell_command("kill -l", &[], &[]), ReadOnly);
+        assert_eq!(classify_shell_command("git stash list", &[], &[]), ReadOnly);
+        assert_eq!(classify_shell_command("git clean -n", &[], &[]), ReadOnly);
+        assert_eq!(classify_shell_command("git tag", &[], &[]), ReadOnly);
+        // 表内命令的写形态是明确写
+        assert_eq!(classify_shell_command("git tag evil", &[], &[]), Write);
+        assert_eq!(classify_shell_command("sort -o out.txt in.txt", &[], &[]), Write);
+        // 未知命令:python/make 等执行体不确定,归 Unknown 交沙箱裁决
+        assert_eq!(classify_shell_command("make test", &[], &[]), Unknown);
+        assert_eq!(classify_shell_command("python3 script.py", &[], &[]), Unknown);
+        // find 写谓词:专用解析器不通过归 Unknown(沙箱兜底)
+        assert_eq!(classify_shell_command("find . -name x -delete", &[], &[]), Unknown);
+        // allow 规则按只读放行;deny 规则否定优先按明确写
+        assert_eq!(
+            classify_shell_command("make test", &["make test".to_string()], &[]),
+            ReadOnly
+        );
+        assert_eq!(
+            classify_shell_command("make test", &[], &["make test".to_string()]),
+            Write
+        );
+        // 混合分段:任一段明确写 = 整条明确写
+        assert_eq!(
+            classify_shell_command("curl https://example.com; rm x", &[], &[]),
+            Write
+        );
+        // 只读 + 联网查询混合:整条按联网查询
+        assert_eq!(
+            classify_shell_command("curl https://example.com | grep title", &[], &[]),
+            NetworkQuery
+        );
     }
 
     #[test]

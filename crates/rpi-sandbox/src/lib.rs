@@ -24,8 +24,11 @@ pub mod seatbelt;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum SandboxPolicy {
-    /// 全盘只读 + 网络关
-    ReadOnly,
+    /// 全盘只读;network_access 控制网络(Plan 模式联网查询放行 = true)
+    ReadOnly {
+        #[serde(default)]
+        network_access: bool,
+    },
     /// 全盘可读 + 可写根内可写
     WorkspaceWrite {
         /// 额外可写根;cwd 与系统临时目录自动并入([`writable_roots_for`])
@@ -129,7 +132,7 @@ pub fn create_sandbox(
 pub fn writable_roots_for(policy: &SandboxPolicy, cwd: &Path) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     match policy {
-        SandboxPolicy::ReadOnly | SandboxPolicy::DangerFullAccess => {}
+        SandboxPolicy::ReadOnly { .. } | SandboxPolicy::DangerFullAccess => {}
         SandboxPolicy::WorkspaceWrite {
             writable_roots,
             network_access: _,
@@ -168,6 +171,16 @@ fn system_tmp_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// 策略是否放行网络(ReadOnly 与 WorkspaceWrite 各带 network_access;
+/// DangerFullAccess 不设防,包装层不会用到)。
+pub(crate) fn policy_network_access(policy: &SandboxPolicy) -> bool {
+    match policy {
+        SandboxPolicy::ReadOnly { network_access } => *network_access,
+        SandboxPolicy::WorkspaceWrite { network_access, .. } => *network_access,
+        SandboxPolicy::DangerFullAccess => true,
+    }
+}
+
 /// sh 单引号转义(`'` → `'\''`)。
 pub(crate) fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
@@ -180,7 +193,18 @@ mod tests {
     #[test]
     fn policy_serde_roundtrip_kebab_case() {
         for (json, policy) in [
-            (r#"{"type":"read-only"}"#, SandboxPolicy::ReadOnly),
+            (
+                r#"{"type":"read-only","networkAccess":false}"#,
+                SandboxPolicy::ReadOnly {
+                    network_access: false,
+                },
+            ),
+            (
+                r#"{"type":"read-only","networkAccess":true}"#,
+                SandboxPolicy::ReadOnly {
+                    network_access: true,
+                },
+            ),
             (
                 r#"{"type":"workspace-write","writableRoots":[],"networkAccess":true}"#,
                 SandboxPolicy::WorkspaceWrite {
@@ -213,7 +237,13 @@ mod tests {
         assert!(roots.contains(&canonical_cwd));
         // /tmp 在 macOS 上 canonicalize 为 /private/tmp,按前缀匹配
         assert!(roots.iter().any(|root| root.starts_with("/private/tmp") || root.starts_with("/tmp") || root == &canonical_cwd));
-        assert!(writable_roots_for(&SandboxPolicy::ReadOnly, &cwd).is_empty());
+        assert!(writable_roots_for(
+            &SandboxPolicy::ReadOnly {
+                network_access: false
+            },
+            &cwd
+        )
+        .is_empty());
     }
 
     #[test]

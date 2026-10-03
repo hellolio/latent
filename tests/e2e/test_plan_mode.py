@@ -43,9 +43,10 @@ def test_plan_mode_blocks_writes_then_approval_flow():
             # system 提示词与模式解耦:不再包含 <mode> 节
             assert "<mode>" not in str(bodies[0]), "system 提示词不应再含 <mode> 节"
 
-            # 变更类 bash 命令被权限引擎直接拒绝(Deny,不是审批),
+            # 变更类 bash 命令被权限引擎直接拒绝(Deny,不是审批;
+            # rm 命中明确写前缀表,即使有沙箱也不放行),
             # 模型收到拒绝原因(write/edit 则在工具集层被收掉,不会进请求)
-            app.expect_text("Plan mode allows read-only commands only")
+            app.expect_text("Plan mode blocks commands")
             target = os.path.join(workdir, "e2e-plan-mode.txt")
             assert not os.path.exists(target), "Plan 模式不应产生文件写入"
 

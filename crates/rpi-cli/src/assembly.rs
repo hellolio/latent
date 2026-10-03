@@ -208,14 +208,17 @@ fn resolve_active_tools(
 }
 
 /// 系统提示词外置文件(用户可编辑):项目 `.rpi/system-prompt.md` → 全局
-/// `~/.rpi/system-prompt.md`,首个存在且非空的文件生效。内容**替换身份句
-/// (preamble)**,其余 section(`<cwd>`、`<tools>`、`<rules>`)仍自动注入;
-/// 未配置 = 用内置默认身份句。仅在程序启动/新建会话(装配期)读取一次,
-/// 会话中途修改文件不生效。
-pub fn load_system_prompt_override() -> Option<String> {
+/// `~/.rpi/system-prompt.md`,首个存在且非空的文件生效。文件内容经
+/// `<rules>` 标记块拆分:块外内容**替换身份句(preamble)**,块内内容追加进
+/// `<rules>` 节(内置规则之后);无标记块 = 全文是身份句(向后兼容)。
+/// 其余 section(`<env>`、`<tools>`)仍自动注入;未配置 = 用内置默认身份句。
+/// 仅在程序启动/新建会话(装配期)读取一次,会话中途修改文件不生效。
+pub fn load_system_prompt_override() -> (Option<String>, Option<String>) {
     let cwd = std::env::current_dir().ok();
     let home = dirs_home();
     system_prompt_override_from(cwd.as_deref(), home.as_deref())
+        .map(|text| rpi_core::split_prompt_and_rules(&text))
+        .unwrap_or((None, None))
 }
 
 /// 纯函数面(可测):按 项目 → 全局 找 system-prompt.md,空白文件视为未配置。
@@ -593,7 +596,11 @@ pub fn load_session_settings() -> SessionSettings {
 /// rpi-sandbox,可拆卸判据)。
 fn map_policy(policy: &CoreSandboxPolicy) -> rpi_sandbox::SandboxPolicy {
     match policy {
-        CoreSandboxPolicy::ReadOnly => rpi_sandbox::SandboxPolicy::ReadOnly,
+        CoreSandboxPolicy::ReadOnly { network_access } => {
+            rpi_sandbox::SandboxPolicy::ReadOnly {
+                network_access: *network_access,
+            }
+        }
         CoreSandboxPolicy::WorkspaceWrite {
             writable_roots,
             network_access,
@@ -1018,6 +1025,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         provider: provider.clone(),
         settings: compaction_settings,
     });
+    // 外置提示词 + 自定义规则:同一个文件(.rpi/system-prompt.md)一次读出
+    let prompt_override = load_system_prompt_override();
     // 激活工具集:会话内切换过(ToolSetChange entry)则按记录恢复并校验;
     // 否则用调用方显式传入(main 从 settings `tools` 解析),未传 = 全部;
     // 配置了未知工具名直接报错(配置错误要显式暴露)
@@ -1040,10 +1049,12 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             active_tool_names,
             system_prompt: SystemPromptOptions {
                 cwd: Some(cwd.display().to_string()),
-                // 用户外置提示词(.rpi/system-prompt.md,项目→全局):配置了才
-                // 加载,替换身份句(preamble);<cwd>/<tools>/<rules> 仍自动注入。
-                // 装配期读一次,会话中途修改不生效
-                custom_prompt: load_system_prompt_override(),
+                // 用户外置提示词(.rpi/system-prompt.md,项目→全局):块外内容
+                // 替换身份句(preamble),<rules> 标记块内容追加进 <rules> 节;
+                // <env>/<tools> 等动态节仍自动注入。装配期读一次,会话中途
+                // 修改不生效
+                custom_prompt: prompt_override.0,
+                custom_rules: prompt_override.1,
                 ..Default::default()
             },
             limits: rpi_agent::TurnLimits::default(),
@@ -1837,5 +1848,34 @@ mod tests {
         project2.write_settings(r#"{"sessionMode": "plan"}"#);
         let files = read_settings_files(Some(&project2.0), Some(&global.0));
         assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Plan);
+    }
+
+    // ---- <rules> 自定义规则(system-prompt.md 的 <rules> 标记块) ----
+
+    #[test]
+    fn system_prompt_override_splits_rules_block() {
+        let project = TempDir::new("sp_rules");
+        // 无标记块:全文是身份句(向后兼容)
+        project.write_file(".rpi/system-prompt.md", "You are my agent.\n");
+        let text = system_prompt_override_from(Some(&project.0), None).unwrap();
+        let (prompt, rules) = rpi_core::split_prompt_and_rules(&text);
+        assert_eq!(prompt.as_deref(), Some("You are my agent."));
+        assert_eq!(rules, None);
+        // <rules> 标记块:块外身份句 + 块内追加规则
+        project.write_file(
+            ".rpi/system-prompt.md",
+            "You are my agent.\n\n<rules>\nAlways run cargo clippy before commit.\n</rules>\n",
+        );
+        let text = system_prompt_override_from(Some(&project.0), None).unwrap();
+        let (prompt, rules) = rpi_core::split_prompt_and_rules(&text);
+        assert_eq!(prompt.as_deref(), Some("You are my agent."));
+        assert_eq!(rules.as_deref(), Some("Always run cargo clippy before commit."));
+        // 项目文件整体优先于全局(与身份句同一 precedence:文件级)
+        let global = TempDir::new("sp_rules_global");
+        global.write_file(".rpi/system-prompt.md", "global prompt <rules>G</rules>");
+        let text = system_prompt_override_from(Some(&project.0), Some(&global.0)).unwrap();
+        let (prompt, rules) = rpi_core::split_prompt_and_rules(&text);
+        assert_eq!(prompt.as_deref(), Some("You are my agent."));
+        assert_eq!(rules.as_deref(), Some("Always run cargo clippy before commit."));
     }
 }

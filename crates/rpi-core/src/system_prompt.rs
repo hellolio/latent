@@ -39,6 +39,11 @@ pub struct SystemPromptOptions {
     pub sections: BTreeMap<String, String>,
     /// AGENTS.md 等上下文文件,渲染成 <project_instructions path="...">
     pub context_files: Vec<(String, String)>,
+    /// <rules> 节的追加规则(system-prompt.md 的 <rules> 标记块);拼在
+    /// 内置规则之后
+    pub custom_rules: Option<String>,
+    /// <env> 节的当前时间行;None = 取当前本地时间(测试可注入固定值)
+    pub current_time: Option<String>,
     pub cwd: Option<String>,
 }
 
@@ -46,15 +51,61 @@ pub struct SystemPromptOptions {
 pub type SystemPromptSections = BTreeMap<String, String>;
 
 const BASE_RULES: &[&str] = &[
-    "Be concise, precise, and rigorous.",
+    "Be extremely terse: deliver the answer or the change, with no filler, preamble, or restatement.",
+    "Be meticulous: watch edge cases, exact identifiers, and existing conventions.",
     "Make minimal changes and preserve existing behavior.",
-    "Ask before making non-trivial design or implementation decisions.",
+    "Never decide on the user's behalf: at any ambiguity or fork, present the options with a one-line recommendation and wait for confirmation.",
     "Inspect relevant files before modifying them.",
     "Verify changes when practical.",
     "Avoid interactive commands.",
 ];
 
-/// 构建 sections 状态(preamble 无标签,tools/rules/addendum/project_context/cwd
+/// 当前本地时间(装配期调用;`%:z` 渲染为 `+08:00` 形式的时区偏移)。
+fn current_local_time() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string()
+}
+
+/// 拆分外置 system-prompt.md 为 (身份句, <rules> 追加规则):文件里可用
+/// `<rules>...</rules>` 标记块声明自定义规则(可多处,按出现顺序拼接),
+/// 块外内容是身份句替换(custom_prompt);没有标记块 = 全文是身份句
+/// (向后兼容)。未闭合的 `<rules>` 把余下全文当作规则内容。
+pub fn split_prompt_and_rules(text: &str) -> (Option<String>, Option<String>) {
+    const OPEN: &str = "<rules>";
+    const CLOSE: &str = "</rules>";
+    let mut preamble = String::new();
+    let mut rules: Vec<&str> = Vec::new();
+    let mut rest = text;
+    loop {
+        match rest.find(OPEN) {
+            Some(start) => {
+                preamble.push_str(&rest[..start]);
+                let after_open = &rest[start + OPEN.len()..];
+                match after_open.find(CLOSE) {
+                    Some(end) => {
+                        rules.push(&after_open[..end]);
+                        rest = &after_open[end + CLOSE.len()..];
+                    }
+                    None => {
+                        rules.push(after_open);
+                        rest = "";
+                    }
+                }
+            }
+            None => {
+                preamble.push_str(rest);
+                break;
+            }
+        }
+    }
+    let preamble = preamble.trim();
+    let rules_text = rules.join("\n").trim().to_string();
+    (
+        (!preamble.is_empty()).then(|| preamble.to_string()),
+        (!rules_text.is_empty()).then_some(rules_text),
+    )
+}
+
+/// 构建 sections 状态(preamble 无标签,tools/rules/addendum/project_context/env
 /// + 扩展自定义节)。
 pub fn build_system_prompt_sections(
     options: &SystemPromptOptions,
@@ -84,14 +135,27 @@ pub fn build_system_prompt_sections(
         sections.insert("tools".into(), tools.trim_end().to_string());
     }
 
-    // rules 节:固定基础规则(工具提示词只进 tools 节,不再并入 rules)
+    // rules 节:固定基础规则 + 用户自定义追加(system-prompt.md 的
+    // <rules> 标记块,整段原样保留用户排版,不逐行加 "-" 前缀)
+    // (工具提示词只进 tools 节)
     let rules: Vec<String> = BASE_RULES.iter().map(|s| s.to_string()).collect();
-    if !rules.is_empty() {
-        let text = rules
+    let custom_rules = options
+        .custom_rules
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    if !rules.is_empty() || custom_rules.is_some() {
+        let mut text = rules
             .iter()
             .map(|rule| format!("- {rule}"))
             .collect::<Vec<_>>()
             .join("\n");
+        if let Some(custom) = custom_rules {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(custom);
+        }
         sections.insert("rules".into(), text);
     }
 
@@ -106,9 +170,16 @@ pub fn build_system_prompt_sections(
         sections.insert("project_context".into(), context.trim_end().to_string());
     }
 
-    // cwd
+    // env:运行环境事实 —— 工作目录 + 当前本地时间(模型判断"在哪/今天"的依据)
     if let Some(cwd) = &options.cwd {
-        sections.insert("cwd".into(), format!("Working directory: {cwd}"));
+        let time = options
+            .current_time
+            .clone()
+            .unwrap_or_else(current_local_time);
+        sections.insert(
+            "env".into(),
+            format!("Working directory: {cwd}\nCurrent time: {time}"),
+        );
     }
 
     // 扩展自定义节
@@ -191,7 +262,7 @@ mod tests {
         assert!(!text.contains("<preamble>"));
         assert!(text.contains("<tools>\nAvailable tools:"));
         assert!(text.contains("<rules>"));
-        assert!(text.contains("<cwd>\nWorking directory: /tmp/proj"));
+        assert!(text.contains("<env>\nWorking directory: /tmp/proj"));
     }
 
     #[test]
@@ -217,7 +288,7 @@ mod tests {
     }
 
     /// 外置提示词语义(cli system-prompt.md):custom_prompt 只换身份句,
-    /// cwd/tools 等动态节保留自动注入。
+    /// env/tools 等动态节保留自动注入。
     #[test]
     fn custom_prompt_replaces_preamble_keeps_dynamic_sections() {
         let mut opts = options();
@@ -226,7 +297,73 @@ mod tests {
         assert!(text.starts_with("You are my custom agent."), "{text}");
         assert!(!text.contains("You are Hart, an interactive agent"));
         assert!(text.contains("<tools>\nAvailable tools:"), "{text}");
-        assert!(text.contains("<cwd>\nWorking directory: /tmp/proj"), "{text}");
+        assert!(text.contains("<env>\nWorking directory: /tmp/proj"), "{text}");
         assert!(text.contains("<rules>"), "{text}");
+    }
+
+    /// <env> 节包含工作目录与当前时间;注入固定值时原样渲染。
+    #[test]
+    fn env_section_contains_working_directory_and_time() {
+        let mut opts = options();
+        opts.current_time = Some("2026-10-03 14:23:45 +08:00".into());
+        let text = build_system_prompt_sections(&opts).unwrap();
+        let env = text.get("env").unwrap();
+        assert_eq!(
+            env,
+            "Working directory: /tmp/proj\nCurrent time: 2026-10-03 14:23:45 +08:00"
+        );
+        // 未注入时取当前本地时间(格式健全性:两行,时间行非空)
+        let opts = options();
+        let sections = build_system_prompt_sections(&opts).unwrap();
+        let env = sections.get("env").unwrap();
+        assert!(env.contains("\nCurrent time: "), "{env}");
+    }
+
+    /// <rules> 自定义追加(system-prompt.md 的 <rules> 标记块):拼在内置
+    /// 规则之后,原样保留排版。
+    #[test]
+    fn custom_rules_appended_after_base_rules() {
+        let mut opts = options();
+        opts.custom_rules = Some("Always answer in Chinese.\n- Prefer ripgrep over grep".into());
+        let sections = build_system_prompt_sections(&opts).unwrap();
+        let rules = sections.get("rules").unwrap();
+        assert!(rules.contains("- Be extremely terse: deliver the answer or the change"), "{rules}");
+        assert!(rules.contains("\nAlways answer in Chinese.\n- Prefer ripgrep over grep"), "{rules}");
+        // 空白自定义规则不追加
+        let mut opts = options();
+        opts.custom_rules = Some("  \n ".into());
+        let sections = build_system_prompt_sections(&opts).unwrap();
+        let rules = sections.get("rules").unwrap();
+        assert!(!rules.contains("Chinese"), "{rules}");
+    }
+
+    /// 外置 system-prompt.md 的 <rules> 标记块拆分:块外 = 身份句,块内 =
+    /// 追加规则;无标记块 = 全文身份句(向后兼容);未闭合标记余下全文算规则。
+    #[test]
+    fn split_prompt_and_rules_extracts_marked_block() {
+        // 无标记块:全文是身份句
+        let (prompt, rules) = split_prompt_and_rules("You are my agent.");
+        assert_eq!(prompt.as_deref(), Some("You are my agent."));
+        assert_eq!(rules, None);
+        // 标记块:块外身份句 + 块内规则
+        let (prompt, rules) = split_prompt_and_rules(
+            "You are my agent.\n\n<rules>\nAlways answer in Chinese.\n</rules>\n",
+        );
+        assert_eq!(prompt.as_deref(), Some("You are my agent."));
+        assert_eq!(rules.as_deref(), Some("Always answer in Chinese."));
+        // 多个标记块按序拼接;空白块不产生规则
+        let (prompt, rules) = split_prompt_and_rules(
+            "<rules>A</rules> mid <rules>B</rules>",
+        );
+        assert_eq!(prompt.as_deref(), Some("mid"));
+        assert_eq!(rules.as_deref(), Some("A\nB"));
+        // 只有标记块:身份句为空
+        let (prompt, rules) = split_prompt_and_rules("<rules>R</rules>");
+        assert_eq!(prompt, None);
+        assert_eq!(rules.as_deref(), Some("R"));
+        // 未闭合:余下全文是规则
+        let (prompt, rules) = split_prompt_and_rules("Hi <rules>\nR1\nR2");
+        assert_eq!(prompt.as_deref(), Some("Hi"));
+        assert_eq!(rules.as_deref(), Some("R1\nR2"));
     }
 }
