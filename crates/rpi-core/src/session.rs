@@ -164,7 +164,7 @@ struct SessionRuntime {
     system_prompt: SystemPromptState,
     sections: SystemPromptSections,
     /// 原始构建 options:工具集变更时在其上替换工具片段重建,
-    /// 避免丢 custom_prompt/context_files/append 等用户配置
+    /// 避免丢 custom_prompt/append 等用户配置
     system_prompt_options: SystemPromptOptions,
     active_tool_names: Vec<String>,
     /// 当前会话模式(与 PermissionEngine 同步;未装配引擎时也是唯一事实源)
@@ -616,8 +616,8 @@ impl AgentSession {
         {
             let mut runtime = self.runtime.lock().unwrap();
             runtime.active_tool_names = names.to_vec();
-            // 在原始 options 上替换工具片段(保留 custom_prompt/context_files/
-            // append 等全部用户配置);Forced 整 prompt 不参与重建
+            // 在原始 options 上替换工具片段(保留 custom_prompt/append
+            // 等全部用户配置);Forced 整 prompt 不参与重建
             let mut options = runtime.system_prompt_options.clone();
             options.tool_snippets = active_tools
                 .iter()

@@ -110,10 +110,11 @@ fn new_session_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// 文件名可用的项目前缀上限(字节截断按 char 边界;uuid + 分隔符 + 扩展名约占 50)
+/// 会话目录/文件名可用的项目前缀上限(字节截断按 char 边界;时间戳 +
+/// uuid + 分隔符 + 扩展名约占 50)
 const PROJECT_PREFIX_MAX_CHARS: usize = 100;
 
-/// 会话文件名的项目前缀:完整 cwd 编码为文件名安全字符串(分项目管理)。
+/// 会话子目录名:完整 cwd 编码为路径安全字符串(分项目管理)。
 /// 路径分隔符 `/` `\` → `-`,空白与文件名非法字符(: * ? " < > | 及控制字符)
 /// → `_`,其余字符(含中文等非 ASCII)保留;去除首尾 `-`,超长按 char 边界
 /// 截断;结果为空(如 cwd = "/")时回退 "session"。
@@ -137,8 +138,11 @@ pub fn project_prefix(cwd: &str) -> String {
     prefix
 }
 
-/// 工厂:在目录下创建 `<项目前缀>__<session-id>.jsonl` 会话文件(目录不存在则
-/// 创建),前缀由 cwd 编码(`project_prefix`)实现分项目管理,id 即 session id。
+/// 工厂:在 `<dir>/<项目前缀>/<时间>__<session-id>.jsonl` 创建会话文件
+/// (目录不存在则创建):项目前缀由 cwd 编码(`project_prefix`)实现分项目
+/// 管理,时间取本地时间 `%Y%m%d-%H%M%S`(同秒并发由 uuid 保证唯一),
+/// id 即 session id。传入的 `dir` 已是项目目录(名字恰为前缀)时不再重复
+/// 嵌套(/new 与子会话工厂经 `file.parent()` 回传项目目录)。
 /// 子会话文件名的 tag 净化:仅保留字母/数字/`_`/`-`,其余转 `_`。
 fn sanitize_session_tag(tag: &str) -> String {
     tag.chars()
@@ -153,17 +157,25 @@ pub fn create_session_in_dir(
     tag: Option<&str>,
 ) -> Result<Box<SessionManager>, SessionError> {
     let dir = dir.as_ref();
-    std::fs::create_dir_all(dir)?;
+    // 项目目录:<dir>/<项目前缀>;幂等:传入的已是项目目录时原样使用
+    let prefix = project_prefix(cwd);
+    let project_dir: PathBuf = match dir.file_name().and_then(|name| name.to_str()) {
+        Some(name) if name == prefix => dir.to_path_buf(),
+        _ => dir.join(prefix),
+    };
+    std::fs::create_dir_all(&project_dir)?;
     let id = new_session_id();
-    // 带 tag 的子会话文件(`<prefix>__<tag>__<id>.jsonl`);tag 净化为文件名安全字符
+    // 文件名 = `<时间>__<session-id>.jsonl`;带 tag 的子会话为
+    // `<时间>__<tag>__<id>.jsonl`(两段 `__`,find_latest_session_file 据此排除)
+    let time = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let file_name = match tag.map(str::trim).filter(|tag| !tag.is_empty()) {
         Some(tag) => {
             let tag = sanitize_session_tag(tag);
-            format!("{}__{tag}__{id}.jsonl", project_prefix(cwd))
+            format!("{time}__{tag}__{id}.jsonl")
         }
-        None => format!("{}__{id}.jsonl", project_prefix(cwd)),
+        None => format!("{time}__{id}.jsonl"),
     };
-    let path = dir.join(file_name);
+    let path = project_dir.join(file_name);
     // 先落首行 header(保证文件名与 session id 一致),再按既有文件打开
     let header = SessionHeader::new(id, cwd.to_string(), parent_session.map(str::to_string));
     {
@@ -179,37 +191,57 @@ pub fn create_session_in_dir(
 
 /// 找最近一次活动的会话文件(pi `--continue` 语义):按文件修改时间取最新;
 /// 传 cwd 时只考虑 header.cwd 匹配的会话(当前项目的会话)。
+/// 扫描范围 = 根目录(旧版式单层布局,向后兼容)+ 各一级子目录(新版式
+/// `<dir>/<项目目录>/*.jsonl`;更深层与 `<stem>.ctx/` 快照目录不进入)。
 /// 非法/损坏文件跳过;目录不存在或无匹配返回 None。
 pub fn find_latest_session_file(dir: impl AsRef<Path>, cwd: Option<&str>) -> Option<PathBuf> {
     let dir = dir.as_ref();
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-            continue;
-        }
-        // 带 tag 的子会话文件(文件名含两段 `__`)不参与 --continue 选取
-        if path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| stem.matches("__").count() >= 2)
-        {
-            continue;
-        }
-        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
-            continue;
-        };
-        if let Some(cwd) = cwd {
-            match read_session_header(&path) {
-                Ok(header) if header.kind == "session" && header.cwd == cwd => {}
-                _ => continue,
+        if path.is_dir() {
+            // 新版式:项目子目录;读不了的子目录跳过
+            if let Ok(subs) = std::fs::read_dir(&path) {
+                for sub in subs.flatten() {
+                    consider_session_file(&sub.path(), cwd, &mut best);
+                }
             }
-        }
-        if best.as_ref().is_none_or(|(latest, _)| modified > *latest) {
-            best = Some((modified, path));
+        } else {
+            consider_session_file(&path, cwd, &mut best);
         }
     }
     best.map(|(_, path)| path)
+}
+
+/// 单个候选文件的 --continue 判定(时间戳取最新者胜出)。
+fn consider_session_file(
+    path: &Path,
+    cwd: Option<&str>,
+    best: &mut Option<(std::time::SystemTime, PathBuf)>,
+) {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return;
+    }
+    // 带 tag 的子会话文件(文件名含两段 `__`)不参与 --continue 选取
+    if path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.matches("__").count() >= 2)
+    {
+        return;
+    }
+    let Ok(modified) = path.metadata().and_then(|meta| meta.modified()) else {
+        return;
+    };
+    if let Some(cwd) = cwd {
+        match read_session_header(path) {
+            Ok(header) if header.kind == "session" && header.cwd == cwd => {}
+            _ => return,
+        }
+    }
+    if best.as_ref().is_none_or(|(latest, _)| modified > *latest) {
+        *best = Some((modified, path.to_path_buf()));
+    }
 }
 
 fn read_session_header(path: &Path) -> Result<SessionHeader, SessionError> {

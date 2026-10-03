@@ -37,8 +37,6 @@ pub struct SystemPromptOptions {
     pub append_system_prompt: Option<String>,
     /// 扩展自定义 XML 节
     pub sections: BTreeMap<String, String>,
-    /// AGENTS.md 等上下文文件,渲染成 <project_instructions path="...">
-    pub context_files: Vec<(String, String)>,
     /// <rules> 节的追加规则(system-prompt.md 的 <rules> 标记块);拼在
     /// 内置规则之后
     pub custom_rules: Option<String>,
@@ -105,8 +103,7 @@ pub fn split_prompt_and_rules(text: &str) -> (Option<String>, Option<String>) {
     )
 }
 
-/// 构建 sections 状态(preamble 无标签,tools/rules/addendum/project_context/env
-/// + 扩展自定义节)。
+/// 构建 sections 状态(preamble 无标签,tools/rules/addendum/env + 扩展自定义节)。
 pub fn build_system_prompt_sections(
     options: &SystemPromptOptions,
 ) -> Result<SystemPromptSections, CoreError> {
@@ -159,17 +156,6 @@ pub fn build_system_prompt_sections(
         sections.insert("rules".into(), text);
     }
 
-    // project_context:AGENTS.md 等上下文文件
-    if !options.context_files.is_empty() {
-        let mut context = String::new();
-        for (path, content) in &options.context_files {
-            context.push_str(&format!(
-                "<project_instructions path=\"{path}\">\n{content}\n</project_instructions>\n\n"
-            ));
-        }
-        sections.insert("project_context".into(), context.trim_end().to_string());
-    }
-
     // env:运行环境事实 —— 工作目录 + 当前本地时间(模型判断"在哪/今天"的依据)
     if let Some(cwd) = &options.cwd {
         let time = options
@@ -213,7 +199,8 @@ impl SystemPromptState {
     }
 }
 
-/// sections → 提示词文本:preamble 原样,其余每节包 <name> 标签(04 文档 :175-178)。
+/// sections → 提示词文本:preamble 原样,其余每节包 <name> 标签(04 文档 :175-178),
+/// 按 BTreeMap 字母序。
 pub fn sections_to_text(sections: &SystemPromptSections) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(preamble) = sections.get("preamble") {
@@ -299,25 +286,6 @@ mod tests {
         assert!(text.contains("<tools>\nAvailable tools:"), "{text}");
         assert!(text.contains("<env>\nWorking directory: /tmp/proj"), "{text}");
         assert!(text.contains("<rules>"), "{text}");
-    }
-
-    /// AGENTS.md 等上下文文件渲染进 <project_context> 节(带路径的
-    /// <project_instructions> 块);为空时无此节。
-    #[test]
-    fn context_files_render_into_project_context_section() {
-        let mut opts = options();
-        opts.context_files = vec![("/tmp/proj/AGENTS.md".into(), "project rules".into())];
-        let sections = build_system_prompt_sections(&opts).unwrap();
-        let context = sections.get("project_context").unwrap();
-        assert_eq!(
-            context,
-            "<project_instructions path=\"/tmp/proj/AGENTS.md\">\nproject rules\n</project_instructions>"
-        );
-        let text = sections_to_text(&sections);
-        assert!(text.contains("<project_context>\n<project_instructions path=\"/tmp/proj/AGENTS.md\">"), "{text}");
-        // 无上下文文件 = 无该节
-        let sections = build_system_prompt_sections(&options()).unwrap();
-        assert!(!sections.contains_key("project_context"));
     }
 
     /// <env> 节包含工作目录与当前时间;注入固定值时原样渲染。

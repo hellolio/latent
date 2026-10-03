@@ -203,7 +203,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | agents | `.rpi/agents/<name>.md` / `~/.rpi/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
 | system-prompt.md | `.rpi/system-prompt.md` / `~/.rpi/…` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
 
-会话文件写 `~/.rpi/sessions/`（`<项目前缀>__<tag>__<id>.jsonl`）；`contextSnapshot` 开启时请求快照落旁路 `.ctx/` 目录，不进模型上下文。
+会话文件写 `~/.rpi/sessions/<项目前缀>/`（目录名 = cwd 编码；文件名 `<时间>__<tag>__<id>.jsonl`，时间为本地 %Y%m%d-%H%M%S）；`contextSnapshot` 开启时请求快照落旁路 `.ctx/` 目录，不进模型上下文。
 
 ## 测试方针
 

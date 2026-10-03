@@ -118,7 +118,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    // ---- 分项目管理:文件名项目前缀 ----
+    // ---- 分项目管理:项目目录层 + 文件名时间戳 ----
 
     #[test]
     fn project_prefix_encodes_cwd_for_filenames() {
@@ -171,27 +171,45 @@ mod tests {
     }
 
     #[test]
-    fn create_session_in_dir_uses_project_prefix_filename() {
+    fn create_session_in_dir_uses_project_subdir_and_time_filename() {
         let dir = std::env::temp_dir().join(format!(
             "rpi-session-prefix-{}",
             uuid::Uuid::now_v7().simple()
         ));
         let cwd = "/Users/kin/Documents/10source/rpi";
         let session = create_session_in_dir(&dir, cwd, None, None).unwrap();
-        let file_name = session
-            .file_path()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        assert!(
-            file_name.starts_with("Users-kin-Documents-10source-rpi__"),
-            "文件名应以项目前缀开头: {file_name}"
+        let path = session.file_path().unwrap();
+        // 文件落在 `<dir>/<项目前缀>/` 项目目录下
+        let parent = path.parent().unwrap();
+        assert_eq!(
+            parent.file_name().unwrap().to_string_lossy(),
+            "Users-kin-Documents-10source-rpi"
         );
-        assert!(file_name.ends_with(".jsonl"));
+        assert!(parent.parent().unwrap() == dir);
+        // 文件名 = `<时间>__<session-id>.jsonl`(时间格式 %Y%m%d-%H%M%S)
+        let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+        let (time, rest) = file_name.split_once("__").unwrap();
+        assert_eq!(time.len(), 15, "{file_name}");
+        assert!(time.chars().all(|c| c.is_ascii_digit() || c == '-'), "{file_name}");
+        assert_eq!(rest, format!("{}.jsonl", session.session_id()));
         // header.cwd 仍是完整路径(--continue 匹配依据)
         assert_eq!(session.cwd(), cwd);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 传入的已是项目目录(名字恰为前缀)时不再重复嵌套(/new 与子会话
+    /// 工厂经 file.parent() 回传项目目录的场景)。
+    #[test]
+    fn create_session_in_dir_is_idempotent_for_project_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "rpi-session-idem-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let cwd = "/Users/kin/Documents/10source/rpi";
+        let project_dir = dir.join(project_prefix(cwd));
+        let session = create_session_in_dir(&project_dir, cwd, None, None).unwrap();
+        let parent = session.file_path().unwrap().parent().unwrap();
+        assert_eq!(parent, project_dir, "不应出现 <项目前缀>/<项目前缀>/ 双层嵌套");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

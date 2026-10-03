@@ -220,13 +220,21 @@ async fn child_run_persists_session_file_with_run_id_tag() {
         .unwrap();
     let run_id = outcome.details["runId"].as_str().unwrap().to_string();
 
-    // 子会话文件存在,内容含任务文本(与主会话条目格式一致)
-    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .unwrap()
-        .flatten()
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
-        .map(|e| e.path())
-        .collect();
+    // 子会话文件存在,内容含任务文本(与主会话条目格式一致);文件在
+    // `<dir>/<项目目录>/` 下(含旧版式根目录兼容扫描)
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            for sub in std::fs::read_dir(&path).unwrap().flatten() {
+                if sub.path().extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                    files.push(sub.path());
+                }
+            }
+        } else if path.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+            files.push(path);
+        }
+    }
     assert_eq!(files.len(), 2, "{files:?}");
     let child_file = files
         .iter()

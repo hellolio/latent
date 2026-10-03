@@ -26,8 +26,8 @@ def test_half_line_in_session_file_is_isolated():
         finally:
             first.close()
 
-        # 模拟崩溃:留下末尾无换行的半行
-        sessions = glob.glob(os.path.join(home, ".rpi", "sessions", "*.jsonl"))
+        # 模拟崩溃:留下末尾无换行的半行(会话文件在 sessions/<项目目录>/ 下)
+        sessions = glob.glob(os.path.join(home, ".rpi", "sessions", "*", "*.jsonl"))
         assert sessions, "会话文件应已落盘"
         session_file = sessions[0]
         with open(session_file, "ab") as f:

@@ -243,30 +243,6 @@ fn system_prompt_override_from(cwd: Option<&Path>, home: Option<&Path>) -> Optio
     None
 }
 
-/// 项目上下文文件:cwd 下 AGENTS.md 优先、其次 agent.md,首个存在且非空
-/// 的文件生效(空白文件跳过落到下一个)。仅查 cwd 一层,不向上遍历、不查
-/// 子目录。内容渲染进系统提示词 <project_context> 节(带路径的
-/// <project_instructions> 块)。仅在装配期读一次,会话中途修改不生效。
-/// 纯函数面(可测)。
-fn project_context_files(cwd: Option<&Path>) -> Vec<(String, String)> {
-    const CANDIDATES: &[&str] = &["AGENTS.md", "agent.md"];
-    let Some(cwd) = cwd else {
-        return Vec::new();
-    };
-    for name in CANDIDATES {
-        let path = cwd.join(name);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        return vec![(path.display().to_string(), trimmed.to_string())];
-    }
-    Vec::new()
-}
-
 /// 装配产物:四种模式共享的业务核句柄。`session_manager` 供 rpc 模式的
 /// get_tree/get_entries/fork 命令查询会话树(rpi-session 是可选组件);
 /// `manager_holder` 是可切换指针 —— /new 运行期新建 session 时整体换目标,
@@ -806,7 +782,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         subscribers.clone(),
     ));
     // 会话树管理器先于工具装配创建:T9 的 PI_* 环境闭包需要读 session id/file。
-    // 默认文件持久化(`~/.rpi/sessions/<项目前缀>__<session-id>.jsonl`),Memory 仅测试用
+    // 默认文件持久化(`~/.rpi/sessions/<项目前缀>/<时间>__<session-id>.jsonl`),Memory 仅测试用
     let session_manager: Arc<rpi_session::SessionManager> = match &session_store {
         SessionStore::Memory => rpi_session::create_session(None::<String>)
             .map_err(|e| e.to_string())?
@@ -980,7 +956,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         Arc::new(move |spec: &str| factory_resolver.resolve(spec));
     let read_only_tool_set = rpi_tools::read_only_tools_with_limits(&cwd, tool_output_limits);
     // 子会话落盘工厂:与主会话同一套 rpi-session 机制(消息/usage/快照 entry
-    // 完全一致),文件名 `<项目前缀>__<tag>__<id>.jsonl`(tag = run id / agent 名);
+    // 完全一致),文件名 `<时间>__<tag>__<id>.jsonl`(tag = run id / agent 名,
+    // 落在 `<dir>/<项目前缀>/` 项目目录下);
     // 纯内存会话不落盘。contextSnapshot 开启时子会话同样记录真实上下文
     let child_store_factory: Option<rpi_core::ChildStoreFactory> = match &session_store {
         SessionStore::Memory => None,
@@ -1073,9 +1050,6 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             active_tool_names,
             system_prompt: SystemPromptOptions {
                 cwd: Some(cwd.display().to_string()),
-                // 项目上下文文件(AGENTS.md 优先,其次 agent.md,仅 cwd 一层):
-                // 渲染进 <project_context> 节;装配期读一次,会话中途修改不生效
-                context_files: project_context_files(Some(&cwd)),
                 // 用户外置提示词(.rpi/system-prompt.md,项目→全局):块外内容
                 // 替换身份句(preamble),<rules> 标记块内容追加进 <rules> 节;
                 // <env>/<tools> 等动态节仍自动注入。装配期读一次,会话中途
@@ -1904,54 +1878,5 @@ mod tests {
         let (prompt, rules) = rpi_core::split_prompt_and_rules(&text);
         assert_eq!(prompt.as_deref(), Some("You are my agent."));
         assert_eq!(rules.as_deref(), Some("Always run cargo clippy before commit."));
-    }
-
-    // ---- 项目上下文文件(AGENTS.md 优先,其次 agent.md,仅 cwd 一层) ----
-
-    #[test]
-    fn project_context_files_missing_yields_empty() {
-        let project = TempDir::new("pcf_unset");
-        assert!(project_context_files(Some(&project.0)).is_empty());
-        assert!(project_context_files(None).is_empty());
-    }
-
-    #[test]
-    fn project_context_files_prefers_agents_md() {
-        let project = TempDir::new("pcf_prio");
-        project.write_file("AGENTS.md", "agents rules");
-        project.write_file("agent.md", "agent rules");
-        let files = project_context_files(Some(&project.0));
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].0, project.0.join("AGENTS.md").display().to_string());
-        assert_eq!(files[0].1, "agents rules");
-        // 仅 agent.md 也可用
-        let only = TempDir::new("pcf_agent");
-        only.write_file("agent.md", "agent rules");
-        let files = project_context_files(Some(&only.0));
-        assert_eq!(files[0].0, only.0.join("agent.md").display().to_string());
-        assert_eq!(files[0].1, "agent rules");
-    }
-
-    #[test]
-    fn project_context_files_blank_skips_to_next_candidate() {
-        let project = TempDir::new("pcf_blank");
-        project.write_file("AGENTS.md", "   \n\t ");
-        project.write_file("agent.md", "agent rules");
-        let files = project_context_files(Some(&project.0));
-        assert_eq!(files[0].0, project.0.join("agent.md").display().to_string());
-        // 全部空白 = 未配置
-        let blank = TempDir::new("pcf_blank_all");
-        blank.write_file("agent.md", " \n ");
-        assert!(project_context_files(Some(&blank.0)).is_empty());
-    }
-
-    #[test]
-    fn project_context_files_ignores_subdirs_and_parents() {
-        let project = TempDir::new("pcf_scope");
-        project.write_file("sub/AGENTS.md", "subdir");
-        assert!(project_context_files(Some(&project.0)).is_empty());
-        // 子目录作为 cwd 时不向上遍历(空子目录,父目录的 AGENTS.md 不生效)
-        project.write_file("AGENTS.md", "parent");
-        assert!(project_context_files(Some(&project.0.join("empty_sub"))).is_empty());
     }
 }

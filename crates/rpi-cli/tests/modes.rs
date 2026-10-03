@@ -631,7 +631,7 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         let session_id = manager.session_id().to_string();
         built.session.prompt("你好").await.expect("prompt");
         built.session.wait_idle().await;
-        // 文件名 = `<项目前缀>__<session-id>.jsonl`,header + user/assistant 已落盘
+        // 文件名 = `<时间>__<session-id>.jsonl`(项目目录下),header + user/assistant 已落盘
         let file = manager.file_path().unwrap().to_path_buf();
         let file_name = file.file_name().unwrap().to_string_lossy().to_string();
         assert!(
@@ -723,7 +723,7 @@ async fn context_snapshot_recorded_per_request_and_excluded_from_projection() {
     };
     assert_eq!(
         snapshot_path.parent().unwrap(),
-        dir.join(format!("{stem}.ctx")),
+        session_file.parent().unwrap().join(format!("{stem}.ctx")),
         "快照目录与 session 文件同名 + .ctx"
     );
     let snapshot: serde_json::Value =
@@ -791,7 +791,11 @@ async fn context_snapshot_disabled_by_default_writes_nothing() {
         .to_string_lossy()
         .to_string();
     assert!(
-        !dir.join(format!("{stem}.ctx")).exists(),
+        !session_file
+            .parent()
+            .unwrap()
+            .join(format!("{stem}.ctx"))
+            .exists(),
         "默认关:不应创建 .ctx 目录"
     );
 

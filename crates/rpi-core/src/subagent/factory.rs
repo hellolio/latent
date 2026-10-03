@@ -306,13 +306,21 @@ mod tests {
             .unwrap();
         session.prompt("hi").await.unwrap();
 
-        // 会话文件存在,文件名带 agent 名 tag,含消息条目
-        let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
-            .map(|e| e.path())
-            .collect();
+        // 会话文件存在,文件名带 agent 名 tag,含消息条目;文件在
+        // `<dir>/<项目目录>/` 下(含旧版式根目录兼容扫描)
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                for sub in std::fs::read_dir(&path).unwrap().flatten() {
+                    if sub.path().extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                        files.push(sub.path());
+                    }
+                }
+            } else if path.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                files.push(path);
+            }
+        }
         assert_eq!(files.len(), 1, "{files:?}");
         let name = files[0].file_name().unwrap().to_string_lossy().to_string();
         assert!(name.contains("__reviewer__"), "{name}");

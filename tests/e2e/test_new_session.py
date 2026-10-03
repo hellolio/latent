@@ -11,7 +11,8 @@ from harness import RpiApp, load_scenario
 
 
 def _session_files(home: str) -> list[str]:
-    return glob.glob(os.path.join(home, ".rpi", "sessions", "*.jsonl"))
+    # 新版式:会话文件在 `sessions/<项目目录>/` 下
+    return glob.glob(os.path.join(home, ".rpi", "sessions", "*", "*.jsonl"))
 
 
 def test_new_session_clears_context_and_keeps_old_file():

@@ -287,7 +287,7 @@ async fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// 会话存储:默认在 `~/.rpi/sessions/` 新建 `<session-id>.jsonl`;
+/// 会话存储:默认在 `~/.rpi/sessions/<项目前缀>/` 新建 `<时间>__<session-id>.jsonl`;
 /// `--continue` 续聊当前项目最近的会话文件。HOME 缺失时降级为内存会话。
 fn resolve_session_store(cont: bool) -> Result<rpi_cli::assembly::SessionStore, String> {
     use rpi_cli::assembly::SessionStore;
