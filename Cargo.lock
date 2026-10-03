@@ -2541,6 +2541,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "readkey"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a36870cefdfcff57edbc0fa62165f42dfd4e5a0d8965117c1ea84c5700e4450"
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2871,6 +2877,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "ratatui-themes",
+ "readkey",
  "syntect",
 ]
 

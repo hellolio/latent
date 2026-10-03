@@ -301,6 +301,25 @@ mod tests {
         assert!(text.contains("<rules>"), "{text}");
     }
 
+    /// AGENTS.md 等上下文文件渲染进 <project_context> 节(带路径的
+    /// <project_instructions> 块);为空时无此节。
+    #[test]
+    fn context_files_render_into_project_context_section() {
+        let mut opts = options();
+        opts.context_files = vec![("/tmp/proj/AGENTS.md".into(), "project rules".into())];
+        let sections = build_system_prompt_sections(&opts).unwrap();
+        let context = sections.get("project_context").unwrap();
+        assert_eq!(
+            context,
+            "<project_instructions path=\"/tmp/proj/AGENTS.md\">\nproject rules\n</project_instructions>"
+        );
+        let text = sections_to_text(&sections);
+        assert!(text.contains("<project_context>\n<project_instructions path=\"/tmp/proj/AGENTS.md\">"), "{text}");
+        // 无上下文文件 = 无该节
+        let sections = build_system_prompt_sections(&options()).unwrap();
+        assert!(!sections.contains_key("project_context"));
+    }
+
     /// <env> 节包含工作目录与当前时间;注入固定值时原样渲染。
     #[test]
     fn env_section_contains_working_directory_and_time() {

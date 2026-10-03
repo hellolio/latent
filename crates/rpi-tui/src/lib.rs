@@ -39,7 +39,7 @@ pub use editor::{Editor, EditorView};
 pub use footer::{ctx_segment, FooterData};
 pub use header as header_view;
 pub use highlight::Highlighter;
-pub use key::{from_event, Key};
+pub use key::{from_event, normalize_native_enter, Key};
 pub use loader as loader_view;
 pub use markdown::Markdown;
 pub use select_list::SelectList;

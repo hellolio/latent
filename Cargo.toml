@@ -49,6 +49,10 @@ ignore = "0.4"
 # rpi-core 系统提示词 <cwd> 节的当前本地时间(本地时区渲染;钉死精确版本)
 chrono = "=0.4.42"
 
+# rpi-tui(macOS)本地修饰键状态查询:Shift+Enter 兜底用,只读
+# CoreGraphics 事件源,无需辅助功能权限;键盘状态属供应链敏感面,钉死精确版本
+readkey = "=0.2.2"
+
 # rpi-core 扩展机制(M5,07 §8):进程外 MCP 扩展,rmcp 钉死精确版本
 # (07 §8.7 风险条款:新 spec 支持为 beta → pin 精确版本 + in-memory 测试锁行为)
 rmcp = { version = "=3.4.1", features = ["client", "server", "elicitation", "transport-async-rw", "transport-child-process"] }

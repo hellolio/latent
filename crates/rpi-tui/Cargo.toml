@@ -13,3 +13,9 @@ ratatui = { version = "0.30.2" }
 # 主题源:与 ratatui 0.30 共用同一 ratatui-core,Color/Style 类型互通
 ratatui-themes = "0.3.0"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+
+# macOS 本地修饰键查询(readkey 内部封装 CoreGraphics FFI,本仓不写
+# unsafe):不支持 kitty 协议的终端(WezTerm 默认配置、Terminal.app 等)
+# 的 Shift+Enter 兜底
+[target.'cfg(target_os = "macos")'.dependencies]
+readkey = { workspace = true }

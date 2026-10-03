@@ -61,7 +61,21 @@ rpi --mode interactive                 # 需要终端
 - 每回合结束显示用量行(输入/输出/缓存读/缓存写 token + 费用);错误/中止回合红字上屏(`Error: …` / `Operation aborted`),自动重试最终失败同样可见;
 - 启动/续聊时回放当前转录:user 反色块、assistant 正文、工具调用与结果、压缩摘要(`--continue` 恢复历史可见);
 - 斜杠命令:`/help` `/model [provider/model]` `/thinking [level]` `/compact` `/session` `/quit`;未识别的 `/xxx` 本地警告(不发给模型);
-- `Enter` 发送;run 进行中输入自动转为 **steering**(当前 turn 结束后注入);`Ctrl+C` 中断当前 run(空闲时 500ms 内双击退出),`Ctrl+D` 退出。
+- `Enter` 发送;`Shift+Enter`/`Ctrl+J` 换行(kitty keyboard protocol 终端开箱即用;macOS 本地会话对不支持的终端自动兜底,详见下文终端兼容性);run 进行中输入自动转为 **steering**(当前 turn 结束后注入);`Ctrl+C` 中断当前 run(空闲时 500ms 内双击退出),`Ctrl+D` 退出。
+
+#### Shift+Enter 与终端兼容性
+
+rpi 启动时推送 kitty keyboard protocol(flags 1\|2\|4,对齐上游 pi),支持该协议的终端把修饰键原样上报;不支持的终端由 macOS 本地兜底接管:
+
+| 终端 | 说明 |
+|---|---|
+| kitty / Ghostty / iTerm2 ≥3.5 / VSCode ≥1.109.5 | 开箱即用 |
+| WezTerm | 建议配置 `config.enable_kitty_keyboard = true`;未配置时 macOS 本地兜底也能生效 |
+| macOS Terminal.app | 不支持协议,macOS 本地兜底生效 |
+| tmux | 需 3.4+ 且 `set -s extended-keys on` |
+| 远程 SSH / Linux 非协议终端 | 无本地兜底,用 `Ctrl+J` 或 `Alt+Enter`(终端把 Option 映射为 Meta 时)换行 |
+
+macOS 本地兜底:rpi 检测物理 Shift 键按下时把裸 `Enter` 归一为 `Shift+Enter`,覆盖所有不支持协议的本地终端(WezTerm 默认配置、Terminal.app、iTerm2 旧版等);SSH 会话(检测 `SSH_CONNECTION`/`SSH_TTY`)自动禁用。
 
 ### json(事件 JSONL)
 

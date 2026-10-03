@@ -78,6 +78,60 @@ pub fn from_key_event(key: &KeyEvent) -> Key {
     }
 }
 
+// 本地修饰键兜底(仅 macOS):协议缺失的终端(WezTerm 默认配置、
+// Terminal.app、iTerm2 <3.5 等)对 Shift+Enter 只发裸 CR,crossterm 解析
+// 为不带修饰的 Enter。这里用 CoreGraphics 查询物理 Shift 键状态,把
+// “裸 Enter + 物理 Shift 按下”归一为 ShiftEnter。对齐上游 pi 的
+// Apple Terminal 兜底,但放宽到全部本地 macOS 会话:协议终端里裸 CR
+// 本就是未修饰 Enter,不会误判(pi 只对 Apple_Terminal 启用)。
+//
+// SSH 会话(SSH_CONNECTION/SSH_TTY 任一存在)禁用:物理键盘在远端,
+// 本地修饰键状态与输入方不一致。兜底不可用时 Ctrl+J / Alt+Enter
+// 仍可换行。
+
+/// 纯函数:裸 Enter 且本地 Shift 按下 → ShiftEnter,其余原样返回。
+fn native_shift_enter(key: Key, native_shift_pressed: bool) -> Key {
+    match key {
+        Key::Enter if native_shift_pressed => Key::ShiftEnter,
+        other => other,
+    }
+}
+
+/// 纯函数:给定目标平台是否 macOS、SSH 环境变量是否存在,判定兜底可用性。
+fn fallback_active_on(is_macos: bool, ssh_env_present: bool) -> bool {
+    is_macos && !ssh_env_present
+}
+
+fn ssh_env_present() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
+/// 键盘线程入口:协议终端的修饰 Enter 已由 `from_key_event` 归一,这里只
+/// 对裸 Enter 做本地兜底;非 macOS 或远程会话原样返回。
+pub fn normalize_native_enter(key: Key) -> Key {
+    let is_macos = cfg!(target_os = "macos");
+    let fallback = fallback_active_on(is_macos, ssh_env_present());
+    if key == Key::Enter && fallback && is_native_shift_pressed() {
+        native_shift_enter(key, true)
+    } else {
+        key
+    }
+}
+
+/// 查询物理 Shift(左或右)是否按下。macOS 用 readkey 安全封装
+/// CoreGraphics `CGEventSourceFlagsState`,无需辅助功能权限;其余平台无
+/// 本地兜底,恒 false。
+#[cfg(target_os = "macos")]
+fn is_native_shift_pressed() -> bool {
+    use readkey::Keycode;
+    Keycode::Shift.is_pressed() || Keycode::RightShift.is_pressed()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_native_shift_pressed() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +170,25 @@ mod tests {
     fn plain_chars_pass_through() {
         assert_eq!(key(K::Char('x'), KeyModifiers::empty()), Key::Char('x'));
         assert_eq!(key(K::Char('中'), KeyModifiers::empty()), Key::Char('中'));
+    }
+
+    #[test]
+    fn native_shift_enter_remaps_only_bare_enter() {
+        assert_eq!(super::native_shift_enter(Key::Enter, true), Key::ShiftEnter);
+        // 无 Shift:裸 Enter 保持提交语义
+        assert_eq!(super::native_shift_enter(Key::Enter, false), Key::Enter);
+        // 协议终端已归一的 ShiftEnter 不再二次处理
+        assert_eq!(super::native_shift_enter(Key::ShiftEnter, true), Key::ShiftEnter);
+        // Alt+Enter(CR)与普通字符不受影响
+        assert_eq!(super::native_shift_enter(Key::AltEnter, true), Key::AltEnter);
+        assert_eq!(super::native_shift_enter(Key::Char('中'), true), Key::Char('中'));
+    }
+
+    #[test]
+    fn fallback_active_gates_on_platform_and_ssh() {
+        assert!(super::fallback_active_on(true, false));
+        assert!(!super::fallback_active_on(true, true));
+        assert!(!super::fallback_active_on(false, false));
+        assert!(!super::fallback_active_on(false, true));
     }
 }

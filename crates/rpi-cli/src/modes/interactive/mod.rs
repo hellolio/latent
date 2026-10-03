@@ -85,7 +85,11 @@ pub async fn run_interactive_mode(
             match event::poll(Duration::from_millis(50)) {
                 Ok(true) => match event::read() {
                     Ok(event) => {
-                        let Some(key) = rpi_tui::from_event(&event) else {
+                        // 协议终端的修饰 Enter 已由 from_event 归一;裸 Enter
+                        // 经本地修饰键兜底(macOS,见 normalize_native_enter)
+                        let Some(key) =
+                            rpi_tui::from_event(&event).map(rpi_tui::normalize_native_enter)
+                        else {
                             continue;
                         };
                         if key_tx.send(key).is_err() {

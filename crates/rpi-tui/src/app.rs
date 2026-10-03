@@ -35,6 +35,16 @@ const SHOW_CURSOR: &str = "\x1b[?25h";
 const RESET_SGR: &str = "\x1b[0m";
 const AUTO_WRAP_OFF: &str = "\x1b[?7l";
 const AUTO_WRAP_ON: &str = "\x1b[?7h";
+/// kitty keyboard protocol:push disambiguate + report event types +
+/// report alternate keys(flags 1|2|4 = 7,与上游 pi 一致)。disambiguate
+/// 让修饰 Enter/Tab 等以 CSI 13;…u 上报(crossterm 解析出 SHIFT/ALT);
+/// 事件类型与 alternate 子字段 crossterm 0.29 均可解析,非 Press 事件由
+/// key.rs 的 from_event 过滤。不支持该协议的终端忽略未知 CSI,行为不变
+/// (由 key.rs 的本地修饰键兜底接管)。字节序与 crossterm 同名命令一致
+/// (有测试锚定),pop 在收尾/Drop 恢复。不启用 flag 8(全键上报):
+/// 普通文本键也会转义,破坏 CJK 输入。
+const KEYBOARD_PUSH: &str = "\x1b[>7u";
+const KEYBOARD_POP: &str = "\x1b[<1u";
 
 fn move_to(col: u16, row: u16) -> String {
     format!("\x1b[{};{}H", row + 1, col + 1)
@@ -85,6 +95,7 @@ impl TuiApp<Stdout> {
         // 锚定不变量:光标先滚到屏幕底部,内容从此贴底自然滚动(在
         // shell 提示符后启动时,首帧才不会错位)
         let mut boot = String::from(AUTO_WRAP_OFF);
+        boot.push_str(KEYBOARD_PUSH);
         boot.push_str(HIDE_CURSOR);
         boot.push_str(&"\r\n".repeat(rows.saturating_sub(1) as usize));
         app.write_raw(boot.as_bytes())?;
@@ -300,6 +311,10 @@ impl<W: Write> TuiApp<W> {
         }
         out.push_str(AUTO_WRAP_ON);
         out.push_str(SHOW_CURSOR);
+        if self.restores_terminal {
+            // 内存 sink(测试)不写,避免污染回放字节流
+            out.push_str(KEYBOARD_POP);
+        }
         self.out.write_all(out.as_bytes())?;
         self.out.flush()?;
         disable_raw_mode()?;
@@ -389,6 +404,7 @@ impl<W: Write> Drop for TuiApp<W> {
                 let _ = disable_raw_mode();
                 let _ = self.out.write_all(AUTO_WRAP_ON.as_bytes());
                 let _ = self.out.write_all(SHOW_CURSOR.as_bytes());
+                let _ = self.out.write_all(KEYBOARD_POP.as_bytes());
                 let _ = self.out.flush();
             }
         }
@@ -804,5 +820,27 @@ mod tests {
         let keep = sim.find("keep-me").unwrap();
         assert!(texts[keep + 1].trim().is_empty(), "尾部应被清掉: {texts:?}");
         assert!(!texts.iter().any(|t| t.contains("tail")), "{texts:?}");
+    }
+
+    #[test]
+    fn keyboard_protocol_bytes_match_crossterm_commands() {
+        // 锦定手写转义与 crossterm 官方命令字节一致,防两处漂移
+        use ratatui::crossterm::Command;
+        use ratatui::crossterm::event::{
+            KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        };
+        let mut push = String::new();
+        // 与上游 pi 一致:disambiguate + 事件类型 + alternate keys(不启用
+        // 全键上报,避免破坏 CJK 输入)
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS;
+        PushKeyboardEnhancementFlags(flags)
+            .write_ansi(&mut push)
+            .unwrap();
+        assert_eq!(push, KEYBOARD_PUSH);
+        let mut pop = String::new();
+        PopKeyboardEnhancementFlags.write_ansi(&mut pop).unwrap();
+        assert_eq!(pop, KEYBOARD_POP);
     }
 }
