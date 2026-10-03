@@ -15,6 +15,7 @@ mod output_accumulator;
 mod powershell;
 mod read;
 mod sanitize;
+mod search_ignore;
 mod truncate;
 mod write;
 
@@ -26,10 +27,11 @@ pub use bash::{
     ShellSpawnOptions, ShellTimeoutPolicy,
 };
 pub use read::create_read_tool_with_limits;
-pub use find::create_find_tool_with_limits;
-pub use grep::create_grep_tool_with_limits;
-pub use ls::create_ls_tool_with_limits;
+pub use find::{create_find_tool, create_find_tool_with_limits};
+pub use grep::{create_grep_tool, create_grep_tool_with_limits};
+pub use ls::{create_ls_tool, create_ls_tool_with_limits};
 pub use sanitize::{sanitize_control_chars, sanitize_output, strip_ansi};
+pub use search_ignore::SearchIgnore;
 pub use truncate::{
     truncate_head, truncate_line, truncate_tail, OutputLimits, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES,
     GREP_MAX_LINE_LENGTH,
@@ -119,26 +121,26 @@ pub fn default_tools_with_shell_and_limits(
 
 /// 只读工具列表(read/grep/find/ls,pi 的 createReadOnlyTools)。
 pub fn read_only_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
-    vec![
-        read::create_read_tool(cwd),
-        grep::create_grep_tool(cwd),
-        find::create_find_tool(cwd),
-        ls::create_ls_tool(cwd),
-    ]
+    read_only_tools_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::builtin()))
 }
 
-/// 只读工具列表 + 输出上限注入(装配层统一派生值)。
-pub fn read_only_tools_with_limits(cwd: &Path, limits: OutputLimits) -> Vec<Arc<dyn Tool>> {
+/// 只读工具列表 + 输出上限注入 + 检索忽略列表(装配层统一派生值)。
+pub fn read_only_tools_with_limits(
+    cwd: &Path,
+    limits: OutputLimits,
+    ignore: Arc<SearchIgnore>,
+) -> Vec<Arc<dyn Tool>> {
     vec![
         read::create_read_tool_with_limits(cwd, limits),
-        grep::create_grep_tool_with_limits(cwd, limits),
-        find::create_find_tool_with_limits(cwd, limits),
-        ls::create_ls_tool_with_limits(cwd, limits),
+        grep::create_grep_tool_with_limits(cwd, limits, ignore.clone()),
+        find::create_find_tool_with_limits(cwd, limits, ignore.clone()),
+        ls::create_ls_tool_with_limits(cwd, limits, ignore),
     ]
 }
 
-/// 全量工具列表(8 工具,pi 的 createAllTools)+ 输出上限注入(装配层统一派生值)。
-pub fn all_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
+/// 全量工具列表(8 工具,pi 的 createAllTools)+ 输出上限注入 + 检索忽略列表
+/// (装配层统一派生值)。
+pub fn all_tools(cwd: &Path, ignore: Arc<SearchIgnore>) -> Vec<Arc<dyn Tool>> {
     let limits = OutputLimits::default();
     vec![
         read::create_read_tool_with_limits(cwd, limits),
@@ -146,9 +148,9 @@ pub fn all_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
         powershell::create_powershell_tool(cwd),
         edit::create_edit_tool(cwd),
         write::create_write_tool(cwd),
-        grep::create_grep_tool_with_limits(cwd, limits),
-        find::create_find_tool_with_limits(cwd, limits),
-        ls::create_ls_tool_with_limits(cwd, limits),
+        grep::create_grep_tool_with_limits(cwd, limits, ignore.clone()),
+        find::create_find_tool_with_limits(cwd, limits, ignore.clone()),
+        ls::create_ls_tool_with_limits(cwd, limits, ignore),
     ]
 }
 
@@ -186,7 +188,7 @@ mod tests {
     #[test]
     fn all_tools_registry_has_eight_tools() {
         let mut registry = ToolRegistry::default();
-        for tool in all_tools(Path::new(".")) {
+        for tool in all_tools(Path::new("."), Arc::new(SearchIgnore::builtin())) {
             registry.register(tool);
         }
         for name in [
@@ -220,7 +222,7 @@ mod shell_validation_tests {
     /// jsonschema 编译——错误信息以 "invalid tool schema" 开头即 compile 失败。
     #[test]
     fn all_builtin_tool_schemas_pass_jsonschema() {
-        for tool in all_tools(Path::new(".")) {
+        for tool in all_tools(Path::new("."), Arc::new(SearchIgnore::builtin())) {
             let schema = tool.schema();
             let empty = serde_json::json!({});
             let outcome = rpi_agent::validate_arguments(&schema, &empty);

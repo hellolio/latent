@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
+use crate::search_ignore::SearchIgnore;
 use crate::truncate::{
     truncate_head, truncate_line, OutputLimits, GREP_MAX_LINE_LENGTH,
 };
@@ -22,29 +23,36 @@ const DEFAULT_LIMIT: usize = 100;
 pub struct GrepTool {
     cwd: PathBuf,
     limits: OutputLimits,
+    ignore: Arc<SearchIgnore>,
     description: String,
 }
 
 /// 工厂。
 pub fn create_grep_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_grep_tool_with_limits(cwd, OutputLimits::default())
+    create_grep_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::builtin()))
 }
 
-/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)。
-pub fn create_grep_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn Tool> {
+/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)+ 检索忽略列表
+/// (search_ignore 模块;settings `searchIgnore` 配置,未配置 = 内置默认表)。
+pub fn create_grep_tool_with_limits(
+    cwd: &Path,
+    limits: OutputLimits,
+    ignore: Arc<SearchIgnore>,
+) -> Arc<dyn Tool> {
     let description = format!(
         "Search file contents for a pattern. Returns matching lines with file paths and line \
          numbers. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} matches or {} \
          bytes (whichever is hit first). Long lines are truncated to {GREP_MAX_LINE_LENGTH} \
-         chars. Results are clean: .gitignore is respected, so vendored, generated, and \
-         dependency files are already excluded. Use grep to locate code first, then read \
-         only the matched regions; searching here is cheaper and quieter than listing or \
-         reading directories.",
+         chars. Results are clean: .gitignore is respected, and dependency/build directories \
+         (node_modules, dist, target, ...) are excluded regardless. Use grep to locate code \
+         first, then read only the matched regions; searching here is cheaper and quieter \
+         than listing or reading directories.",
         limits.effective_max_bytes()
     );
     Arc::new(GrepTool {
         cwd: cwd.to_path_buf(),
         limits,
+        ignore,
         description,
     })
 }
@@ -122,8 +130,13 @@ fn format_display_path(entry: &Path, search_root: &Path, search_root_is_dir: boo
         .unwrap_or_else(|| entry.to_string_lossy().to_string())
 }
 
-/// 构建 gitignore 感知 + glob 过滤的遍历器;搜索根不存在时返回 Err。
-fn build_walker(search_root: &Path, glob: Option<&str>) -> Result<ignore::Walk, String> {
+/// 构建 gitignore 感知 + glob 过滤 + 检索忽略列表的遍历器;搜索根不存在时返回 Err。
+/// 忽略命中的目录直接剪枝(不进入遍历)。
+fn build_walker(
+    search_root: &Path,
+    glob: Option<&str>,
+    ignore: &SearchIgnore,
+) -> Result<ignore::Walk, String> {
     let metadata = std::fs::metadata(search_root)
         .map_err(|_| format!("Path not found: {}", search_root.display()))?;
     if !metadata.is_dir() && !metadata.is_file() {
@@ -136,6 +149,18 @@ fn build_walker(search_root: &Path, glob: Option<&str>) -> Result<ignore::Walk, 
         .hidden(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != ".git");
+    // 检索忽略列表(search_ignore 模块):相对搜索根判定,命中即剪枝
+    if !ignore.is_empty() {
+        let ignore = ignore.clone();
+        let root = search_root.to_path_buf();
+        walker.filter_entry(move |entry| {
+            if entry.file_name() == ".git" {
+                return false;
+            }
+            let relative = entry.path().strip_prefix(&root).unwrap_or(entry.path());
+            !ignore.matches(relative)
+        });
+    }
     if metadata.is_file() {
         return Ok(walker.build());
     }
@@ -201,12 +226,12 @@ impl Tool for GrepTool {
         let search_root_is_dir = std::fs::metadata(&search_root)
             .map(|m| m.is_dir())
             .unwrap_or(false);
-        let walker = build_walker(&search_root, args.glob.as_deref()).map_err(|message| {
-            ToolError::Failed {
+        let walker = build_walker(&search_root, args.glob.as_deref(), &self.ignore).map_err(
+            |message| ToolError::Failed {
                 name: "grep".into(),
                 message,
-            }
-        })?;
+            },
+        )?;
 
         let pattern = if args.literal {
             regex::escape(&args.pattern)
@@ -333,9 +358,15 @@ impl Tool for GrepTool {
 
 #[cfg(test)]
 fn test_tool(cwd: PathBuf) -> GrepTool {
+    test_tool_with_ignore(cwd, Arc::new(SearchIgnore::builtin()))
+}
+
+#[cfg(test)]
+fn test_tool_with_ignore(cwd: PathBuf, ignore: Arc<SearchIgnore>) -> GrepTool {
     GrepTool {
         cwd,
         limits: OutputLimits::default(),
+        ignore,
         description: String::new(),
     }
 }
@@ -477,6 +508,32 @@ mod tests {
             .await
             .unwrap();
         assert!(output.output.starts_with("b.txt:1:"));
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    // ---- 检索忽略列表(search_ignore):无 .gitignore 也排除依赖/构建目录 ----
+    #[tokio::test]
+    async fn ignores_generated_dirs_even_without_gitignore() {
+        let dir = std::env::temp_dir().join(format!("rpi-grep-ignore-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(dir.join("src")).await.unwrap();
+        tokio::fs::create_dir_all(dir.join("dist")).await.unwrap();
+        tokio::fs::write(dir.join("src/a.ts"), "alpha here\n").await.unwrap();
+        tokio::fs::write(dir.join("dist/b.js"), "alpha in build\n")
+            .await
+            .unwrap();
+        // 无 .gitignore:dist 仍应被内置忽略表排除
+        let tool = test_tool(dir.clone());
+        let output = exec(&tool, json!({"pattern": "alpha"})).await.unwrap();
+        assert!(output.output.contains("src/a.ts"));
+        assert!(
+            !output.output.contains("dist"),
+            "内置忽略表应排除 dist: {}",
+            output.output
+        );
+        // 空忽略列表 = 关闭过滤,dist 恢复可见
+        let tool = test_tool_with_ignore(dir.clone(), Arc::new(SearchIgnore::from_patterns(Vec::<String>::new()).unwrap()));
+        let output = exec(&tool, json!({"pattern": "alpha"})).await.unwrap();
+        assert!(output.output.contains("dist/b.js"));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 

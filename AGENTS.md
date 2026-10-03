@@ -98,6 +98,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `src/powershell.rs` | bash 的 Windows 等价物，4 行 re-export 同工厂 |
 | `src/truncate.rs` | 统一双限截断（默认 2000 行 / 50KiB，先到为准，永不返回半行）：`truncate_head`（read 保留头）/ `truncate_tail`（bash 保留尾）；工具自身输出预算 = agent 上限 − 2000 余量 |
 | `src/output_accumulator.rs` | bash 流式聚合：增量 UTF-8 解码、超限完整输出落临时文件（`fullOutputPath`） |
+| `src/search_ignore.rs` | 检索忽略列表（grep/find/ls 共享）：组件段/锚定 glob 双语义匹配、命中目录剪枝不进入遍历；settings `searchIgnore` 配置（未配置 = 内置默认表，空数组 = 关闭） |
 | `src/sanitize.rs` | ANSI/控制字符净化——**只用于 `!` 裸命令路径**，模型工具结果不做净化 |
 
 ### crates/rpi-core — L3 业务核
@@ -196,7 +197,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 
 | 文件 | 位置（项目优先，逐字段覆盖全局） | 内容 |
 |---|---|---|
-| settings.json | `.rpi/settings.json` / `~/.rpi/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme` |
+| settings.json | `.rpi/settings.json` / `~/.rpi/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`searchIgnore`（检索忽略列表：grep/find/ls 过滤 + 系统提示词规则；未配置 = 内置默认表 node_modules/dist/target 等，空数组 = 关闭过滤，配置 = 整体覆盖）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme` |
 | models.json | `.rpi/models.json` / `~/.rpi/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析 |
 | web-search.json | `.rpi/web-search.json` / `~/.rpi/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
 | skills | `.rpi/skills/<name>/SKILL.md` / `~/.rpi/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |

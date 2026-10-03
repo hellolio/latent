@@ -2860,6 +2860,7 @@ name = "rpi-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "globset",
  "ignore",
  "nix 0.31.3",
  "regex",

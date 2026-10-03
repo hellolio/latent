@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
+use crate::search_ignore::SearchIgnore;
 use crate::truncate::{truncate_head, OutputLimits};
 
 const DEFAULT_LIMIT: usize = 500;
@@ -16,25 +17,33 @@ const DEFAULT_LIMIT: usize = 500;
 pub struct LsTool {
     cwd: PathBuf,
     limits: OutputLimits,
+    ignore: Arc<SearchIgnore>,
     description: String,
 }
 
 /// 工厂。
 pub fn create_ls_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_ls_tool_with_limits(cwd, OutputLimits::default())
+    create_ls_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::builtin()))
 }
 
-/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)。
-pub fn create_ls_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn Tool> {
+/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)+ 检索忽略列表
+/// (search_ignore 模块;settings `searchIgnore` 配置,未配置 = 内置默认表)。
+pub fn create_ls_tool_with_limits(
+    cwd: &Path,
+    limits: OutputLimits,
+    ignore: Arc<SearchIgnore>,
+) -> Arc<dyn Tool> {
     let description = format!(
         "List directory contents. Returns entries sorted alphabetically, with '/' suffix for \
-         directories. Includes dotfiles. Output is truncated to {DEFAULT_LIMIT} entries or {} \
-         bytes (whichever is hit first).",
+         directories. Includes dotfiles. Dependency/build directories (node_modules, dist, \
+         target, ...) are hidden. Output is truncated to {DEFAULT_LIMIT} entries or {} bytes \
+         (whichever is hit first).",
         limits.effective_max_bytes()
     );
     Arc::new(LsTool {
         cwd: cwd.to_path_buf(),
         limits,
+        ignore,
         description,
     })
 }
@@ -111,6 +120,8 @@ impl Tool for LsTool {
                 message: format!("Cannot read directory: {e}"),
             })?
             .filter_map(|entry| entry.ok())
+            // 检索忽略列表(search_ignore 模块):单层列表按条目名判定
+            .filter(|entry| !self.ignore.matches(Path::new(&entry.file_name())))
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
         // 字母序,大小写不敏感(pi 的 sort)
@@ -172,6 +183,7 @@ fn test_tool(cwd: PathBuf) -> LsTool {
     LsTool {
         cwd,
         limits: OutputLimits::default(),
+        ignore: Arc::new(SearchIgnore::builtin()),
         description: String::new(),
     }
 }
@@ -242,6 +254,21 @@ mod tests {
         assert!(err.to_string().contains("Path not found"));
         let err = exec(&tool, json!({"path": "f.txt"})).await.unwrap_err();
         assert!(err.to_string().contains("Not a directory"));
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    // ---- 检索忽略列表(search_ignore):依赖/构建目录不出现在列表里 ----
+    #[tokio::test]
+    async fn hides_dependency_and_build_dirs() {
+        let dir = std::env::temp_dir().join(format!("rpi-ls-ignore-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(dir.join("src")).await.unwrap();
+        tokio::fs::create_dir_all(dir.join("node_modules")).await.unwrap();
+        tokio::fs::create_dir_all(dir.join("dist")).await.unwrap();
+        tokio::fs::write(dir.join("a.ts"), "x").await.unwrap();
+        let tool = test_tool(dir.clone());
+        let output = exec(&tool, json!({})).await.unwrap();
+        let lines: Vec<&str> = output.output.lines().collect();
+        assert_eq!(lines, vec!["a.ts", "src/"]);
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }

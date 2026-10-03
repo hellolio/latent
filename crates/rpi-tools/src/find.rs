@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use rpi_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
+use crate::search_ignore::SearchIgnore;
 use crate::truncate::{truncate_head, OutputLimits};
 
 const DEFAULT_LIMIT: usize = 1000;
@@ -19,27 +20,34 @@ const DEFAULT_LIMIT: usize = 1000;
 pub struct FindTool {
     cwd: PathBuf,
     limits: OutputLimits,
+    ignore: Arc<SearchIgnore>,
     description: String,
 }
 
 /// 工厂。
 pub fn create_find_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_find_tool_with_limits(cwd, OutputLimits::default())
+    create_find_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::builtin()))
 }
 
-/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)。
-pub fn create_find_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn Tool> {
+/// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)+ 检索忽略列表
+/// (search_ignore 模块;settings `searchIgnore` 配置,未配置 = 内置默认表)。
+pub fn create_find_tool_with_limits(
+    cwd: &Path,
+    limits: OutputLimits,
+    ignore: Arc<SearchIgnore>,
+) -> Arc<dyn Tool> {
     let description = format!(
         "Search for files by glob pattern. Returns matching file paths relative to the search \
          directory. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} results or {} \
-         bytes (whichever is hit first). Respecting .gitignore means dependency and build \
-         directories are already excluded; use find to narrow down targets before reading \
-         anything.",
+         bytes (whichever is hit first). Respecting .gitignore and excluding dependency/build \
+         directories (node_modules, dist, target, ...) means generated files are already \
+         filtered out; use find to narrow down targets before reading anything.",
         limits.effective_max_bytes()
     );
     Arc::new(FindTool {
         cwd: cwd.to_path_buf(),
         limits,
+        ignore,
         description,
     })
 }
@@ -130,6 +138,18 @@ impl Tool for FindTool {
             .hidden(false)
             .require_git(false)
             .filter_entry(|entry| entry.file_name() != ".git");
+        // 检索忽略列表(search_ignore 模块):相对搜索根判定,命中目录即剪枝
+        if !self.ignore.is_empty() {
+            let ignore = self.ignore.clone();
+            let root = search_root.clone();
+            walker.filter_entry(move |entry| {
+                if entry.file_name() == ".git" {
+                    return false;
+                }
+                let relative = entry.path().strip_prefix(&root).unwrap_or(entry.path());
+                !ignore.matches(relative)
+            });
+        }
         let walker = walker.build();
 
         let mut results: Vec<String> = Vec::new();
@@ -214,6 +234,7 @@ fn test_tool(cwd: PathBuf) -> FindTool {
     FindTool {
         cwd,
         limits: OutputLimits::default(),
+        ignore: Arc::new(SearchIgnore::builtin()),
         description: String::new(),
     }
 }
@@ -321,6 +342,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Path not found"));
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    // ---- 检索忽略列表(search_ignore):无 .gitignore 也排除依赖/构建目录 ----
+    #[tokio::test]
+    async fn ignores_generated_dirs_even_without_gitignore() {
+        let dir = std::env::temp_dir().join(format!("rpi-find-ignore-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(dir.join("src")).await.unwrap();
+        tokio::fs::create_dir_all(dir.join("dist/assets")).await.unwrap();
+        for p in ["src/a.ts", "dist/b.js", "dist/assets/c.js"] {
+            tokio::fs::write(dir.join(p), "x").await.unwrap();
+        }
+        // 无 .gitignore:dist 整棵剪枝
+        let tool = test_tool(dir.clone());
+        let output = exec(&tool, json!({"pattern": "**/*.js"})).await.unwrap();
+        assert_eq!(output.output, "No files found matching pattern");
+        let output = exec(&tool, json!({"pattern": "*.ts"})).await.unwrap();
+        assert!(output.output.contains("src/a.ts"));
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }
