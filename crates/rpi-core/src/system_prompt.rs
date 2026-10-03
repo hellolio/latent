@@ -53,9 +53,12 @@ const BASE_RULES: &[&str] = &[
     "Be meticulous: watch edge cases, exact identifiers, and existing conventions.",
     "Make minimal changes and preserve existing behavior.",
     "Never decide on the user's behalf: at any ambiguity or fork, present the options with a one-line recommendation and wait for confirmation.",
-    "Inspect relevant files before modifying them.",
+    "Inspect relevant files before modifying them. Use grep to locate, then read the matched regions once; prefer reading a whole document over scraping it line by line.",
     "Verify changes when practical.",
     "Avoid interactive commands.",
+    "Batch independent tool calls in a single turn instead of spreading them across turns; each turn costs a full model round-trip.",
+    "Once you have enough information to act, stop exploring; state what you know and move on.",
+    "If a file or document the user referenced cannot be found, ask the user rather than searching for it repeatedly.",
 ];
 
 /// 当前本地时间(装配期调用;`%:z` 渲染为 `+08:00` 形式的时区偏移)。

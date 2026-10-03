@@ -22,7 +22,8 @@ mod write;
 // default_tools/all_tools 注册表工厂装配)
 pub use bash::{
     create_bash_tool_with, create_bash_tool_with_limits, create_bash_tool_with_session_env,
-    create_powershell_tool_with, SessionEnvFn, ShellSpawnHook, ShellSpawnOptions,
+    create_powershell_tool_with, BackgroundNotifier, SessionEnvFn, ShellSpawnHook,
+    ShellSpawnOptions, ShellTimeoutPolicy,
 };
 pub use read::create_read_tool_with_limits;
 pub use find::create_find_tool_with_limits;

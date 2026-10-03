@@ -28,6 +28,32 @@ const MAX_TIMEOUT_MS: u128 = 2_147_483_647;
 /// 返回空 = 无会话上下文(行为同未配置)。
 pub type SessionEnvFn = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 
+/// 后台任务完成通知接缝:工具侧只产出通知文本,投递方式(follow_up 唤醒
+/// 模型等)由装配层注入。None = 不武装自动转后台。
+#[async_trait]
+pub trait BackgroundNotifier: Send + Sync {
+    async fn notify(&self, text: String);
+}
+
+/// shell 运行时限策略:模型未传 `timeout` 时的默认超时,以及运行超过阈值
+/// 自动转后台的秒数。转后台只在生效超时大于阈值时武装:默认 120s 超时
+/// 大于 60s 阈值,不带 timeout 的长命令也会在 60s 转后台(完成时经
+/// notifier 通知);显式传更短 timeout 的命令按超时杀灭。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellTimeoutPolicy {
+    pub default_timeout_secs: u64,
+    pub background_after_secs: u64,
+}
+
+impl Default for ShellTimeoutPolicy {
+    fn default() -> Self {
+        ShellTimeoutPolicy {
+            default_timeout_secs: 120,
+            background_after_secs: 60,
+        }
+    }
+}
+
 /// spawn 前命令改写钩子(T10,pi 的 spawnHook):检查/改写命令;返回 Err =
 /// 拒绝执行(工具直接产出错误结果,不 spawn——与扩展错误语义 07 §8.5 一致)。
 #[async_trait]
@@ -35,13 +61,15 @@ pub trait ShellSpawnHook: Send + Sync {
     async fn rewrite(&self, command: String) -> Result<String, String>;
 }
 
-/// shell 工具装配选项(T9/T10):会话环境、命令前缀、spawn 改写钩子。
-/// 缺省全部 None = 现状行为。
+/// shell 工具装配选项(T9/T10):会话环境、命令前缀、spawn 改写钩子、
+/// 运行时限策略、后台完成通知。缺省 = 默认时限、不武装后台化。
 #[derive(Clone, Default)]
 pub struct ShellSpawnOptions {
     pub session_env: Option<SessionEnvFn>,
     pub command_prefix: Option<String>,
     pub spawn_hook: Option<Arc<dyn ShellSpawnHook>>,
+    pub timeouts: ShellTimeoutPolicy,
+    pub background_notifier: Option<Arc<dyn BackgroundNotifier>>,
 }
 
 /// shell 工具配置(bash 与 powershell 共用工厂,05 文档 createShellToolDefinition)。
@@ -61,17 +89,23 @@ pub struct ShellTool {
     config: ShellToolConfig,
     cwd: PathBuf,
     spawn: ShellSpawnOptions,
+    /// 后台任务序号(转后台结果里的 task id 用,实例内单调)
+    background_counter: std::sync::atomic::AtomicU64,
 }
 
 /// bash 工厂(默认集,05 文档 §1)。
 pub fn create_bash_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_shell_tool(bash_config(OutputLimits::default()), cwd, ShellSpawnOptions::default())
+    create_shell_tool(
+        bash_config(OutputLimits::default(), &ShellTimeoutPolicy::default()),
+        cwd,
+        ShellSpawnOptions::default(),
+    )
 }
 
 /// bash 工厂 + 会话环境注入(T9,11 计划 §5)。
 pub fn create_bash_tool_with_session_env(cwd: &Path, env: SessionEnvFn) -> Arc<dyn Tool> {
     create_shell_tool(
-        bash_config(OutputLimits::default()),
+        bash_config(OutputLimits::default(), &ShellTimeoutPolicy::default()),
         cwd,
         ShellSpawnOptions {
             session_env: Some(env),
@@ -82,7 +116,7 @@ pub fn create_bash_tool_with_session_env(cwd: &Path, env: SessionEnvFn) -> Arc<d
 
 /// bash 工厂 + 完整装配选项(T9/T10)。
 pub fn create_bash_tool_with(cwd: &Path, spawn: ShellSpawnOptions) -> Arc<dyn Tool> {
-    create_shell_tool(bash_config(OutputLimits::default()), cwd, spawn)
+    create_shell_tool(bash_config(OutputLimits::default(), &spawn.timeouts), cwd, spawn)
 }
 
 /// bash 工厂 + 完整装配选项 + 输出上限注入(装配层统一派生值)。
@@ -91,7 +125,7 @@ pub fn create_bash_tool_with_limits(
     spawn: ShellSpawnOptions,
     limits: OutputLimits,
 ) -> Arc<dyn Tool> {
-    create_shell_tool(bash_config(limits), cwd, spawn)
+    create_shell_tool(bash_config(limits, &spawn.timeouts), cwd, spawn)
 }
 
 /// powershell 工厂(全量集,05 文档 §4 powershell)。
@@ -108,19 +142,26 @@ pub fn create_powershell_tool_with(cwd: &Path, spawn: ShellSpawnOptions) -> Arc<
     create_shell_tool(powershell_config(OutputLimits::default()), cwd, spawn)
 }
 
-fn bash_config(limits: OutputLimits) -> ShellToolConfig {
+fn bash_config(limits: OutputLimits, timeouts: &ShellTimeoutPolicy) -> ShellToolConfig {
     ShellToolConfig {
         name: "bash",
         description: format!(
             "Run a shell command and return its combined stdout/stderr. Non-zero exit \
              codes return the output plus the exit status as an error. Output is \
              truncated to the last {DEFAULT_MAX_LINES} lines or {} bytes (whichever is hit \
-             first); the full output is saved to a temp file referenced in details.",
-            limits.effective_max_bytes()
+             first); the full output is saved to a temp file referenced in details. \
+             A command still running after {}s is moved to the background: the call \
+             returns immediately with a task id and an output file, and completion \
+             (exit code and output tail) is reported automatically. Pass a shorter \
+             timeout to kill a command sooner. Batch independent commands into one \
+             call with `;` or `&&`, or issue several calls in a single turn.",
+            limits.effective_max_bytes(),
+            timeouts.background_after_secs
         ),
         prompt_snippet: Some(
             "bash(command, timeout?): runs a shell command in the working directory; output is \
-             truncated (tail kept)"
+             truncated (tail kept); long-running commands are backgrounded and reported on \
+             completion"
                 .into(),
         ),
         program: "sh",
@@ -160,6 +201,7 @@ fn create_shell_tool(
         config,
         cwd: cwd.to_path_buf(),
         spawn,
+        background_counter: std::sync::atomic::AtomicU64::new(0),
     })
 }
 
@@ -194,13 +236,14 @@ fn parse_args(name: &str, args: &serde_json::Value) -> Result<ParsedArgs, ToolEr
     })
 }
 
-/// 流式读取一个管道到 accumulator,每块更新一次快照(让 TUI 实时可见;
-/// pi 的 tool_execution_update 节流在渲染侧)。
-async fn pipe_into<S: tokio::io::AsyncRead + Unpin>(
+/// 管道读取任务(owned:'static,后台化后继续存活的独立任务):字节流入
+/// accumulator,tail 经通道转发给 execute 作用域内的 relay(后台化后 relay
+/// 已随 execute 结束,通道关闭,此处静默丢弃)。
+async fn pipe_task<S: tokio::io::AsyncRead + Unpin>(
     mut stream: S,
-    accumulator: &Mutex<OutputAccumulator>,
-    updater: &dyn ToolUpdater,
-    fail: impl Fn(String) -> ToolError + Copy,
+    accumulator: Arc<Mutex<OutputAccumulator>>,
+    tails: tokio::sync::mpsc::UnboundedSender<String>,
+    fail: impl Fn(String) -> ToolError + Send + 'static,
 ) -> Result<(), ToolError> {
     use tokio::io::AsyncReadExt;
     let mut buf = vec![0u8; 65536];
@@ -217,12 +260,76 @@ async fn pipe_into<S: tokio::io::AsyncRead + Unpin>(
             acc.append(&buf[..n]);
             acc.tail()
         };
-        updater.update(tail).await;
+        let _ = tails.send(tail);
     }
     Ok(())
 }
 
-/// 执行 shell:stdout/stderr 流入 accumulator,超时/中止杀进程;返回 exit code。
+/// 信号死亡无 exit code:按 shell 惯例换算 128 + signal(05 文档 §4)。
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        status.code().unwrap_or_else(|| {
+            128 + std::os::unix::process::ExitStatusExt::signal(&status).unwrap_or(0)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        status.code().unwrap_or(-1)
+    }
+}
+
+/// 后台 watcher:持有 child 与管道任务,等进程退出后排空输出,经 notifier
+/// 上报完成(exit code + 输出尾段)。rpi 进程退出时 watcher 被 drop,
+/// kill_on_drop(true) 兜底杀灭整棵进程树。
+async fn watch_background(
+    task_id: String,
+    mut child: tokio::process::Child,
+    pipe_out: tokio::task::JoinHandle<Result<(), ToolError>>,
+    pipe_err: tokio::task::JoinHandle<Result<(), ToolError>>,
+    accumulator: Arc<Mutex<OutputAccumulator>>,
+    started: std::time::Instant,
+    notifier: Arc<dyn BackgroundNotifier>,
+) {
+    let code = match child.wait().await {
+        Ok(status) => Ok(exit_code(status)),
+        Err(e) => Err(e.to_string()),
+    };
+    let _ = pipe_out.await;
+    let _ = pipe_err.await;
+    let snapshot = {
+        let mut acc = accumulator.lock().unwrap();
+        acc.finish();
+        acc.snapshot(true)
+    };
+    let elapsed = started.elapsed().as_secs();
+    let mut message = match code {
+        Ok(0) => format!("[rpi] background task {task_id} finished successfully (elapsed {elapsed}s)."),
+        Ok(code) => {
+            format!("[rpi] background task {task_id} failed: exit code {code} (elapsed {elapsed}s).")
+        }
+        Err(error) => format!("[rpi] background task {task_id} could not be reaped: {error}"),
+    };
+    let tail = crate::truncate::truncate_tail(&snapshot.content, 40, 2000).content;
+    if !tail.trim().is_empty() {
+        message.push_str(&format!("\nOutput tail:\n{tail}"));
+    }
+    if let Some(path) = &snapshot.full_output_path {
+        message.push_str(&format!("\n[Full output: {}]", path.display()));
+    }
+    notifier.notify(message).await;
+}
+
+/// run 的成功产物:正常退出码,或"已转后台"的立即结算结果(execute 据此
+/// 短路返回,不再走 exit code 结算路径)。
+enum RunOutcome {
+    Code(i32),
+    Background(ToolOutput),
+}
+
+/// 执行 shell:stdout/stderr 经常驻管道任务流入 accumulator(超时/中止杀
+/// 进程;生效超时大于后台阈值时,运行超阈值自动转后台 —— 进程继续跑,
+/// tool result 立即结算,完成经 notifier 上报)。
 async fn run(
     tool: &ShellTool,
     command: &str,
@@ -230,21 +337,25 @@ async fn run(
     cancel: &CancellationToken,
     accumulator: Arc<Mutex<OutputAccumulator>>,
     updater: &dyn ToolUpdater,
-) -> Result<i32, ToolError> {
+) -> Result<RunOutcome, ToolError> {
     let config = &tool.config;
     let spawn_options = &tool.spawn;
     let cwd = &tool.cwd;
     let name = config.name;
-    let fail = |message: String| ToolError::Failed {
+    let fail = move |message: String| ToolError::Failed {
         name: name.to_string(),
         message,
     };
-    if timeout_secs
-        .map(|t| (t as u128) * 1000 > MAX_TIMEOUT_MS)
-        .unwrap_or(false)
-    {
+    let timeouts = spawn_options.timeouts;
+    let effective_timeout_secs = timeout_secs.unwrap_or(timeouts.default_timeout_secs);
+    if (effective_timeout_secs as u128) * 1000 > MAX_TIMEOUT_MS {
         return Err(fail("timeout exceeds maximum allowed duration".into()));
     }
+    // 转后台只在生效超时严格大于阈值时武装:阈值先到 = 超时杀灭的语义保持
+    // (默认 120s 超时 > 60s 阈值 = 不带 timeout 的长命令也会在 60s 转后台)
+    let background_armed = spawn_options.background_notifier.is_some()
+        && timeouts.background_after_secs > 0
+        && timeouts.background_after_secs < effective_timeout_secs;
 
     let mut cmd = tokio::process::Command::new(config.program);
     cmd.args(config.base_args.iter())
@@ -274,43 +385,57 @@ async fn run(
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
-    let read_out = pipe_into(stdout, &accumulator, updater, fail);
-    let read_err = pipe_into(stderr, &accumulator, updater, fail);
+    // 管道任务常驻('static):Done 路径由 relay 排空;后台化后继续独立
+    // 运行,输出持续落 accumulator/临时文件。tail 经通道转发,TUI 实时可见
+    let (tail_tx, tail_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let pipe_out = tokio::spawn(pipe_task(
+        stdout,
+        accumulator.clone(),
+        tail_tx.clone(),
+        fail,
+    ));
+    let pipe_err = tokio::spawn(pipe_task(stderr, accumulator.clone(), tail_tx, fail));
 
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(u64::MAX / 2));
+    let timeout = Duration::from_secs(effective_timeout_secs);
+    let started = std::time::Instant::now();
 
-    // 分支枚举:kill 需要在 select 结束(work 对 child 的借用终止)之后进行,
+    // 分支枚举:kill/移交需要 child 的借用(work future)结束后进行,
     // 故 select 连同 work future 收进内层块,块结束即释放借用
     enum Exit {
         Done(Result<i32, ToolError>),
         TimedOut,
+        Background,
         Cancelled,
     }
     let exit = {
+        // relay:tail → updater(TUI 实时可见);后台化/中止时随本 future
+        // 一起被 drop,转发停止,管道任务静默继续
+        let relay = async {
+            let mut tail_rx = tail_rx;
+            while let Some(tail) = tail_rx.recv().await {
+                updater.update(tail).await;
+            }
+        };
+        tokio::pin!(relay);
         let work = async {
-            // stdout/stderr 都流入 accumulator(pi 的 onData)
-            let (out, err) = tokio::join!(read_out, read_err);
-            out?;
-            err?;
-            // 超时/中止分支落选后,持有 child 的分支 future 被 drop;
+            // 超时/中止/后台分支落选后,持有 child 的分支 future 被 drop;
             // kill_on_drop(true) 兜底(pi 进程组隔离的最后一道)
             let status = child
                 .wait()
                 .await
                 .map_err(|e| fail(format!("command failed: {e}")))?;
-            // 信号死亡无 exit code:按 shell 惯例换算 128 + signal(05 文档 §4)
-            #[cfg(unix)]
-            let code = status.code().unwrap_or_else(|| {
-                128 + std::os::unix::process::ExitStatusExt::signal(&status).unwrap_or(0)
-            });
-            #[cfg(not(unix))]
-            let code = status.code().unwrap_or(-1);
-            Ok(code)
+            Ok::<i32, ToolError>(exit_code(status))
         };
         tokio::pin!(work);
         tokio::select! {
-            result = &mut work => Exit::Done(result),
+            // join!:relay 与 work 并行推进,work 决定返回值;relay 先结束
+            //(命令提前关闭输出)不影响继续等 work
+            ((), result) = async { tokio::join!(&mut relay, &mut work) } => {
+                Exit::Done(result)
+            }
             _ = tokio::time::sleep(timeout) => Exit::TimedOut,
+            _ = tokio::time::sleep(Duration::from_secs(timeouts.background_after_secs)),
+                if background_armed => Exit::Background,
             // abort → Aborted:循环据此产出 Cancelled("Operation aborted")结果,
             // 并触发 run 的 aborted 硬退出路径
             _ = cancel.cancelled() => Exit::Cancelled,
@@ -318,7 +443,17 @@ async fn run(
     };
 
     match exit {
-        Exit::Done(result) => result,
+        Exit::Done(result) => {
+            // work 完成后 relay 已排空通道(管道任务 EOF),收它们的错误
+            for handle in [pipe_out, pipe_err] {
+                match handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => return Err(error),
+                    Err(join_error) => return Err(fail(format!("output pipe failed: {join_error}"))),
+                }
+            }
+            result.map(RunOutcome::Code)
+        }
         Exit::TimedOut | Exit::Cancelled => {
             // T11:先杀整棵进程树(忽略 ESRCH:进程可能已死),再 wait 收尸
             kill_process_tree(&mut child);
@@ -337,8 +472,7 @@ async fn run(
                     };
                     let mut message = format!(
                         "{}\nCommand timed out after {} seconds",
-                        snapshot.content,
-                        timeout_secs.unwrap_or(0)
+                        snapshot.content, effective_timeout_secs
                     );
                     if let Some(path) = &snapshot.full_output_path {
                         message.push_str(&format!("\n[Full output: {}]", path.display()));
@@ -346,6 +480,62 @@ async fn run(
                     Err(fail(message))
                 }
             }
+        }
+        Exit::Background => {
+            // 移交 watcher:进程继续跑,tool result 立即结算(模型不盲等);
+            // 强制全量输出落盘,模型可随时读输出文件查进度
+            let task_number = tool
+                .background_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            let task_id = format!("{name}-{task_number}");
+            let full_path = {
+                let mut acc = accumulator.lock().unwrap();
+                acc.force_temp_file()
+            };
+            let snapshot = {
+                let mut acc = accumulator.lock().unwrap();
+                acc.snapshot(false)
+            };
+            let notifier = spawn_options
+                .background_notifier
+                .clone()
+                .expect("background branch only runs when a notifier is armed");
+            tokio::spawn(watch_background(
+                task_id.clone(),
+                child,
+                pipe_out,
+                pipe_err,
+                accumulator,
+                started,
+                notifier,
+            ));
+            let mut message = format!(
+                "Command still running in background (task {task_id}). It will be reported \
+                 here when it finishes; you may continue with other work in the meantime."
+            );
+            if let Some(path) = &full_path {
+                message.push_str(&format!("\nFull output is being written to: {}", path.display()));
+            }
+            if !snapshot.content.trim().is_empty() {
+                message.push_str(&format!("\n\nOutput so far:\n{}", snapshot.content));
+            }
+            let mut details = serde_json::Map::new();
+            if let Some(path) = &full_path {
+                details.insert(
+                    "fullOutputPath".into(),
+                    json!(path.display().to_string()),
+                );
+            }
+            Ok(RunOutcome::Background(ToolOutput {
+                output: message,
+                details: if details.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::Object(details)
+                },
+                terminate: false,
+            }))
         }
     }
 }
@@ -416,12 +606,18 @@ impl Tool for ShellTool {
     }
 
     fn schema(&self) -> serde_json::Value {
+        let timeout_description = format!(
+            "Optional timeout in seconds. Omit for the default ({}s). Commands running \
+             past {}s are moved to the background and reported on completion.",
+            self.spawn.timeouts.default_timeout_secs,
+            self.spawn.timeouts.background_after_secs
+        );
         json!({
             "type": "object",
             "required": ["command"],
             "properties": {
                 "command": {"type": "string", "description": "The shell command to execute"},
-                "timeout": {"type": "integer", "description": "Optional timeout in seconds"}
+                "timeout": {"type": "integer", "description": timeout_description}
             }
         })
     }
@@ -471,7 +667,7 @@ impl Tool for ShellTool {
             self.config.limits.max_lines,
             self.config.limits.effective_max_bytes(),
         )));
-        let code = run(
+        let outcome = run(
             self,
             &effective,
             timeout_secs,
@@ -480,6 +676,12 @@ impl Tool for ShellTool {
             updater,
         )
         .await?;
+
+        // 已转后台:结果在转后台结算点已备好,直接返回(进程由 watcher 托管)
+        let code = match outcome {
+            RunOutcome::Background(output) => return Ok(output),
+            RunOutcome::Code(code) => code,
+        };
 
         // 结束聚合并取最终快照
         let snapshot = {
@@ -562,17 +764,19 @@ mod tests {
 
     fn bash_at(cwd: &Path) -> Arc<ShellTool> {
         Arc::new(ShellTool {
-            config: bash_config(OutputLimits::default()),
+            config: bash_config(OutputLimits::default(), &ShellTimeoutPolicy::default()),
             cwd: cwd.to_path_buf(),
             spawn: ShellSpawnOptions::default(),
+            background_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
     fn bash_with(cwd: &Path, spawn: ShellSpawnOptions) -> Arc<ShellTool> {
         Arc::new(ShellTool {
-            config: bash_config(OutputLimits::default()),
+            config: bash_config(OutputLimits::default(), &spawn.timeouts),
             cwd: cwd.to_path_buf(),
             spawn,
+            background_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -713,6 +917,7 @@ mod tests {
             config: powershell_config(OutputLimits::default()),
             cwd: std::env::temp_dir(),
             spawn: ShellSpawnOptions::default(),
+            background_counter: std::sync::atomic::AtomicU64::new(0),
         };
         let output = exec(
             &tool,
@@ -1010,5 +1215,168 @@ mod tests {
             .unwrap();
         assert!(!probe.success(), "孙进程 {grandchild} 应已被进程组杀灭回收");
         let _ = std::fs::remove_file(&pidfile);
+    }
+
+    // ---- P2:默认超时(模型未传 timeout 参数时生效,settings 可配) ----
+
+    fn shell_with_policy(cwd: &Path, policy: ShellTimeoutPolicy) -> Arc<ShellTool> {
+        Arc::new(ShellTool {
+            config: bash_config(OutputLimits::default(), &policy),
+            cwd: cwd.to_path_buf(),
+            // 运行时策略经 spawn 选项注入(config 只承载描述文案)
+            spawn: ShellSpawnOptions {
+                timeouts: policy,
+                ..Default::default()
+            },
+            background_counter: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    #[tokio::test]
+    async fn default_timeout_kills_when_param_omitted() {
+        let tool = shell_with_policy(
+            &std::env::temp_dir(),
+            ShellTimeoutPolicy {
+                default_timeout_secs: 1,
+                background_after_secs: 180,
+            },
+        );
+        let err = exec(
+            &tool,
+            serde_json::json!({"command": "sleep 30"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("timed out after 1 seconds"),
+            "默认超时应生效并写明秒数: {message}"
+        );
+    }
+
+    // ---- P3:超阈值自动转后台 + 完成通知 ----
+
+    #[derive(Default)]
+    struct CollectingNotifier(Mutex<Vec<String>>);
+    #[async_trait]
+    impl BackgroundNotifier for CollectingNotifier {
+        async fn notify(&self, text: String) {
+            self.0.lock().unwrap().push(text);
+        }
+    }
+
+    #[tokio::test]
+    async fn long_running_command_promoted_to_background_and_reported() {
+        let notifier = Arc::new(CollectingNotifier::default());
+        let tool = bash_with(
+            &std::env::temp_dir(),
+            ShellSpawnOptions {
+                timeouts: ShellTimeoutPolicy {
+                    default_timeout_secs: 300,
+                    background_after_secs: 1,
+                },
+                background_notifier: Some(notifier.clone()),
+                ..Default::default()
+            },
+        );
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo early-marker; sleep 3; echo late-marker"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        // 立即结算:task id + 输出文件指引,晚到的输出不在结果里
+        assert!(
+            output.output.contains("still running in background"),
+            "{}",
+            output.output
+        );
+        assert!(output.output.contains("task bash-1"), "{}", output.output);
+        assert!(
+            output.output.contains("Full output is being written to:"),
+            "{}",
+            output.output
+        );
+        assert!(!output.output.contains("late-marker"), "{}", output.output);
+        let path = output.details["fullOutputPath"].as_str().unwrap().to_string();
+
+        // 完成通知:exit code + 输出尾段(含转后台后才产出的行)
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let notification = loop {
+            let texts = notifier.0.lock().unwrap().clone();
+            if let Some(text) = texts.last() {
+                break text.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "未在期限内收到完成通知"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert!(
+            notification.contains("background task bash-1 finished successfully"),
+            "{notification}"
+        );
+        assert!(notification.contains("late-marker"), "{notification}");
+        // 全量输出落盘:转后台之后写入的行也在文件里
+        let full = std::fs::read_to_string(&path).unwrap();
+        assert!(full.contains("early-marker"), "{full}");
+        assert!(full.contains("late-marker"), "{full}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn explicit_timeout_not_longer_than_threshold_still_kills() {
+        // 显式 timeout == 阈值:不武装后台(严格大于才武装),按超时杀灭
+        let notifier = Arc::new(CollectingNotifier::default());
+        let tool = bash_with(
+            &std::env::temp_dir(),
+            ShellSpawnOptions {
+                timeouts: ShellTimeoutPolicy {
+                    default_timeout_secs: 300,
+                    background_after_secs: 2,
+                },
+                background_notifier: Some(notifier.clone()),
+                ..Default::default()
+            },
+        );
+        let err = exec(
+            &tool,
+            serde_json::json!({"command": "sleep 30", "timeout": 2}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out after 2 seconds"), "{err}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            notifier.0.lock().unwrap().is_empty(),
+            "超时杀灭路径不得触发后台完成通知"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_not_armed_without_notifier() {
+        // 无通知器 = 不武装后台化:长 timeout 的命令仍正常阻塞到退出
+        let tool = bash_with(
+            &std::env::temp_dir(),
+            ShellSpawnOptions {
+                timeouts: ShellTimeoutPolicy {
+                    default_timeout_secs: 30,
+                    background_after_secs: 1,
+                },
+                ..Default::default()
+            },
+        );
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo plain; sleep 2"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.output.trim(), "plain");
     }
 }

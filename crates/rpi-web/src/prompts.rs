@@ -55,13 +55,13 @@ pub const SEARCH_QUERY_DESCRIPTION: &str = "Get content for this exact query (mu
 /// web-search.json 用户配置,不再对模型暴露,相关分句删除)。
 pub fn web_search_description() -> String {
     format!(
-        "Search the web with {}. Provider arrays run simultaneously; {}. Returns bounded source-linked search results or provider answers, identifies the providers used, and stores full results for retrieval by responseId. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query. When includeContent is true, full page content is fetched in the background. The configured provider is used when provider is omitted or set to auto; omit provider unless explicitly overriding it.",
+        "Search the web with {}. Provider arrays run simultaneously; {}. Returns bounded source-linked search results or provider answers, identifies the providers used, and stores full results for retrieval by responseId. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query. Stop searching as soon as the collected results answer the question; do not add more angles or providers for coverage's sake. When includeContent is true, full page content is fetched in the background. The configured provider is used when provider is omitted or set to auto; omit provider unless explicitly overriding it.",
         allowed_provider_labels().join(", "),
         all_policy_description()
     )
 }
 
-pub const WEB_SEARCH_PROMPT_SNIPPET: &str = "Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Omit provider unless explicitly overriding the configured default.";
+pub const WEB_SEARCH_PROMPT_SNIPPET: &str = "Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Stop once the results answer the question. Omit provider unless explicitly overriding the configured default.";
 
 pub const WEB_SEARCH_PARAM_QUERY: &str = "Single search query. For research tasks, prefer 'queries' with multiple varied angles instead.";
 
@@ -500,7 +500,7 @@ mod tests {
     fn verbatim_contract_strings() {
         assert_eq!(
             WEB_SEARCH_PROMPT_SNIPPET,
-            "Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Omit provider unless explicitly overriding the configured default."
+            "Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Stop once the results answer the question. Omit provider unless explicitly overriding the configured default."
         );
         assert_eq!(
             WEB_SEARCH_PARAM_QUERIES,

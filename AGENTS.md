@@ -89,7 +89,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 |---|---|
 | `src/lib.rs` | `ToolRegistry`（装配期注册、重名 panic、运行期只读）+ 工具集工厂：默认集 read/bash/edit/write、只读集 read/grep/find/ls、全量 8 工具 |
 | `src/read.rs` | read 工具：1 起始 offset/limit 切片、截断附续读提示、图片/二进制拒绝 |
-| `src/bash.rs` | bash/powershell 共用工厂：流式输出、超时/中止杀进程树（Unix `process_group(0)` + kill(-pgid)，含孙进程）、PI_* 环境注入（不覆盖已有变量）、commandPrefix 前置、`ShellSpawnHook` 改写/拒绝、沙箱拒绝事后提示；**工具结果字节级保真不净化** |
+| `src/bash.rs` | bash/powershell 共用工厂：流式输出、超时/中止杀进程树（Unix `process_group(0)` + kill(-pgid)，含孙进程）、默认超时（120s，`ShellTimeoutPolicy`）与自动转后台（生效超时 > 阈值 60s 时结算 tool result、watcher 托管进程、完成经 `BackgroundNotifier` follow_up 唤醒）、PI_* 环境注入（不覆盖已有变量）、commandPrefix 前置、`ShellSpawnHook` 改写/拒绝、沙箱拒绝事后提示；**工具结果字节级保真不净化** |
 | `src/edit.rs` | 多点精确替换（每个 oldText 在原文件中唯一、互不重叠），BOM/行尾保持 |
 | `src/write.rs` | 整文件写入，自动创建父目录 |
 | `src/grep.rs` | 内容搜索：`ignore` crate 原生遍历（无外部 rg 依赖）、尊重 .gitignore、匹配行截 500 字符 |
@@ -196,7 +196,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 
 | 文件 | 位置（项目优先，逐字段覆盖全局） | 内容 |
 |---|---|---|
-| settings.json | `.rpi/settings.json` / `~/.rpi/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme` |
+| settings.json | `.rpi/settings.json` / `~/.rpi/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme` |
 | models.json | `.rpi/models.json` / `~/.rpi/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析 |
 | web-search.json | `.rpi/web-search.json` / `~/.rpi/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
 | skills | `.rpi/skills/<name>/SKILL.md` / `~/.rpi/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |

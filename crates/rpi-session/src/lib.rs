@@ -272,4 +272,64 @@ mod tests {
         assert!(result.is_none(), "内存会话无文件,跳过快照");
         assert!(session.entries().is_empty());
     }
+
+    /// 快照文件名带会话内递增序号(`<N>_<uuid>.json`,方便按序查看);
+    /// 重新加载同一会话文件后续聊序号接续,不重号。
+    #[test]
+    fn context_snapshot_files_sequential_and_resume_without_clash() {
+        let dir = std::env::temp_dir().join(format!(
+            "rpi-session-ctxseq-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sess.jsonl");
+        let body = serde_json::json!({"messages": []});
+        let seq_of = |name: &str| {
+            name.split_once('_')
+                .map(|(seq, _)| seq.to_string())
+                .unwrap_or_default()
+        };
+
+        let session = create_session(Some(&path)).unwrap();
+        session.append_context_snapshot(&body).unwrap();
+        session.append_context_snapshot(&body).unwrap();
+        let names: Vec<String> = std::fs::read_dir(dir.join("sess.ctx"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            {
+                let mut seqs: Vec<String> = names.iter().map(|n| seq_of(n)).collect();
+                seqs.sort();
+                seqs
+            },
+            vec!["1", "2"],
+            "快照文件名 = <序号>_<uuid>.json,序号递增: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| n.contains('_') && n.ends_with(".json")),
+            "序号后有 uuid 部分: {names:?}"
+        );
+
+        // 重新加载同一文件:序号从已有 context_ref entry 数恢复
+        let resumed = create_session(Some(&path)).unwrap();
+        resumed.append_context_snapshot(&body).unwrap();
+        let names: Vec<String> = std::fs::read_dir(dir.join("sess.ctx"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            {
+                let mut seqs: Vec<String> = names.iter().map(|n| seq_of(n)).collect();
+                seqs.sort();
+                seqs
+            },
+            vec!["1", "2", "3"],
+            "续聊快照序号接续: {names:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

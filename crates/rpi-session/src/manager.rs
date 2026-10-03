@@ -28,6 +28,9 @@ struct State {
     entries: Vec<Entry>,
     by_id: HashMap<String, usize>,
     leaf_id: Option<String>,
+    /// 上下文快照已用序号(文件名 `<N>_<uuid>.json` 递增;加载已有会话时按
+    /// 现有 context_ref entry 数恢复,续聊不重号)
+    snapshot_seq: usize,
 }
 
 /// 会话管理器:JSONL 文件的唯一权威所有者(09 A4)。
@@ -92,6 +95,10 @@ pub fn create_session_with(
         .map(|(i, entry)| (entry.id().to_string(), i))
         .collect();
     let leaf_id = entries.last().map(|entry| entry.id().to_string());
+    let snapshot_seq = entries
+        .iter()
+        .filter(|entry| matches!(entry, Entry::ContextRef { .. }))
+        .count();
 
     let manager = SessionManager {
         path,
@@ -100,6 +107,7 @@ pub fn create_session_with(
             entries,
             by_id,
             leaf_id,
+            snapshot_seq,
         }),
         corrupt_lines,
     };
@@ -646,7 +654,8 @@ impl SessionManager {
 
     /// 记录一次向模型提交的请求(上下文审计):`snapshot` 是 **发送前的原始
     /// 请求体**(provider on_payload 观测的第一手数据),原样写入 session 文件
-    /// 旁的 `<file-stem>.ctx/<uuid>.json`,并在会话树追加 `context_ref` entry
+    /// 旁的 `<file-stem>.ctx/<序号>_<uuid>.json`(序号会话内从 1 递增,方便按
+    /// 序查看;uuid 保唯一),并在会话树追加 `context_ref` entry
     /// (path 指向快照文件)。快照 entry **不进**模型上下文(projection 显式
     /// 排除),恢复/压缩等既有管线不受影响。纯内存会话(无文件)跳过,返回 None。
     pub fn append_context_snapshot(
@@ -667,7 +676,35 @@ impl SessionManager {
             .unwrap_or_else(|| Path::new("."))
             .join(format!("{stem}.ctx"));
         std::fs::create_dir_all(&ctx_dir)?;
-        let snapshot_file = ctx_dir.join(format!("{}.json", uuid::Uuid::now_v7().simple()));
+        // 序号取号(含崩溃残留文件防覆盖:前缀已占用则继续顺延;uuid 后缀保唯一)
+        let seq = {
+            let seq_prefix_taken = |seq: usize| {
+                std::fs::read_dir(&ctx_dir)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|entry| entry.ok())
+                            .any(|entry| {
+                                entry
+                                    .file_name()
+                                    .to_string_lossy()
+                                    .starts_with(&format!("{seq}_"))
+                            })
+                    })
+                    .unwrap_or(false)
+            };
+            let mut state = self.state.lock().unwrap();
+            state.snapshot_seq += 1;
+            let mut seq = state.snapshot_seq;
+            while seq_prefix_taken(seq) {
+                state.snapshot_seq += 1;
+                seq += 1;
+            }
+            seq
+        };
+        let snapshot_file = ctx_dir.join(format!(
+            "{seq}_{}.json",
+            uuid::Uuid::now_v7().simple()
+        ));
         {
             use std::io::Write;
             // 原样落盘(第一手),单次 write_all,与 append_entry 同样的半行防护

@@ -35,7 +35,11 @@ pub fn create_grep_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn
     let description = format!(
         "Search file contents for a pattern. Returns matching lines with file paths and line \
          numbers. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} matches or {} \
-         bytes (whichever is hit first). Long lines are truncated to {GREP_MAX_LINE_LENGTH} chars.",
+         bytes (whichever is hit first). Long lines are truncated to {GREP_MAX_LINE_LENGTH} \
+         chars. Results are clean: .gitignore is respected, so vendored, generated, and \
+         dependency files are already excluded. Use grep to locate code first, then read \
+         only the matched regions; searching here is cheaper and quieter than listing or \
+         reading directories.",
         limits.effective_max_bytes()
     );
     Arc::new(GrepTool {

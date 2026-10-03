@@ -32,7 +32,9 @@ pub fn create_find_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn
     let description = format!(
         "Search for files by glob pattern. Returns matching file paths relative to the search \
          directory. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} results or {} \
-         bytes (whichever is hit first).",
+         bytes (whichever is hit first). Respecting .gitignore means dependency and build \
+         directories are already excluded; use find to narrow down targets before reading \
+         anything.",
         limits.effective_max_bytes()
     );
     Arc::new(FindTool {

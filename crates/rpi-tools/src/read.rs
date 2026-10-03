@@ -27,7 +27,10 @@ pub fn create_read_tool(cwd: &Path) -> Arc<dyn Tool> {
 pub fn create_read_tool_with_limits(cwd: &Path, limits: OutputLimits) -> Arc<dyn Tool> {
     let description = format!(
         "Read a text file from the local filesystem. Returns the file content, \
-         truncated to {} lines / {} bytes. Use offset/limit to page through large files.",
+         truncated to {} lines / {} bytes. Use offset/limit to page through large files. \
+         Prefer reading a whole file or document over scraping it in fragments with \
+         grep/sed: if the output is truncated, continue with offset until you have what \
+         you need instead of switching tools.",
         limits.max_lines,
         limits.effective_max_bytes()
     );
@@ -89,7 +92,7 @@ impl Tool for ReadTool {
     }
 
     fn prompt_snippet(&self) -> Option<String> {
-        Some("read(path, offset?, limit?): reads a file; large outputs are truncated with a continuation hint".into())
+        Some("read(path, offset?, limit?): reads a file; large outputs are truncated with a continuation hint; prefer a full read over fragment scraping".into())
     }
 
 

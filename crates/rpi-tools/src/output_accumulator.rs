@@ -156,6 +156,14 @@ impl OutputAccumulator {
         self.tail_text.clone()
     }
 
+    /// 强制开启完整输出落盘(后台化用):把此前缓冲的原始字节一次写入临时
+    /// 文件,此后全部增量直写;返回文件路径(创建失败 = None,退化为内存
+    /// 尾部视图,完整输出不保证)。
+    pub fn force_temp_file(&mut self) -> Option<PathBuf> {
+        self.ensure_temp_file();
+        self.temp_path.clone()
+    }
+
     pub fn total_lines(&self) -> usize {
         self.completed_lines + usize::from(self.has_open_line)
     }
