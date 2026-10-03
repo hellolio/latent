@@ -35,6 +35,7 @@ pub async fn run_print_mode(
 
 /// 供其他模式复用的装配(不跑 prompt)。`approval_ui` 由调用方按模式提供
 /// (interactive=TuiApprovalUi,rpc=RpcApprovalUi,json=HeadlessApprovalUi)。
+#[allow(clippy::too_many_arguments)]
 pub async fn build_bare_session(
     provider: Arc<dyn rpi_ai::Provider>,
     model: rpi_ai::Model,

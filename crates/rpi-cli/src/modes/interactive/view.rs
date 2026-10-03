@@ -9,16 +9,9 @@ use rpi_tui::{loader, markdown, tool_card, Theme, UiLine};
 
 use super::state::{InteractiveState, Status, TranscriptItem};
 
-/// 交流区与输入区之间的空隙行数(空闲时预览区不占行,恒为 0)。
-pub const MAX_PREVIEW_ROWS: usize = 0;
-/// 流式预览区行数(busy 预留,超出取尾部)。视口高度在回合全程恒定。
-/// 守恒律:insert_before 滚动机制决定了「回合末 tokens 下方残留的空带 =
-/// busy 预留 + 状态行 + 固定空行 + 编辑器内边距」,且 tokens 在收缩**前**
-/// 落盘时与上文紧贴、空带全部落在 tokens 下方。预留 1 行 → 生成中可见
-/// 1 行流式尾部,回合末 tokens→输入行共 3 行空白(空带 1 + 状态行 1 +
-/// 固定空行 1;内边距行属于输入框背景块)。pi 上游无此问题的做法是全帧
-/// 差分重绘,属渲染管线级重构。
-pub const STREAM_PREVIEW_ROWS: usize = 1;
+/// 流式输出实时预览的最大行数(正文与 thinking 取尾部窗口,超出截尾)。
+/// 全帧差分渲染下尾部高度可自由变化,无需预留行数守恒。
+pub const STREAM_PREVIEW_ROWS: usize = 4;
 /// 编辑器最多展示的视觉行数(pi 编辑器同样封顶)。
 pub const MAX_EDITOR_ROWS: usize = 6;
 
@@ -44,13 +37,17 @@ pub fn render_item(
             // 计划模式产出的 <proposed_plan> 块:紫色背景卡片 + 标题 + 引导行
             // (13 文档 §8.3/§10.4;原始文本仍按普通消息入转录)
             let rendered = assistant_markdown(markdown, theme, width);
+            // 背景块上下各一行同色内边距(与用户消息块/工具卡片一致)
+            let mut body = rendered;
+            body.insert(0, Line::raw(""));
+            body.push(Line::raw(""));
             let mut card = vec![rpi_tui::UiLine::from(ratatui::text::Line::from(
                 ratatui::text::Span::styled(
                     "实施计划(计划模式产出)".to_string(),
                     Style::new().fg(theme.warning).add_modifier(Modifier::BOLD),
                 ),
             ))];
-            card.extend(tool_card::bg_block(rendered, width, theme.plan_bg));
+            card.extend(tool_card::bg_block(body, width, theme.plan_bg));
             card.push(rpi_tui::UiLine::from(ratatui::text::Line::from(
                 ratatui::text::Span::styled(
                     "确认后 /mode confirm 并让模型开始实现".to_string(),
@@ -60,7 +57,7 @@ pub fn render_item(
             card
         }
         TranscriptItem::ToolCall { name, args, status } => {
-            tool_card::tool_box_top(name, args, (*status).into(), expanded, width, theme)
+            tool_card::tool_box_top(name, args, (*status).into(), width, theme)
         }
         TranscriptItem::ToolResult {
             output, is_error, ..
@@ -179,8 +176,9 @@ pub struct ViewportFrame {
     pub height: u16,
 }
 
-/// 组装视口帧。`preview_cap`/`editor_cap`/`popup_cap` 限制预览区、编辑器与
-/// 补全弹窗行数(终端过矮时由调用方收缩重算)。
+/// 组装尾部帧。`preview_cap`/`editor_cap`/`popup_cap` 限制流式预览、
+/// 编辑器与补全弹窗行数(终端过矮时由调用方收缩重算)。
+/// 全帧差分渲染下尾部高度可逐帧自由变化:预览区不再占位补空。
 pub fn viewport(
     state: &InteractiveState,
     partial: Option<&rpi_ai::AssistantMessage>,
@@ -193,10 +191,9 @@ pub fn viewport(
     let mut lines: Vec<UiLine> = Vec::new();
     let mut cursor: Option<(u16, u16)> = None;
 
-    // 1. 预览区:选择列表 > 流式文本尾部 > thinking/工具参数尾部。
-    //    无选择列表时固定占满 preview_cap 行(内容不足补空行):视口高度
-    //    从此只随用户操作(多行输入/弹窗/选择列表)变化,模型回话全程
-    //    高度恒定,输入框不会因流式更新而跳动。
+    // 1. 预览区:选择列表 > 流式文本尾部(≤ preview_cap 行)>
+    //    thinking 尾部(4 行 + 余量提示)> 工具命令卡片(命令全显,
+    //    不受 preview_cap 与 ctrl+o 展开态约束)。
     let mut preview: Vec<UiLine> = Vec::new();
     if let Some(select) = &state.select {
         preview.push(Line::from(Span::styled(
@@ -216,7 +213,7 @@ pub fn viewport(
         }
         let wrapped = rpi_tui::wrap_to_width(&state.stream_text[start..], width);
         // 预览恒为固定尾部窗口(不随 ctrl+o 展开态变化):展开态只作用于
-        // 定稿转录,避免展开后视口逐增量改高引发闪烁
+        // 定稿转录
         let skip = wrapped.len().saturating_sub(preview_cap);
         for row in wrapped.into_iter().skip(skip) {
             preview.push(Line::from(Span::styled(
@@ -259,34 +256,17 @@ pub fn viewport(
                 )));
             }
         }
-    } else if preview_cap > 0 && partial.is_some() {
-        if let Some(args) = partial.and_then(toolcall_args_preview) {
-            preview.push(Line::from(Span::styled(
-                format!("⚙ {args}"),
-                Style::new().fg(theme.dim),
-            )));
-        }
-    }
-    if state.select.is_none() {
-        // 预览恒为尾部窗口:超出 cap 时从头部丢弃(thinking 折叠尾迹可能
-        // 超过 cap,不能让视口高度随内容回涨——那会在回合中段重新产生
-        // 高度变化与收缩空带)
-        if preview.len() > preview_cap {
-            preview.drain(..preview.len() - preview_cap);
-        }
-        while preview.len() < preview_cap {
-            preview.push(Line::raw(""));
-        }
+    } else if preview_cap > 0 {
+        // 工具命令卡片:参数流式增长/执行中都完整显示命令本身
+        preview.extend(tool_preview_cards(state, partial, width));
     }
     lines.extend(preview);
 
-    // 状态行(busy 时一行带 shimmer 渐变;idle 空占一行)。无预览预留,
-    // busy/idle 视口高度恒同,无需空隙行。
-    let status = status_line(state);
-    lines.extend(status);
-    // 状态行与编辑器区之间的固定空白行:等待/生成时输入框上方至少有 1 行
-    // 空白隔开(视口高度恒定,与弹窗无关);完成后 = turn-end 空带 1 +
-    // 状态行 1 + 本行 1 = 3 行空白。
+    // 状态行:仅 busy 时渲染(spinner 紧贴最近的模型/工具输出下方);
+    // idle 不占行,输出→输入框之间恒定两行空行。
+    lines.extend(status_line(state));
+    // 输出/状态行与编辑器区之间的固定两行间隔(流式中与完成后一致)。
+    lines.push(Line::raw(""));
     lines.push(Line::raw(""));
 
     // 3. 补全弹窗:紧贴编辑器框上方(Codex 布局)
@@ -366,6 +346,13 @@ pub fn viewport(
     };
     lines.extend(rpi_tui::footer::lines(&footer, width, theme));
 
+    // busy 且编辑器为空(等待模型输出)时光标停在最底行(footer 之下的
+    // 等待区),不跟随流式文字/编辑器占位位置闪烁移动;流式中用户开始
+    // 输入则恢复编辑器光标
+    if state.status.is_busy() && state.editor.is_empty() {
+        cursor = Some((0, (lines.len().saturating_sub(1)) as u16));
+    }
+
     let height = lines.len() as u16;
     ViewportFrame {
         lines,
@@ -374,14 +361,15 @@ pub fn viewport(
     }
 }
 
-/// 状态行(Codex 风格:busy 时一行带彩色渐变与 `esc to interrupt` 提示;
-/// idle 时空占一行,保证视口高度不随 busy↔idle 切换抖动)。
-/// 等待态文字逐字符在彩色光谱上取色,色相随位置渐变、随 spinner 拍数向右扫动。
+/// 状态行(Codex 风格:busy 时一行带彩色渐变与 `esc to interrupt` 提示,
+/// 紧贴最近的模型/工具输出下方;idle 不占行——输出→输入框的间隔恒为
+/// 两行空行)。等待态文字逐字符在彩色光谱上取色,色相随位置渐变、
+/// 随 spinner 拍数向右扫动。
 fn status_line(state: &InteractiveState) -> Vec<UiLine> {
     let theme = &state.theme;
     let secs = state.spin * super::SPINNER_INTERVAL.as_millis() as usize / 1000;
     let (color, text) = match &state.status {
-        Status::Idle => return vec![Line::raw("")],
+        Status::Idle => return Vec::new(),
         Status::Thinking => (
             theme.spinner,
             format!(
@@ -444,27 +432,43 @@ fn truncate_plain(text: &str, width: usize) -> String {
     rpi_tui::truncate_to_width(text, width.max(1)).0
 }
 
-/// 从 partial 快照提取工具参数预览(T2:参数逐块增长)。
-fn toolcall_args_preview(partial: &rpi_ai::AssistantMessage) -> Option<String> {
-    let args: String = partial
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            rpi_ai::ContentBlock::ToolCall {
+/// 工具命令实时预览卡片:参数流式增长时取自 partial 快照,执行中取自
+/// pending_tools(按 ToolExecutionStart 记录)。命令本身始终完整折行
+/// 显示,不受预览行数上限约束。
+fn tool_preview_cards(
+    state: &InteractiveState,
+    partial: Option<&rpi_ai::AssistantMessage>,
+    width: usize,
+) -> Vec<UiLine> {
+    let mut cards: Vec<UiLine> = Vec::new();
+    if let Some(partial) = partial {
+        for block in &partial.content {
+            if let rpi_ai::ContentBlock::ToolCall {
                 name, arguments, ..
-            } => Some(format!(
-                "{}{}",
-                if name.is_empty() {
-                    String::new()
-                } else {
-                    format!("{name} ")
-                },
-                arguments
-            )),
-            _ => None,
-        })
-        .collect();
-    (!args.is_empty()).then_some(args)
+            } = block
+            {
+                cards.extend(tool_card::tool_box_top(
+                    name,
+                    &arguments.to_string(),
+                    rpi_tui::tool_card::ToolStatus::Pending,
+                    width,
+                    &state.theme,
+                ));
+            }
+        }
+    }
+    if cards.is_empty() {
+        for (_, name, args) in &state.pending_tools {
+            cards.extend(tool_card::tool_box_top(
+                name,
+                args,
+                rpi_tui::tool_card::ToolStatus::Pending,
+                width,
+                &state.theme,
+            ));
+        }
+    }
+    cards
 }
 
 #[cfg(test)]
@@ -587,6 +591,31 @@ mod tests {
     }
 
     #[test]
+    fn viewport_busy_parks_cursor_at_bottom_row() {
+        // busy 且编辑器为空:光标停在最底行(等待区),不闪烁于流式文字处
+        let mut st = state();
+        st.status = Status::Thinking;
+        st.stream_text = "partial".into();
+        let frame = viewport(&st, None, 4, 6, 8);
+        assert_eq!(
+            frame.cursor,
+            Some((0, frame.height - 1)),
+            "{:?}",
+            frame.cursor
+        );
+        // busy 中用户开始输入:恢复编辑器光标
+        st.editor.set_text("x");
+        let frame = viewport(&st, None, 4, 6, 8);
+        assert!(frame.cursor.is_some());
+        assert_ne!(frame.cursor, Some((0, frame.height - 1)));
+        // idle:光标回到编辑器
+        st.status = Status::Idle;
+        let frame = viewport(&st, None, 4, 6, 8);
+        assert!(frame.cursor.is_some());
+        assert_ne!(frame.cursor, Some((0, frame.height - 1)));
+    }
+
+    #[test]
     fn viewport_thinking_preview_shows_tail_with_hint() {
         let mut st = state();
         st.pending_thinking = Some((1..=6).map(|i| format!("step{i}")).collect::<Vec<_>>().join("\n"));
@@ -607,47 +636,74 @@ mod tests {
     fn viewport_layout_shape() {
         let mut st = state();
         st.editor.set_text("hi");
-        let frame = viewport(&st, None, 8, 6, 8);
-        // 预览 8(恒占)+ 状态 1 + 固定空行 1 + 编辑区(上下内边距 2 +
-        // 编辑行 1)+ footer 3 = 16
+        let frame = viewport(&st, None, 0, 6, 8);
+        // 空闲:无预览、无状态行,两行间隔 + 编辑区(上下内边距 2 + 编辑行 1)
+        // + footer 3 = 8
         assert_eq!(
             frame.lines.len(),
-            16,
+            8,
             "{:?}",
             frame.lines.iter().map(line_text).collect::<Vec<_>>()
         );
-        assert_eq!(frame.height, 16);
-        // 光标在编辑器行(行 11 = 预览 8 + 状态 1 + 固定空行 + 顶部内边距),
-        // 列 = 2 + 2 = 4
-        assert_eq!(frame.cursor, Some((4, 11)));
+        assert_eq!(frame.height, 8);
+        // 光标在编辑器行(idx 3 = 间隔 2 + 顶部内边距),列 = 2 + 2 = 4
+        assert_eq!(frame.cursor, Some((4, 3)));
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert!(texts[11].starts_with("❯ hi"), "{texts:?}");
-        // idle 时预览、状态行与固定空行均为空占位
-        for row in &texts[..11] {
-            assert!(row.trim().is_empty(), "空闲占位应为空行: {texts:?}");
+        assert!(texts[3].starts_with("❯ hi"), "{texts:?}");
+        // 输出→输入框之间恒定两行间隔
+        for row in &texts[..2] {
+            assert!(row.trim().is_empty(), "间隔应为空行: {texts:?}");
         }
     }
 
     #[test]
-    fn viewport_reserves_full_preview_height() {
-        // 预览区固定占 preview_cap 行(内容不足补空行):视口高度只随用户
-        // 操作变化,流式全程恒定,输入框不因高度抖动而闪烁
+    fn tail_height_follows_content() {
+        // 全帧差分下尾部高度逐帧自由变化:空闲最紧,流式按实际行数增长,
+        // 不再恒定占位补空
         let st = state();
-        let frame = viewport(&st, None, 4, 6, 8);
-        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        // 空闲:预览 4 + 状态 1 + 固定空行 1 + 编辑区 3 + footer 3
-        assert_eq!(frame.height, 4 + 1 + 1 + 3 + 3);
-        for row in &texts[..4] {
-            assert!(row.trim().is_empty(), "预览空位应为空行: {texts:?}");
-        }
-        // 内容增长但未超 cap:预览区行数不变;busy/idle 同构
+        assert_eq!(viewport(&st, None, 4, 6, 8).height, 2 + 3 + 3);
+        // 流式 2 行:预览 2 + 状态 1 + 间隔 2 + 编辑区 3 + footer 3
         let mut st = state();
         st.status = Status::Thinking;
         st.stream_text = "line1\nline2".into();
         let frame = viewport(&st, None, 4, 6, 8);
-        assert_eq!(frame.height, 4 + 1 + 1 + 3 + 3);
+        assert_eq!(frame.height, 2 + 1 + 2 + 3 + 3);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
-        assert!(texts.iter().take(4).any(|t| t.contains("line2")));
+        assert!(texts[..2].iter().any(|t| t.contains("line2")), "{texts:?}");
+        // 超过 4 行取尾部窗口
+        let mut st = state();
+        st.status = Status::Thinking;
+        st.stream_text = (1..=9)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let texts: Vec<String> = viewport(&st, None, 4, 6, 8)
+            .lines
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(texts[..4].iter().any(|t| t.contains("line9")), "{texts:?}");
+        assert!(!texts[..4].iter().any(|t| t.contains("line1")), "{texts:?}");
+    }
+
+    #[test]
+    fn viewport_shows_full_tool_command_card() {
+        // 工具命令本身完整显示:超长命令折成多行卡片,不受预览 4 行上限
+        // 约束;状态行紧贴卡片下方
+        let mut st = state();
+        st.status = Status::Tool("bash".into());
+        let long_cmd = format!(r#"{{"command":"{}"}}"#, "x".repeat(200));
+        st.pending_tools = vec![("t1".into(), "bash".into(), long_cmd)];
+        let frame = viewport(&st, None, 4, 6, 8);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        assert!(frame.height > 10, "命令应完整折行显示: {texts:?}");
+        assert!(
+            texts.iter().map(String::as_str).collect::<String>().matches('x').count() >= 200,
+            "命令字符不得截断"
+        );
+        let card_end = texts.iter().rposition(|t| t.contains('x')).unwrap();
+        // 卡片底部内边距空行之后紧跟状态行
+        assert!(texts[card_end + 2].contains("Running bash"), "{texts:?}");
     }
 
     #[test]

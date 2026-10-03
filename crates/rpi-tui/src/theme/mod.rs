@@ -199,9 +199,9 @@ mod tests {
     #[test]
     fn resolve_accepts_kebab_and_aliases() {
         assert_eq!(Theme::resolve("tokyo-night", true), Some(external::from_name(ThemeName::TokyoNight)));
-        assert_eq!(Theme::resolve("Nord", true).unwrap().is_dark, true);
-        assert_eq!(Theme::resolve("mocha", true).unwrap().is_dark, true);
-        assert_eq!(Theme::resolve("latte", true).unwrap().is_dark, false);
+        assert!(Theme::resolve("Nord", true).unwrap().is_dark);
+        assert!(Theme::resolve("mocha", true).unwrap().is_dark);
+        assert!(!Theme::resolve("latte", true).unwrap().is_dark);
     }
 
     #[test]

@@ -150,13 +150,13 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 
 | 文件 | 说明 |
 |---|---|
-| `src/app.rs` | `TuiApp`：Inline 视口渲染——定稿内容 `insert_before` 滚入原生 scrollback，底部视口每帧重绘；运行期改高、ctrl+o 全文重绘、光标查询与读线程的 PAUSE/PARKED 协议 |
+| `src/app.rs` | `TuiApp`：全帧差分渲染（pi TuiMainScreen 对应）——定稿行缓存 ANSI 序列化只追加，与活动尾部拼成全帧逐行差分、只重绘变化区间，追加行越过屏幕底自然滚入原生 scrollback；变化落在已滚出区域或尺寸变化时全量重绘兜底，DECAWM 关闭防回绕 |
 | `src/editor.rs` | 多行编辑器（缓冲按 `Vec<Vec<char>>` 避免多字节索引问题）：undo、kill-ring、词导航、↑/↓ 历史 |
-| `src/view.rs`（modes/interactive 内） | 视口帧组装纯函数：预览区 → 状态行 → 补全弹窗 → 编辑器 → footer；预览高度守恒律防视口跳动 |
+| `src/view.rs`（modes/interactive 内） | 尾部帧组装纯函数：实时预览（≤4 行，工具命令卡片全显不设限）→ 状态行（仅 busy，紧贴输出）→ 两行间隔 → 补全弹窗 → 编辑器 → footer；全帧差分下尾部高度逐帧自由变化 |
 | `src/markdown.rs` | Markdown 渲染（标题/列表/围栏代码块 syntect 高亮/GFM 表格/行内样式） |
 | `src/command_popup.rs` | 斜杠命令补全弹窗（前缀>子串>模糊打分；`/mode` 展开变体子项） |
-| `src/tool_card.rs` | 工具调用卡片：折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，成功绿/失败红/运行中中性，pi toolSuccessBg 同源色值） |
-| `src/footer.rs` | 三行状态栏：cwd+git 分支 / token 段（in/out/cache/ctx% 变色/$cost）/ model·thinking；mode 标记 plan 黄、full-access 红 |
+| `src/tool_card.rs` | 工具调用卡片：命令本身完整折行（不随 ctrl+o 变化），输出折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，上下各一行同色内边距；成功绿/失败红为压暗低饱和色调，运行中中性） |
+| `src/footer.rs` | 三行状态栏：cwd+git 分支 / token 段（↑prompt 含缓存明细 U/R 与命中率 / ↓out / ctx% 变色 / $cost）/ model·thinking；mode 标记 plan 黄、full-access 红 |
 | `src/theme/` | 语义主题：ratatui-themes 映射 + 逐主题微调（Tokyo Night/Catppuccin/Dracula…），16 色降级 ANSI |
 | `src/highlight.rs` / `text.rs` / `width.rs` / `key.rs` / `loader.rs` / `select_list.rs` / `header.rs` | syntect 高亮单例 / span 感知折行截断 / 零依赖 CJK 宽度表 / 按键语义归一 / spinner / 单选列表 / 启动横幅 |
 

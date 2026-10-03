@@ -21,6 +21,9 @@ use rpi_core::{
     SystemPromptOptions,
 };
 
+/// 子代理工厂的模型解析器共享句柄(装配期与 /model 同源)。
+type ModelResolverFn = Arc<dyn Fn(&str) -> Result<rpi_ai::Model, String> + Send + Sync>;
+
 /// 读取扩展进程声明:项目 `.rpi/settings.json` → 全局 `~/.rpi/settings.json`,
 /// mcpServers 列表拼接(07 §8.7 步骤 3)。
 pub fn load_mcp_server_specs() -> Vec<McpServerSpec> {
@@ -796,13 +799,14 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 不装配 = 零开销。内存会话即使开启也在 manager 内部跳过
     let stream_options = if context_snapshot.unwrap_or(false) {
         let manager = session_manager.clone();
-        let mut stream_options = rpi_ai::StreamOptions::default();
-        stream_options.on_payload = Some(Arc::new(move |body: &mut serde_json::Value| {
-            if let Err(error) = manager.append_context_snapshot(body) {
-                eprintln!("[rpi] context snapshot append failed: {error}");
-            }
-        }));
-        stream_options
+        rpi_ai::StreamOptions {
+            on_payload: Some(Arc::new(move |body: &mut serde_json::Value| {
+                if let Err(error) = manager.append_context_snapshot(body) {
+                    eprintln!("[rpi] context snapshot append failed: {error}");
+                }
+            })),
+            ..rpi_ai::StreamOptions::default()
+        }
     } else {
         rpi_ai::StreamOptions::default()
     };
@@ -943,9 +947,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         rpi_core::create_model_resolver_from_config(Some(&cwd), subagent_home.as_deref());
     let factory_resolver =
         rpi_core::create_model_resolver_from_config(Some(&cwd), subagent_home.as_deref());
-    let resolve_model: Arc<dyn Fn(&str) -> Result<rpi_ai::Model, String> + Send + Sync> =
-        Arc::new(move |spec: &str| subagent_resolver.resolve(spec));
-    let factory_resolve_model: Arc<dyn Fn(&str) -> Result<rpi_ai::Model, String> + Send + Sync> =
+    let resolve_model: ModelResolverFn = Arc::new(move |spec: &str| subagent_resolver.resolve(spec));
+    let factory_resolve_model: ModelResolverFn =
         Arc::new(move |spec: &str| factory_resolver.resolve(spec));
     let read_only_tool_set = rpi_tools::read_only_tools_with_limits(&cwd, tool_output_limits);
     // 子会话落盘工厂:与主会话同一套 rpi-session 机制(消息/usage/快照 entry
@@ -1124,7 +1127,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             default_tools: read_only_tool_set,
             tool_pool: tools,
             resolve_model: factory_resolve_model,
-            child_store_factory: child_store_factory,
+            child_store_factory,
         })),
     })
 }

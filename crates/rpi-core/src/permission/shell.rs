@@ -110,7 +110,9 @@ const READONLY_PREFIXES: &[&[&str]] = &[
     &["fdesetup", "status"],
     &["crontab", "-l"],
     &["kill", "-l"],
-    // 零副作用命令
+    // 零副作用命令。cd 自身无副作用,放行前提是分段校验仍要求其余所有段
+    // 只读——cd 只影响后续只读命令看哪个目录;deny 规则否定优先,仍可禁掉。
+    &["cd"],
     &["cal"],
     &["factor"],
     &["hostinfo"],
@@ -258,10 +260,7 @@ fn tokenize(command: &str, allow: &[String], deny: &[String], depth: usize) -> O
             '\\' => {
                 // 反斜杠转义下一字符(字面,非操作符):`\;` `\|` `\(` 等
                 in_word = true;
-                match chars.next() {
-                    Some(escaped) => word.text.push(escaped),
-                    None => return None,
-                }
+                word.text.push(chars.next()?);
             }
             '$' => {
                 in_word = true;
@@ -568,7 +567,7 @@ fn segment_is_readonly(
 fn has_write_flag(tokens: &[&str]) -> bool {
     match tokens {
         ["sort", args @ ..] => args.iter().any(|a| *a == "-o" || a.starts_with("--o")),
-        ["sysctl", args @ ..] => args.iter().any(|a| *a == "-w"),
+        ["sysctl", args @ ..] => args.contains(&"-w"),
         ["git", ..] => git_words_have_write_flag(tokens),
         _ => false,
     }
@@ -1161,6 +1160,33 @@ mod tests {
     #[test]
     fn sysctl_write_mode_is_denied() {
         assert!(!is_readonly_command("sysctl -w kern.maxfiles=10000"));
+    }
+
+    #[test]
+    fn cd_segments_pass_when_rest_is_readonly() {
+        // cd 自身无副作用,复合命令其余段全部只读时放行
+        assert!(is_readonly_command(
+            "cd /Users/kin/Documents/10source/test && git status && git log --oneline -5 && file rpi"
+        ));
+        assert!(is_readonly_command("cd /tmp"));
+        assert!(is_readonly_command("cd .. && ls"));
+        assert!(is_readonly_command("cd /tmp; git status | head -3"));
+    }
+
+    #[test]
+    fn cd_does_not_rescue_non_readonly_segments() {
+        assert!(!is_readonly_command("cd /tmp && rm -rf x"));
+        assert!(!is_readonly_command("cd /tmp && echo hi > out.txt"));
+    }
+
+    #[test]
+    fn deny_rule_overrides_cd() {
+        let deny = vec!["cd".to_string()];
+        assert!(!is_readonly_command_with_rules(
+            "cd /tmp && git status",
+            &[],
+            &deny
+        ));
     }
 
     #[test]

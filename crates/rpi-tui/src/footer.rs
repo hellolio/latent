@@ -1,7 +1,7 @@
 //! 底部状态栏(pi components/footer.ts 的对应物,三行):
 //! 1. cwd(~/ 缩写)+(git 分支);
-//! 2. 右对齐 token 段:↑prompt(hit/miss 明细) │ ↓out │ ctx%(>70% warning 黄、
-//!    >90% error 红)· 用量/窗口 │ $cost,每段独立着色;
+//! 2. 右对齐 token 段:↑prompt(缓存明细 U/R 与命中率) │ ↓out │ ctx%
+//!    (>70% warning 黄、>90% error 红)· 用量/窗口 │ $cost,每段独立着色;
 //! 3. 右对齐模型 · thinking。
 
 use ratatui::style::Style;
@@ -97,8 +97,12 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
 fn usage_line(data: &FooterData, theme: &Theme) -> Line<'static> {
     let dim = Style::new().fg(theme.dim);
     let mut spans = usage_segments(data, theme);
-    if data.context_window > 0 {
-        let pct = ((data.context_tokens * 100) / data.context_window).min(100);
+    let ctx_pct = data
+        .context_tokens
+        .checked_mul(100)
+        .and_then(|total| total.checked_div(data.context_window))
+        .map(|pct| pct.min(100));
+    if let Some(pct) = ctx_pct {
         let pct_style = if pct > 90 {
             Style::new().fg(theme.error)
         } else if pct > 70 {
@@ -143,17 +147,19 @@ fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
     let mut sep = false;
     {
         // ↑ 显示完整 prompt 规模(input + cache 读 + cache 写),括号内给出
-        // 命中/未命中明细:命中 = cache_read,未命中 = input + cache_write
-        // (本次新发送、未从缓存读取的 token)。
+        // 缓存明细与命中率:U = input + cache_write(未命中,本次新发送),
+        // R = cache_read(命中),命中率 = R / ↑ 总量。
         // 无缓存读写(如不带 prompt cache 的 provider)时退化为裸 ↑ input。
         let prompt_total = data.input_tokens + data.cache_read + data.cache_write;
         let miss_total = data.input_tokens + data.cache_write;
         let up = if data.cache_read + data.cache_write > 0 {
+            let hit_pct = (data.cache_read * 100).checked_div(prompt_total).unwrap_or(0);
             format!(
-                "↑ {} (hit {} / miss {})",
+                "↑ {} (U {} / R {} · {}%)",
                 format_tokens(prompt_total),
+                format_tokens(miss_total),
                 format_tokens(data.cache_read),
-                format_tokens(miss_total)
+                hit_pct
             )
         } else {
             format!("↑ {}", format_tokens(data.input_tokens))
@@ -333,8 +339,9 @@ mod tests {
         let out = lines(&data(), 80, &theme());
         assert_eq!(out.len(), 3);
         let second = line_text(&out[1]);
-        // 右对齐 token 段:↑ 为完整 prompt(11k+5.5k+2.2k),括号内命中/未命中
-        assert!(second.contains("↑ 18.7k (hit 5.5k / miss 13.2k)"), "{second}");
+        // 右对齐 token 段:↑ 为完整 prompt(11k+5.5k+2.2k),括号内缓存明细
+        // U(未命中 13.2k)/ R(命中 5.5k)与命中率(5.5/18.7 ≈ 29%)
+        assert!(second.contains("↑ 18.7k (U 13.2k / R 5.5k · 29%)"), "{second}");
         assert!(second.contains("↓ 149"), "{second}");
         assert!(second.contains("ctx 10% (12.8k/128k) (auto)"), "{second}");
         assert!(second.contains("$0.0012"), "{second}");
@@ -445,12 +452,12 @@ mod tests {
 
     #[test]
     fn cache_hit_shown_even_at_zero_percent() {
-        // cache_read = 0 但有 cache_write:括号明细仍展示(hit 0)
+        // cache_read = 0 但有 cache_write:括号明细仍展示(R 0,命中率 0%)
         let mut d = data();
         d.cache_read = 0;
         let out = lines(&d, 80, &theme());
         let second = line_text(&out[1]);
-        assert!(second.contains("(hit 0 / miss 13.2k)"), "{second}");
+        assert!(second.contains("(U 13.2k / R 0 · 0%)"), "{second}");
     }
 
     #[test]

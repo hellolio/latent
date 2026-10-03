@@ -388,7 +388,7 @@ async fn submit_input(
                     let _ = ui_tx.send(UiEvent::Notify(format!("Error: {error}")));
                 }
             });
-            return false;
+            false
         }
         slash::SlashInput::Unknown(name) => {
             // rpi 无动态命令源:未知 /xxx 本地警告,不发给模型
@@ -396,7 +396,7 @@ async fn submit_input(
                 &format!("Unknown command: {name}(输入 /help 查看可用命令)"),
                 &state.theme,
             ));
-            return false;
+            false
         }
         slash::SlashInput::Command(action) => {
             // 退出类命令(/quit)的信号必须向上传递

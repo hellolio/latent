@@ -2,7 +2,8 @@
 
 流式回复结束后:正文定稿上屏、用量行出现、footer token 段(含 cache 段)
 右下角可见、编辑器回到可输入状态;提交进 scrollback 的 CJK 文本不注入
-字间空格(ratatui insert_before 宽字符空位 bug 的回归测试)。
+字间空格(全帧差分渲染路径的宽字符回归);输出与输入框之间恒定两行间隔;
+工具命令本身完整显示(超长命令折多行,不受 ctrl+o 折叠影响)。
 """
 
 import re
@@ -25,6 +26,75 @@ def test_reply_commits_with_usage_and_footer():
         app.expect_text(r"↑")
         # 编辑器回到可输入状态
         app.expect_text(r"❯")
+    finally:
+        app.close()
+
+
+def _screen_rows(app) -> list[str]:
+    return [
+        "".join(app.screen.buffer[y][x].data for x in range(app.screen.columns))
+        for y in range(app.screen.lines)
+    ]
+
+
+def _row_has_bg(app, y: int) -> bool:
+    return any(
+        app.screen.buffer[y][x].bg not in (None, "default")
+        for x in range(app.screen.columns)
+    )
+
+
+def _row_is_blank(app, y: int) -> bool:
+    return all(
+        app.screen.buffer[y][x].data in ("", " ")
+        and app.screen.buffer[y][x].bg in (None, "default")
+        for x in range(app.screen.columns)
+    )
+
+
+def test_two_blank_lines_between_output_and_editor():
+    """回合结束后,最近的模型输出(用量行)与输入框之间恰有两行空行。"""
+    app = RpiApp(turns=load_scenario("ask_and_reply"))
+    try:
+        app.wait_ready()
+        app.sendline("你好")
+        app.expect_text("这是 mock LLM 的固定回复")
+        app.expect_text("↓7")
+        app.expect_text("❯")
+        time.sleep(0.5)
+        rows = _screen_rows(app)
+        editor = max(i for i, row in enumerate(rows) if "❯" in row)
+        # ❯ 上方是编辑器背景内边距行,再往上恰有两行纯空行,
+        # 空行之上就是最近的输出(用量行)
+        assert _row_has_bg(app, editor - 1), "❯ 上方应是编辑器内边距行"
+        assert _row_is_blank(app, editor - 2), "间隔第 1 行应为纯空行"
+        assert _row_is_blank(app, editor - 3), "间隔第 2 行应为纯空行"
+        assert not _row_is_blank(app, editor - 4), "间隔之上应紧贴输出内容"
+    finally:
+        app.close()
+
+
+def test_tool_command_fully_displayed_in_card():
+    """超长工具命令完整折行显示(多行,不因收起而截断)。"""
+    command = (
+        "true # AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLLMMMMNNNNOOOO"
+        "PPPPQQQQRRRRSSSSTTTTUUUUVVVVWWWWXXXXYYYYZZZZ"
+    )
+    app = RpiApp(turns=load_scenario("long_command"))
+    try:
+        app.wait_ready()
+        app.sendline("执行一下")
+        app.expect_text("⏺ bash")
+        app.expect_text("命令执行完毕")
+        time.sleep(0.5)
+        rows = [row.rstrip() for row in _screen_rows(app)]
+        # 卡片命令折成多行:完整命令可在屏幕上找到,且尾部落在 ⏺ 标题行
+        # 之外的续行上(单行截断的话尾部不会出现)
+        title = next(i for i, row in enumerate(rows) if "⏺ bash" in row)
+        squeezed = "".join(rows).replace(" ", "")
+        assert squeezed.count(command.replace(" ", "")) >= 1, f"命令应完整显示: {rows}"
+        continuation = "".join(rows[title + 1 : title + 3]).replace(" ", "")
+        assert "YYYYZZZZ" in continuation, f"命令应折到标题行之外的续行: {rows}"
     finally:
         app.close()
 

@@ -1279,6 +1279,7 @@ async fn fail_tool_calls_from_truncated(
 
 /// 工具执行(03 文档 §5):模式选择 → 串行/并行 → 结果消息。
 /// `Vec<ToolOutcome>` 长度恒等于 calls 数(类型不变量,§10.4)。
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls(
     calls: &[ToolCall],
     tools: &[Arc<dyn Tool>],
@@ -1340,6 +1341,7 @@ async fn execute_tool_calls(
 /// 串行批:逐个 start → prepare → execute → finalize → end。
 /// abort 后剩余调用不再执行,但**仍以 Cancelled 结算**,保证配对完整
 /// (修复 pi 串行 break 缺口,03 文档 §10.2.1)。
+#[allow(clippy::too_many_arguments)]
 async fn execute_batch_sequential(
     calls: &[ToolCall],
     tools: &[Arc<dyn Tool>],

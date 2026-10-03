@@ -46,12 +46,25 @@ pub fn from_name(name: ThemeName) -> Theme {
         tool_pending: p.warning,
         tool_success: p.success,
         tool_error: p.error,
-        tool_output: blend(p.fg, p.muted, 0.30),
-        // 卡片背景 = 终端底色向语义色低比例混色:暗色主题得到柔和深色块,
-        // 浅色主题得到浅色 tint,公式明暗自适应
-        tool_pending_bg: blend(p.bg, p.fg, 0.12),
-        tool_success_bg: blend(p.bg, p.success, 0.25),
-        tool_error_bg: blend(p.bg, p.error, 0.25),
+        tool_output: thinking,
+        // 卡片背景:暗色主题以纯黑为底向语义色低比例混色——只比终端底色
+        // (常见纯黑)稍带色相、明度压到最低,避免大面积发灰发白刺眼;
+        // 浅色主题保持浅色 tint
+        tool_pending_bg: if p.is_dark() {
+            blend(Color::Black, p.fg, 0.10)
+        } else {
+            blend(p.bg, p.fg, 0.12)
+        },
+        tool_success_bg: if p.is_dark() {
+            blend(Color::Black, p.success, 0.15)
+        } else {
+            blend(p.bg, p.success, 0.25)
+        },
+        tool_error_bg: if p.is_dark() {
+            blend(Color::Black, p.error, 0.15)
+        } else {
+            blend(p.bg, p.error, 0.25)
+        },
         plan_bg: blend(p.bg, p.secondary, 0.25),
         error: p.error,
         warning: p.warning,

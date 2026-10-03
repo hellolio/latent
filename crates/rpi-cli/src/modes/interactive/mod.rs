@@ -1,9 +1,10 @@
 //! interactive 模式(pi modes/interactive 的对应物):rpi-tui 搭建的聊天界面。
 //!
-//! 布局(pi 风格):启动区(横幅 + 分隔线 + 已加载资源)与消息区提交进终端
-//! 原生 scrollback;底部 Inline 视口承载预览区/状态行(spinner 与等待信息)/
-//! 编辑器区(带背景色)/三行 footer(cwd · 用量 · 模型)。扩展 UI(接缝 #5):
-//! notify 上屏,confirm/select 渲染为视口内的选择列表。
+//! 布局(pi 风格):启动区(横幅 + 分隔线 + 已加载资源)与消息区作为定稿
+//! 行提交,经全帧差分屏幕滚入终端原生 scrollback;屏幕底部的活动尾部承载
+//! 实时预览(≤4 行)/状态行(spinner,仅 busy)/两行间隔/补全弹窗/编辑器区
+//! (带背景色)/三行 footer(cwd · 用量 · 模型)。扩展 UI(接缝 #5):
+//! notify 上屏,confirm/select 渲染为尾部帧内的选择列表。
 //!
 //! 本模块只做装配与事件循环;状态在 state.rs、渲染在 view.rs、事件处理在
 //! handlers.rs、bash 透传在 bash.rs。
@@ -74,16 +75,13 @@ pub async fn run_interactive_mode(
     } = built;
     let (theme, theme_name) = resolve_theme(theme_override.as_deref());
 
-    let mut app = TuiApp::open(6).map_err(|e| e.to_string())?;
+    let mut app = TuiApp::open().map_err(|e| e.to_string())?;
 
     // 键盘线程:crossterm 事件 → 归一 Key → channel。
-    // 循环边界必须走 reader_checkpoint:Inline 视口重建/resize 期间要发
-    // 光标位置查询,读取线程须暂停让路(fd 单读者,见 rpi_tui::app)。
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
     std::thread::spawn(move || {
         use ratatui::crossterm::event;
         loop {
-            rpi_tui::reader_checkpoint();
             match event::poll(Duration::from_millis(50)) {
                 Ok(true) => match event::read() {
                     Ok(event) => {
@@ -152,25 +150,23 @@ async fn event_loop(
     render_tick(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
 
     loop {
-        // ctrl+o 切换后的全文重绘(先 flush 挂起的瞬态行,再整体重打)
+        // 每轮同步宽度(Resize 经 crossterm 事件/逐帧尺寸查询进入全量重绘)
+        state.width = app.width();
+
+        // ctrl+o / 主题 / /new / 尺寸变化后的全文重绘:按当前展开态重组
+        // 启动区与转录,整屏重打;挂起的瞬态行(如 theme → … 确认)并入
+        // 本次文档(与旧 redraw_full 先 flush 的语义一致)
         if state.needs_full_redraw {
             state.needs_full_redraw = false;
+            let mut transcript = full_redraw_lines(state);
             if !state.pending.is_empty() {
                 let pending = std::mem::take(&mut state.pending);
-                app.commit_lines(&pending).map_err(|e| e.to_string())?;
+                transcript.extend(pending);
             }
-            let transcript = full_redraw_lines(state);
             let partial = ctx.session.current().agent().partial_message();
-            let cap = preview_cap_for(state)
-                .min(usize::from(app.viewport_height_cap().saturating_sub(8)));
-            let frame = view::viewport(
-                state,
-                partial.as_ref(),
-                cap,
-                view::MAX_EDITOR_ROWS,
-                default_popup_cap(app.viewport_height_cap()),
-            );
-            app.redraw_full(&transcript, &frame.lines, frame.cursor)
+            let frame = build_frame(state, app, partial.as_ref());
+            app.redraw_all(&transcript).map_err(|e| e.to_string())?;
+            app.render(&frame.lines, frame.cursor)
                 .map_err(|e| e.to_string())?;
             continue;
         }
@@ -206,8 +202,6 @@ async fn event_loop(
                 state.spin = state.spin.wrapping_add(1);
             }
         }
-        // 每轮同步宽度(Resize 由 crossterm 事件驱动 TuiApp,状态侧跟随)
-        state.width = app.width();
     }
 
     // 退出清理:停掉全部存活后台 subagent(抑制完成通知);当前会话与主
@@ -224,69 +218,48 @@ async fn event_loop(
     Ok(())
 }
 
-/// 单帧渲染:① 计算帧 → ② 同步视口高度 → ③ flush 待提交转录 →
-/// ④ 绘制视口。高度同步必须在 flush 之前:视口收缩释放的行会形成空带
-/// (终端无法从 scrollback 拉回内容),flush 的定稿内容经 `insert_before`
-/// 从视口上方往下填,正好把空带回填——回合结束后输出紧贴输入区,
-/// 不再留下大片空白等下一次提交。
+/// 单帧渲染:① 尺寸变化检测(宽度变化须重折行,转全量重绘)→
+/// ② flush 待提交定稿行(并入屏幕侧 committed 缓存)→ ③ 计算尾部帧 →
+/// ④ 差分输出。全帧差分下尾部高度逐帧自由变化,无预留行数约束。
 fn render_tick(
     state: &mut InteractiveState,
     app: &mut TuiApp,
     partial: Option<&rpi_ai::AssistantMessage>,
 ) -> std::io::Result<()> {
-    let frame = build_frame(state, app, partial);
-    app.set_viewport_height(frame.height)?;
+    if app.take_needs_reshape() {
+        state.needs_full_redraw = true;
+        return Ok(());
+    }
     if !state.pending.is_empty() {
         let pending = std::mem::take(&mut state.pending);
-        app.commit_lines(&pending)?;
+        app.append_committed(&pending);
     }
-    app.draw_viewport(&frame.lines, frame.cursor)
+    let frame = build_frame(state, app, partial);
+    app.render(&frame.lines, frame.cursor)
 }
 
-/// 计算视口帧(终端过矮时收缩预览区/补全弹窗/编辑器行数)。
+/// 计算尾部帧(终端过矮时收缩流式预览/补全弹窗/编辑器行数;尾部总高
+/// 不得超过屏幕行数,否则差分必须全量重绘兜底)。
 fn build_frame(
     state: &mut InteractiveState,
     app: &TuiApp,
     partial: Option<&rpi_ai::AssistantMessage>,
 ) -> view::ViewportFrame {
-    let budget = app.viewport_height_cap();
-    let mut preview_cap = preview_cap_for(state);
+    let budget = usize::from(app.screen_rows().max(1));
+    let mut preview_cap = view::STREAM_PREVIEW_ROWS;
     let mut editor_cap = view::MAX_EDITOR_ROWS;
-    let mut popup_cap = default_popup_cap(budget);
+    let mut popup_cap = default_popup_cap(budget as u16);
     let mut frame = view::viewport(state, partial, preview_cap, editor_cap, popup_cap);
-    while frame.height > budget && preview_cap > 0 {
+    while frame.height as usize > budget && preview_cap > 0 {
         preview_cap = preview_cap.saturating_sub(2);
         frame = view::viewport(state, partial, preview_cap, editor_cap, popup_cap);
     }
-    if frame.height > budget {
+    if frame.height as usize > budget {
         popup_cap = 1;
         editor_cap = 1;
         frame = view::viewport(state, partial, 0, editor_cap, popup_cap);
     }
     frame
-}
-
-/// 预览区行数上限:busy 期间(流式输出/思考/工具执行)固定为
-/// `STREAM_PREVIEW_ROWS`(1),空闲时不占行(0)。两个设计点:
-/// - **busy 一开始就把视口预增高到全程高度**,此后整回合不再增高,输入框
-///   不因流式更新而跳动;
-/// - **tokens 块在收缩前按 busy 高度落盘**(Idle 在 AgentSettled 才切),
-///   与上文 AI 框紧贴;回合末收缩释放的预留空带全部落在 tokens 下方。
-///   守恒:tokens→输入行空白 = 预留 + 状态行 + 编辑器内边距 = 3 行。
-///
-/// 超出终端预算时由 build_frame() 收缩截尾。
-fn preview_cap_for(state: &InteractiveState) -> usize {
-    if state.status.is_busy()
-        || !state.stream_text.is_empty()
-        || state
-            .pending_thinking
-            .as_ref()
-            .is_some_and(|t| !t.trim().is_empty())
-    {
-        view::STREAM_PREVIEW_ROWS
-    } else {
-        view::MAX_PREVIEW_ROWS
-    }
 }
 
 /// 补全弹窗的默认行数上限:不超过 8 行,且保证 composer(3 行)+ footer

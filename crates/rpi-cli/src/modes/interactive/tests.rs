@@ -412,8 +412,8 @@ async fn turn_end_success_records_usage_and_context() {
         })),
     )
     .await;
-    // ↑ = 完整 prompt(100 + cache_read 5),括号内命中/未命中明细
-    assert!(committed_text(&state).contains("↑ 105 (hit 5 / miss 100)"));
+    // ↑ = 完整 prompt(100 + cache_read 5),括号内缓存明细与命中率(5/105 ≈ 4%)
+    assert!(committed_text(&state).contains("↑ 105 (U 100 / R 5 · 4%)"));
     assert_eq!(
         state.context_tokens, 115,
         "ctx 估计 = in+out+cacheRead+cacheWrite"
@@ -1024,55 +1024,8 @@ async fn viewport_shrinks_preview_under_budget() {
     assert!(frame.height <= 10, "帧高应受预算约束: {}", frame.height);
 }
 
-// 流式输出期间预览上限恒定:视口高度不随增量改高(Inline 视口逐增量
-// resize 会闪烁并把屏幕顶行推进 scrollback,冲刷真实历史)。busy 期间
-// 一律 5:整回合高度恒定,唯一一次增高发生在提交时刻,空带被用户消息
-// 落盘立即回填,不残留空白。
-#[tokio::test]
-async fn preview_cap_is_constant_during_streaming() {
-    let mut state = test_state();
-    assert_eq!(
-        super::preview_cap_for(&state),
-        super::view::MAX_PREVIEW_ROWS,
-        "空闲时空隙保持最小"
-    );
-    // busy(含尚未收到任何增量的 Working 阶段)即取固定上限
-    state.status = Status::Thinking;
-    assert_eq!(
-        super::preview_cap_for(&state),
-        super::view::STREAM_PREVIEW_ROWS,
-        "busy 一开始就预增高,空带被用户消息回填"
-    );
-    state.stream_text = "hello".into();
-    assert_eq!(
-        super::preview_cap_for(&state),
-        super::view::STREAM_PREVIEW_ROWS,
-        "流式开始即取固定上限"
-    );
-    state.stream_text = (1..=500)
-        .map(|i| format!("line{i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(
-        super::preview_cap_for(&state),
-        super::view::STREAM_PREVIEW_ROWS,
-        "长文本流式时上限恒定,不随内容增长"
-    );
-    state.stream_text.clear();
-    state.pending_thinking = Some("思考中".into());
-    assert_eq!(
-        super::preview_cap_for(&state),
-        super::view::STREAM_PREVIEW_ROWS,
-        "思考中同样取固定上限"
-    );
-    state.pending_thinking = None;
-    state.status = Status::Tool("bash".into());
-    assert_eq!(
-        super::preview_cap_for(&state),
-        super::view::STREAM_PREVIEW_ROWS,
-        "工具执行期间恒定"
-    );
-}
+// 全帧差分渲染后预览上限恒为常量(view.rs STREAM_PREVIEW_ROWS,行为覆盖
+// 见 view.rs::tail_height_follows_content),不再有 busy/idle 双轨与预留守恒。
 
 // ---- 斜杠补全弹窗(Codex 交互) ----
 

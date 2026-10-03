@@ -5,21 +5,16 @@
 use serde::{Deserialize, Serialize};
 
 /// 会话模式(用户可见的安全档位)。新会话默认 Plan。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionMode {
     /// 只读 + 沙箱 + 列计划(默认)
+    #[default]
     Plan,
     /// 全工具,变更前确认
     Confirm,
     /// 全自动,无审批无沙箱
     FullAccess,
-}
-
-impl Default for SessionMode {
-    fn default() -> Self {
-        SessionMode::Plan
-    }
 }
 
 impl SessionMode {

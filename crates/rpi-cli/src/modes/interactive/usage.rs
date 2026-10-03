@@ -112,10 +112,11 @@ mod tests {
         let theme = rpi_tui::Theme::dark_ansi();
         let line = usage_line(&usage(), &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        // 与 footer token 段同格式:↑ 完整 prompt + 命中/未命中明细 +
-        // 命中率 + $cost + reasoning
-        // ↑ = 100 + 5 + 10 = 115;hit = cache_read 5;miss = 100 + 10 = 110
-        assert!(text.contains("↑ 115 (hit 5 / miss 110)"), "{text}");
+        // 与 footer token 段同格式:↑ 完整 prompt + 缓存明细 U/R 与命中率 +
+        // $cost + reasoning
+        // ↑ = 100 + 5 + 10 = 115;U = 100 + 10 = 110;R = cache_read 5;
+        // 命中率 = 5/115 ≈ 4%
+        assert!(text.contains("↑ 115 (U 110 / R 5 · 4%)"), "{text}");
         assert!(text.contains("↓ 20"), "{text}");
         assert!(text.contains("reasoning 8"), "{text}");
         assert!(text.contains("$0.0012"), "{text}");

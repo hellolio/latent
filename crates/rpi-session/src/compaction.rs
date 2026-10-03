@@ -40,7 +40,7 @@ impl Default for CompactionSettings {
 /// reserve_tokens → 实际预留 token 数:`v < 1.0` 按 `context_window` 的百分比
 /// 解析(0.1 = 10%),`v >= 1.0` 按绝对 token 数;非正数归零(不预留)。
 pub fn reserve_tokens_for_window(reserve_tokens: f64, context_window: u64) -> u64 {
-    if !(reserve_tokens > 0.0) {
+    if reserve_tokens.is_nan() || reserve_tokens <= 0.0 {
         return 0;
     }
     if reserve_tokens < 1.0 {

@@ -4,6 +4,7 @@
 //! - **配对**:正常 / abort / length 截断三条路径下 toolCall 与 toolResult 一一配对;
 //! - **I4**:并行时事件完成序 vs 消息源序双保序;
 //! - **I5**:length 截断消息的全部 tool call 被拒执行(含防振荡计数)。
+//!
 //! (原 I6 声明重放不变量随 declare 机制移除:工具 schema 每次请求经
 //! `Context.tools` 动态下发,不再经转录声明。)
 

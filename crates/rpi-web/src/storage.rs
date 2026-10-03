@@ -494,7 +494,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(temp.join(format!("{}.json", ids[2])).exists());
-        assert!(temp.join(format!("{}.json", ids[0])).exists() == false);
+        assert!(!temp.join(format!("{}.json", ids[0])).exists());
         assert!(get_result(&ids[2]).is_some());
 
         let _ = std::fs::remove_dir_all(temp);

@@ -4,19 +4,19 @@
 //!
 //! 本 crate 提供四样东西(方针 §2 三规则):
 //!
-//! 1. **工厂**:`TuiApp::open()` 出厂 Inline 视口终端应用;
+//! 1. **工厂**:`TuiApp::open()` 出厂全帧差分终端屏幕;
 //! 2. **语义主题**:`Theme`(角色 → 颜色,真彩色/ANSI16 双调色板);
 //! 3. **组件**:多行 `Editor`、`Markdown`(syntect 高亮)、`SelectList`、
 //!    `tool_card`/`header`/`footer`、`loader`;
 //! 4. **类型**:`Key`(crossterm 事件归一)、`text`(span 感知折行工具)。
 //!
-//! 渲染模型(pi TuiMainScreen 对应):**Inline 视口** —— 定稿内容经
-//! `commit_lines` 插入视口上方、滚入终端原生 scrollback(保留回滚);
-//! 屏幕底部固定视口承载编辑器/状态栏/选择列表,每帧重绘。视口高度随内容
-//! 动态调整(`set_viewport_height`),`redraw_full` 支持全文重绘(ctrl+o)。
+//! 渲染模型(pi TuiMainScreen 对应):**全帧行级差分** —— 已定稿行缓存
+//! ANSI 序列化结果只追加,活动尾部每帧重建;两段拼成全帧与上一帧逐行
+//! 差分,只重绘变化区间,追加行越过屏幕底时自然滚入原生 scrollback
+//! (`redraw_all` 支持全文重绘,用于 ctrl+o/主题/尺寸变化)。
 //!
 //! 测试策略:全部组件为纯函数(状态 → `Vec<Line>`),直接单测;终端 I/O
-//! 集中在 `app.rs`,用 TestBackend 验证结构性不变量。
+//! 集中在 `app.rs`,用内存输出汇 + ANSI 屏幕模拟器验证结构性不变量。
 
 pub mod app;
 pub mod command_popup;
@@ -33,7 +33,7 @@ pub mod theme;
 pub mod tool_card;
 pub mod width;
 
-pub use app::{reader_checkpoint, TuiApp};
+pub use app::{SharedBuf, SharedSize, TuiApp};
 pub use command_popup::{CommandEntry, CommandPopup};
 pub use editor::{Editor, EditorView};
 pub use footer::{ctx_segment, FooterData};

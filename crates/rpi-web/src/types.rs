@@ -1,5 +1,5 @@
-//! 搜索世界的纯类型(分析文档 §3):`SearchResult / SearchResponse / SearchOptions`
-//! + domain filter 归一化 + 结果数 clamp(上游 search-result-count-normalization.ts
+//! 搜索世界的纯类型(分析文档 §3):`SearchResult / SearchResponse / SearchOptions`、
+//! domain filter 归一化与结果数 clamp(上游 search-result-count-normalization.ts
 //! 与 domain-filter-normalization.ts,多个 provider 文件重复的实现收敛于此)。
 
 use serde::{Deserialize, Serialize};

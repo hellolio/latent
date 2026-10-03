@@ -19,14 +19,14 @@ pub fn dark() -> Theme {
         tool_pending: Color::Rgb(0xe0, 0xaf, 0x68),
         tool_success: Color::Rgb(0x9e, 0xce, 0x6a),
         tool_error: Color::Rgb(0xf7, 0x76, 0x8e),
-        // pi dark 主题同款 OKHSL 值经 Ottosson 参考实现换算:
-        // toolPendingBg okhsl(229 5% 24%)、toolSuccessBg okhsl(158 46% 25%)、
-        // toolErrorBg okhsl(19 54% 25%)、customMessageBg okhsl(295 42% 24%)
-        tool_pending_bg: Color::Rgb(0x34, 0x38, 0x3a),
-        tool_success_bg: Color::Rgb(0x25, 0x41, 0x31),
-        tool_error_bg: Color::Rgb(0x5b, 0x28, 0x2a),
+        // 卡片背景压到接近纯黑的低明度色调:只比终端底色稍带一点墨绿/
+        // 暗红/中性灰,避免大面积发灰发白刺眼
+        tool_pending_bg: Color::Rgb(0x1a, 0x1c, 0x1e),
+        tool_success_bg: Color::Rgb(0x12, 0x20, 0x16),
+        tool_error_bg: Color::Rgb(0x24, 0x11, 0x13),
         plan_bg: Color::Rgb(0x3a, 0x30, 0x55),
-        tool_output: Color::Rgb(0xa9, 0xb1, 0xd6),
+        // 工具输出与思考链同用中性灰(去掉调色板的蓝色偏向)
+        tool_output: Color::Rgb(0x8c, 0x8c, 0x8c),
         error: Color::Rgb(0xf7, 0x76, 0x8e),
         warning: Color::Rgb(0xe0, 0xaf, 0x68),
         success: Color::Rgb(0x9e, 0xce, 0x6a),
@@ -70,7 +70,8 @@ pub fn dark_ansi() -> Theme {
         tool_success_bg: Color::Green,
         tool_error_bg: Color::Red,
         plan_bg: Color::DarkGray,
-        tool_output: Color::Gray,
+        // 工具输出与思考链同色(16 色下调到 DarkGray 中性灰)
+        tool_output: Color::DarkGray,
         error: Color::Red,
         warning: Color::Yellow,
         success: Color::Green,
