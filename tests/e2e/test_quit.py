@@ -1,10 +1,10 @@
 """E2E 场景 5:空输入按 Ctrl+D 退出,进程应干净结束(退出码 0)。"""
 
-from harness import RpiApp
+from harness import LatentApp
 
 
 def test_ctrl_d_exits_cleanly():
-    app = RpiApp(turns=[])
+    app = LatentApp(turns=[])
     try:
         app.wait_ready()
         app.quit()

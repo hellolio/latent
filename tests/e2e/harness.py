@@ -1,11 +1,11 @@
-"""harness.py —— E2E 测试驱动:像人一样操作真实 rpi 二进制。
+"""harness.py —— E2E 测试驱动:像人一样操作真实 latent 二进制。
 
-`RpiApp` 把一次 E2E 测试的全部环境拼起来:
+`LatentApp` 把一次 E2E 测试的全部环境拼起来:
 
 1. 起本地 mock LLM 服务(`mock_llm.MockLLM`,场景脚本决定响应);
-2. 造隔离的临时 `HOME`(写入指向 mock 服务的 `.rpi/models.json` provider
-   override),不污染真实 `~/.rpi`;
-3. 用 pexpect 在真实 PTY 里启动 `rpi --mode interactive`,程序看到的就是
+2. 造隔离的临时 `HOME`(写入指向 mock 服务的 `.latent/models.json` provider
+   override),不污染真实 `~/.latent`;
+3. 用 pexpect 在真实 PTY 里启动 `latent --mode interactive`,程序看到的就是
    一个真终端;
 4. 提供 `send`(打字)、`expect_text`(等屏幕上出现内容)等人类视角操作,
    输出经 pyte 解析回"用户看到的屏幕文本"。
@@ -61,22 +61,22 @@ def load_scenario(name: str) -> list:
         return json.load(f)
 
 
-def _default_rpi_bin() -> str:
-    env = os.environ.get("RPI_BIN")
+def _default_latent_bin() -> str:
+    env = os.environ.get("LATENT_BIN")
     if env:
         return env
     repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(repo, "target", "debug", "rpi")
+    return os.path.join(repo, "target", "debug", "latent")
 
 
-class RpiApp:
-    """一次 E2E 会话:mock LLM + 隔离 HOME + PTY 里的真实 rpi。
+class LatentApp:
+    """一次 E2E 会话:mock LLM + 隔离 HOME + PTY 里的真实 latent。
 
     用法(测试内):
 
-        app = RpiApp(turns=[{"text": "回复内容"}])
+        app = LatentApp(turns=[{"text": "回复内容"}])
         try:
-            app.expect_text("rpi v")
+            app.expect_text("latent v")
             app.sendline("你好")
             app.expect_text("回复内容")
         finally:
@@ -90,7 +90,7 @@ class RpiApp:
         rows: int = 30,
         cols: int = 100,
         timeout: float = 15.0,
-        rpi_bin: str | None = None,
+        latent_bin: str | None = None,
         extra_args: list | None = None,
         home: str | None = None,
         session_mode: str | None = "full-access",
@@ -104,8 +104,8 @@ class RpiApp:
         # 显式传 home 时复用(--continue 跨进程测试);models.json 必须每次
         # 重写:mock 端口随机,旧文件指向的是上一个(已停止)的 mock
         self._owns_home = home is None
-        self.home = home or tempfile.mkdtemp(prefix="rpi_e2e_home_")
-        os.makedirs(os.path.join(self.home, ".rpi"), exist_ok=True)
+        self.home = home or tempfile.mkdtemp(prefix="latent_e2e_home_")
+        os.makedirs(os.path.join(self.home, ".latent"), exist_ok=True)
         models = {
             "providers": {
                 PROVIDER_ID: {
@@ -120,16 +120,16 @@ class RpiApp:
         }
         if show_builtin_models is not None:
             models["showBuiltinModels"] = show_builtin_models
-        with open(os.path.join(self.home, ".rpi", "models.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(self.home, ".latent", "models.json"), "w", encoding="utf-8") as f:
             json.dump(models, f, ensure_ascii=False)
 
         self._owns_workdir = workdir is None
-        self.workdir = workdir or tempfile.mkdtemp(prefix="rpi_e2e_cwd_")
+        self.workdir = workdir or tempfile.mkdtemp(prefix="latent_e2e_cwd_")
 
         env = os.environ.copy()
         env["HOME"] = self.home
         env["TERM"] = "xterm-256color"
-        bin_path = rpi_bin or _default_rpi_bin()
+        bin_path = latent_bin or _default_latent_bin()
         args = ["--mode", "interactive", "--provider", PROVIDER_ID]
         # 既有场景按旧全自动语义编写:默认 --session-mode full-access;
         # 计划模式/审批流场景传 session_mode=None(走默认 Plan)或显式指定
@@ -274,8 +274,8 @@ class RpiApp:
 
     def wait_ready(self, timeout: float | None = None) -> None:
         """等应用就绪:footer 显示模型名、编辑器占位文本出现。之后输入才被接受。"""
-        self.expect_text(r"rpi v\d+\.\d+", timeout)
-        self.expect_text("Ask rpi to do anything", timeout)
+        self.expect_text(r"latent v\d+\.\d+", timeout)
+        self.expect_text("Ask latent to do anything", timeout)
 
     def send_key(self, name: str) -> None:
         mapping = {
@@ -296,7 +296,7 @@ class RpiApp:
     # -- mock 侧断言 ------------------------------------------------------------
 
     def request_bodies(self) -> list:
-        """rpi 发给 LLM 的全部请求体(按时间序,mock 服务记录)。"""
+        """latent 发给 LLM 的全部请求体(按时间序,mock 服务记录)。"""
         return self.mock.request_bodies()
 
     def wait_for_requests(self, count: int, timeout: float | None = None) -> list:

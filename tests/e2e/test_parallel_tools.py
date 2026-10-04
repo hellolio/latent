@@ -3,18 +3,18 @@
 import json
 import os
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_parallel_tool_calls_roundtrip_in_order():
-    workdir = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"rpi_e2e_par_{os.getpid()}")
+    workdir = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"latent_e2e_par_{os.getpid()}")
     os.makedirs(workdir, exist_ok=True)
     with open(os.path.join(workdir, "a.txt"), "w") as f:
         f.write("content-of-a")
     with open(os.path.join(workdir, "b.txt"), "w") as f:
         f.write("content-of-b")
     try:
-        app = RpiApp(turns=load_scenario("parallel_tools"), workdir=workdir)
+        app = LatentApp(turns=load_scenario("parallel_tools"), workdir=workdir)
         try:
             app.wait_ready()
             app.sendline("同时读两个文件")

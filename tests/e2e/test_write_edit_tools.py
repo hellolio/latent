@@ -3,14 +3,14 @@
 import json
 import os
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_write_then_edit_roundtrip():
-    workdir = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"rpi_e2e_we_{os.getpid()}")
+    workdir = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"latent_e2e_we_{os.getpid()}")
     os.makedirs(workdir, exist_ok=True)
     try:
-        app = RpiApp(turns=load_scenario("write_edit"), workdir=workdir)
+        app = LatentApp(turns=load_scenario("write_edit"), workdir=workdir)
         try:
             app.wait_ready()
             app.sendline("写一个文件再编辑它")

@@ -1,0 +1,27 @@
+[package]
+name = "latent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 依赖只有 latent-ai/latent-agent:latent-session/latent-tools/latent-tui 是可选组件,
+# 由装配方(latent-cli)经 trait 注入 —— 移除任一可选 crate,本 crate 照常编译
+# (可拆卸判据)。
+[dependencies]
+latent-ai.workspace = true
+latent-agent.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+chrono.workspace = true
+rmcp.workspace = true
+
+# 仅测试:子会话落盘用 latent-session(可拆卸判据只约束 lib 依赖图)
+[dev-dependencies]
+latent-session.workspace = true

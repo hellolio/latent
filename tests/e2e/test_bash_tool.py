@@ -1,10 +1,10 @@
 """T16:bash 工具——stdout 上屏、退出码;超长输出截断显示行范围提示。"""
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_bash_output_and_truncation_hint():
-    app = RpiApp(turns=load_scenario("bash_tool"))
+    app = LatentApp(turns=load_scenario("bash_tool"))
     try:
         app.wait_ready()
         app.sendline("跑个命令")
@@ -18,7 +18,7 @@ def test_bash_output_and_truncation_hint():
 
 def test_bash_long_output_truncated_with_range_hint():
     import json
-    app = RpiApp(turns=load_scenario("bash_truncate"), timeout=20.0)
+    app = LatentApp(turns=load_scenario("bash_truncate"), timeout=20.0)
     try:
         app.wait_ready()
         app.sendline("输出 5000 行")

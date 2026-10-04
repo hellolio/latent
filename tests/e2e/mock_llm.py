@@ -1,8 +1,8 @@
 """mock_llm.py —— 本地 mock LLM 服务(E2E 测试用)。
 
 伪装成 anthropic-messages 端点(POST /v1/messages + SSE),按场景脚本逐 turn
-返回预设响应,让真实 rpi 二进制的 E2E 测试完全确定、不依赖网络与 API key。
-响应格式对齐 crates/rpi-ai/tests/adapters.rs 里的本地 SSE 服务器。
+返回预设响应,让真实 latent 二进制的 E2E 测试完全确定、不依赖网络与 API key。
+响应格式对齐 crates/latent-ai/tests/adapters.rs 里的本地 SSE 服务器。
 
 场景脚本是一个 turn 列表(每次收到 POST 消费一个,按顺序):
 
@@ -13,7 +13,7 @@
     ]
 
 服务同时把收到的每个请求体(JSON)记录在 `.requests` 里,测试可以反向断言
-rpi 发出的内容(如第二轮是否带上了工具结果)。
+latent 发出的内容(如第二轮是否带上了工具结果)。
 
 只依赖标准库;`threading` 实现并发,`delay_ms` 直接 sleep 即可。
 """
@@ -197,6 +197,6 @@ class MockLLM:
             return turn
 
     def request_bodies(self) -> list[dict]:
-        """rpi 发来的全部请求体(按时间序)。"""
+        """latent 发来的全部请求体(按时间序)。"""
         with self._lock:
             return [r["body"] for r in self.requests]

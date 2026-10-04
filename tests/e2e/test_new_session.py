@@ -7,20 +7,20 @@ import shutil
 import tempfile
 import time
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def _session_files(home: str) -> list[str]:
     # 新版式:会话文件在 `sessions/<项目目录>/` 下
-    return glob.glob(os.path.join(home, ".rpi", "sessions", "*", "*.jsonl"))
+    return glob.glob(os.path.join(home, ".latent", "sessions", "*", "*.jsonl"))
 
 
 def test_new_session_clears_context_and_keeps_old_file():
     """/new 后新请求不携带旧上下文;旧 session 文件不被修改。"""
-    home = tempfile.mkdtemp(prefix="rpi_e2e_new_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_new_cwd_")
+    home = tempfile.mkdtemp(prefix="latent_e2e_new_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_new_cwd_")
     try:
-        app = RpiApp(turns=load_scenario("new_session"), home=home, workdir=workdir)
+        app = LatentApp(turns=load_scenario("new_session"), home=home, workdir=workdir)
         try:
             app.wait_ready()
             app.sendline("旧会话问题")
@@ -57,10 +57,10 @@ def test_new_session_clears_context_and_keeps_old_file():
 
 def test_continue_after_new_resumes_latest_session():
     """/new 后退出,--continue 按 mtime 续到新会话(上下文不含旧会话)。"""
-    home = tempfile.mkdtemp(prefix="rpi_e2e_new_cont_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_new_cont_cwd_")
+    home = tempfile.mkdtemp(prefix="latent_e2e_new_cont_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_new_cont_cwd_")
     try:
-        first = RpiApp(
+        first = LatentApp(
             turns=load_scenario("new_session"), home=home, workdir=workdir
         )
         try:
@@ -76,7 +76,7 @@ def test_continue_after_new_resumes_latest_session():
         finally:
             first.close()
 
-        second = RpiApp(
+        second = LatentApp(
             turns=load_scenario("new_session_second"),
             home=home,
             workdir=workdir,

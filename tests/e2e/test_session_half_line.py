@@ -9,15 +9,15 @@ import os
 import shutil
 import tempfile
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_half_line_in_session_file_is_isolated():
-    home = tempfile.mkdtemp(prefix="rpi_e2e_half_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_half_cwd_")
+    home = tempfile.mkdtemp(prefix="latent_e2e_half_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_half_cwd_")
     try:
         # 第一段正常会话
-        first = RpiApp(turns=load_scenario("continue_first"), home=home, workdir=workdir)
+        first = LatentApp(turns=load_scenario("continue_first"), home=home, workdir=workdir)
         try:
             first.wait_ready()
             first.sendline("你好")
@@ -27,14 +27,14 @@ def test_half_line_in_session_file_is_isolated():
             first.close()
 
         # 模拟崩溃:留下末尾无换行的半行(会话文件在 sessions/<项目目录>/ 下)
-        sessions = glob.glob(os.path.join(home, ".rpi", "sessions", "*", "*.jsonl"))
+        sessions = glob.glob(os.path.join(home, ".latent", "sessions", "*", "*.jsonl"))
         assert sessions, "会话文件应已落盘"
         session_file = sessions[0]
         with open(session_file, "ab") as f:
             f.write(b'{"type":"mess')
 
         # --continue 恢复:半行按损坏行跳过,历史可见,可继续对话
-        second = RpiApp(
+        second = LatentApp(
             turns=load_scenario("continue_second"),
             home=home,
             workdir=workdir,

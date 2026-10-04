@@ -1,18 +1,18 @@
-"""E2E 场景 3:工具往返——LLM 请求调用工具,rpi 执行后把结果发回第二轮。
+"""E2E 场景 3:工具往返——LLM 请求调用工具,latent 执行后把结果发回第二轮。
 
 这是 agent 软件最核心的闭环:mock 第一轮返回 tool_calls(read note.txt),
-rpi 在本地执行工具,第二轮请求里必须带上工具结果,最终回复上屏。
+latent 在本地执行工具,第二轮请求里必须带上工具结果,最终回复上屏。
 """
 
 import os
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
-FILE_MARK = "HELLO FROM RPI E2E"
+FILE_MARK = "HELLO FROM LATENT E2E"
 
 
 def test_tool_roundtrip():
-    app = RpiApp(turns=load_scenario("tool_roundtrip"))
+    app = LatentApp(turns=load_scenario("tool_roundtrip"))
     try:
         # 工作目录里放一个待读取的文件
         with open(os.path.join(app.workdir, "note.txt"), "w", encoding="utf-8") as f:

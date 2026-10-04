@@ -1,0 +1,28 @@
+[package]
+name = "latent-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "latent"
+path = "src/main.rs"
+
+[dependencies]
+latent-ai.workspace = true
+latent-agent.workspace = true
+latent-core.workspace = true
+latent-session.workspace = true
+latent-tools.workspace = true
+latent-web.workspace = true
+latent-tui.workspace = true
+latent-sandbox.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+tokio-util.workspace = true
+crossterm = "0.29.0"
+ratatui = "0.30.2"

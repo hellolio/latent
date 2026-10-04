@@ -2,11 +2,11 @@
 
 import time
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_ctrl_o_expands_and_collapses_tool_card():
-    app = RpiApp(turns=load_scenario("ctrl_o"), timeout=20.0, rows=40, cols=110)
+    app = LatentApp(turns=load_scenario("ctrl_o"), timeout=20.0, rows=40, cols=110)
     try:
         app.wait_ready()
         app.sendline("输出 20 行")

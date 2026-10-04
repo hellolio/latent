@@ -1,6 +1,6 @@
 ## 修复计划（权限判定器审查问题，P0 + P1 + P2 全修）
 
-### 1. [P0] `$(( ))` 算术展开拦截命令替换 — `crates/rpi-core/src/permission/shell.rs:348-352`
+### 1. [P0] `$(( ))` 算术展开拦截命令替换 — `crates/latent-core/src/permission/shell.rs:348-352`
 把盲扫的 `skip_balanced_parens` 换成专用 `skip_arithmetic_body`：跟踪括号配对，遇到反引号或 `$` 后随 `(` 立即返回 false（保守拒绝，嵌套算术也一并拒绝）。挡住 `echo $(( $(rm -rf src) + 1 ))`。新增测试：含命令替换/反引号的算术展开拒绝，`echo $((1 + 2))`、`echo $(( (1+2)*3 ))` 放行。
 
 ### 2. [P1] `sed` 尾部选项守卫 — `shell.rs:691-699`
@@ -20,10 +20,10 @@
 ### 5. `cargo check` 移出只读表 — `shell.rs:45`
 删除该条目（会执行依赖的 build.rs 第三方代码，判定器是最后防线）；`cargo tree`/`cargo metadata` 不执行构建脚本、保留。表格处加注释说明取舍。`prefix_table_hits` 测试改为断言 `cargo check` 不再只读。
 
-### 6. [P2] `load_skill` 归类 ReadOnly — `crates/rpi-core/src/permission/types.rs:73-90`
+### 6. [P2] `load_skill` 归类 ReadOnly — `crates/latent-core/src/permission/types.rs:73-90`
 `classify_tool` 增加 `"load_skill" => ToolRiskClass::ReadOnly`（纯读 SKILL.md 进上下文），修复 Plan 模式被当 External 拒绝的 bug。补测试。
 
-### 7. [P2] engine.rs 清理 — `crates/rpi-core/src/permission/engine.rs:117-124, 181-194`
+### 7. [P2] engine.rs 清理 — `crates/latent-core/src/permission/engine.rs:117-124, 181-194`
 - 删除 117-119 的 ReadOnly 提前返回，让 match 的 ReadOnly 分支成为唯一路径（行为等价：`cache_hit` 对 ReadOnly 恒为 false）。
 - 把 `shell.rs` 的 `prefix_matches` 改为 `pub(crate)`，engine.rs 的 Confirm deny 规则匹配改用同一实现，消除重复。
 
@@ -34,5 +34,5 @@
 Plan/Shell 分支增加 `!self.sandbox_available` → Deny（与装配期降级矩阵一致：无沙箱平台 Plan 不执行 bash，即使模式切换后 bash 仍激活也兜得住判定器被绕过的场景）。补测试。同步更新 `apply_mode`（session.rs:529-533）与 `SandboxSpawnHook`（assembly.rs:605-607）注释。
 
 ### 验证
-- `cargo test -p rpi-core`（新增约 20 个断言）+ `cargo test --workspace`
+- `cargo test -p latent-core`（新增约 20 个断言）+ `cargo test --workspace`
 - `cargo clippy --workspace` 无新告警

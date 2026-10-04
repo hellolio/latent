@@ -1,15 +1,15 @@
 """E2E 场景 2:核心用户流程——输入问题、收到流式回复、回到可输入状态。
 
-同时反向断言 mock LLM 收到的请求(rpi 发出的 payload 带上了用户消息)。
+同时反向断言 mock LLM 收到的请求(latent 发出的 payload 带上了用户消息)。
 """
 
 import pytest
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_ask_and_reply_end_to_end():
-    app = RpiApp(turns=load_scenario("ask_and_reply"))
+    app = LatentApp(turns=load_scenario("ask_and_reply"))
     try:
         app.wait_ready()
         app.sendline("你好,请介绍一下你自己")

@@ -9,11 +9,11 @@ pi 同款行为:
 
 import time
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_fullscreen_scroll_and_pinned_editor():
-    app = RpiApp(turns=load_scenario("fullscreen"), timeout=20.0, rows=30, cols=100)
+    app = LatentApp(turns=load_scenario("fullscreen"), timeout=20.0, rows=30, cols=100)
     try:
         app.wait_ready()
         # 第一轮:40 行长回复,超出可视历史窗口(30 行屏)
@@ -24,12 +24,12 @@ def test_fullscreen_scroll_and_pinned_editor():
         assert "scroll-line-40" in visible, f"最新回复应可见:\n{visible[-800:]}"
         assert "scroll-line-01" not in visible, "早期行应滚出可视窗口"
         # 编辑器/footer 钉底:占位文本仍在屏
-        assert "Ask rpi to do anything" in visible
+        assert "Ask latent to do anything" in visible
 
         # PageUp:翻回上一页,早期行进入屏幕;输入区仍钉在底部
         app.send_key("pageup")
         app.expect_visible("scroll-line-05")
-        assert "Ask rpi to do anything" in app.visible_text()
+        assert "Ask latent to do anything" in app.visible_text()
 
         # End:回到最新内容(follow 恢复)
         app.send_key("end")
@@ -56,7 +56,7 @@ def test_fullscreen_scroll_and_pinned_editor():
 
 
 def test_fullscreen_toggle_to_regular_and_back():
-    app = RpiApp(turns=load_scenario("fullscreen"), timeout=20.0, rows=30, cols=100)
+    app = LatentApp(turns=load_scenario("fullscreen"), timeout=20.0, rows=30, cols=100)
     try:
         app.wait_ready()
         app.sendline("长回复")
@@ -81,6 +81,6 @@ def test_fullscreen_toggle_to_regular_and_back():
         app.send_key("enter")
         app.expect_text("TUI → fullscreen")
         time.sleep(1.0)
-        assert "Ask rpi to do anything" in app.visible_text(), "切回全屏后编辑器应钉底"
+        assert "Ask latent to do anything" in app.visible_text(), "切回全屏后编辑器应钉底"
     finally:
         app.close()

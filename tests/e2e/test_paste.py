@@ -3,7 +3,7 @@
 
 import time
 
-from harness import RpiApp
+from harness import LatentApp
 
 
 def _paste(app, text: str) -> None:
@@ -13,7 +13,7 @@ def _paste(app, text: str) -> None:
 
 
 def test_multiline_paste_does_not_submit():
-    app = RpiApp(turns=[{"text": "回复"}])
+    app = LatentApp(turns=[{"text": "回复"}])
     try:
         app.wait_ready()
         _paste(app, "first line\rsecond line")
@@ -32,7 +32,7 @@ def test_multiline_paste_does_not_submit():
 
 
 def test_large_paste_collapses_to_placeholder():
-    app = RpiApp(turns=[{"text": "回复"}])
+    app = LatentApp(turns=[{"text": "回复"}])
     try:
         app.wait_ready()
         content = "\r".join(f"line{i}" for i in range(1, 6))  # 5 行

@@ -1,0 +1,25 @@
+[package]
+name = "latent-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+latent-agent.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+regex.workspace = true
+ignore.workspace = true
+globset.workspace = true
+# T11 bash 进程组杀灭(11 计划:pin 精确版本;只进 latent-tools,可拆卸判据 =
+# 移除本 crate 后其余 crate 零警告编译)
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", features = ["signal"] }
+
+[features]
+default = ["process"]
+process = ["tokio/process"]

@@ -6,11 +6,11 @@
 import json
 import time
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_input_during_run_becomes_steering():
-    app = RpiApp(turns=load_scenario("steering"), timeout=20.0)
+    app = LatentApp(turns=load_scenario("steering"), timeout=20.0)
     try:
         app.wait_ready()
         app.sendline("第一个问题")

@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import time
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def _wait_screen(app, pattern: str, timeout: float = 10.0) -> None:
@@ -21,10 +21,10 @@ def _wait_screen(app, pattern: str, timeout: float = 10.0) -> None:
 
 
 def test_plan_mode_blocks_writes_then_approval_flow():
-    home = tempfile.mkdtemp(prefix="rpi_e2e_plan_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_plan_cwd_")
+    home = tempfile.mkdtemp(prefix="latent_e2e_plan_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_plan_cwd_")
     try:
-        app = RpiApp(
+        app = LatentApp(
             turns=load_scenario("plan_mode"),
             home=home,
             workdir=workdir,
@@ -86,7 +86,7 @@ def test_plan_mode_blocks_writes_then_approval_flow():
 
 def test_plan_mode_status_bar_marker():
     """状态栏显示当前模式标记;Plan 用黄色 plan 标记。"""
-    app = RpiApp(turns=load_scenario("plan_mode"), session_mode=None)
+    app = LatentApp(turns=load_scenario("plan_mode"), session_mode=None)
     try:
         app.wait_ready()
         text = app.visible_text()
@@ -97,7 +97,7 @@ def test_plan_mode_status_bar_marker():
 
 def test_shift_tab_cycles_session_mode():
     """Shift+Tab(终端 CSI Z)循环切换会话模式:plan → confirm → full-access。"""
-    app = RpiApp(turns=load_scenario("plan_mode"), session_mode=None)
+    app = LatentApp(turns=load_scenario("plan_mode"), session_mode=None)
     try:
         app.wait_ready()
         assert "plan" in app.visible_text()

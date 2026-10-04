@@ -2,14 +2,14 @@
 
 覆盖 models.json 顶层 `showBuiltinModels: false` 隐藏内置 provider 默认表、
 裸 /model 打开选择器的候选内容与末尾配置条目、Esc 关闭、$EDITOR 编辑后
-热重载(经 RPI_EDITOR 注入脚本,避免依赖真实编辑器)。
+热重载(经 LATENT_EDITOR 注入脚本,避免依赖真实编辑器)。
 """
 
 import json
 import os
 import time
 
-from harness import RpiApp
+from harness import LatentApp
 
 # 内置 provider 默认表里的一个代表(anthropic 的默认模型),用于断言
 # showBuiltinModels 开关是否生效
@@ -17,7 +17,7 @@ BUILTIN_REPRESENTATIVE = "anthropic/claude-sonnet-4-5"
 
 
 def test_model_selector_shows_builtin_defaults_by_default():
-    app = RpiApp(turns=[])
+    app = LatentApp(turns=[])
     try:
         app.wait_ready()
         app.sendline("/model")
@@ -36,7 +36,7 @@ def test_model_selector_shows_builtin_defaults_by_default():
 
 
 def test_model_selector_hides_builtin_models_when_configured():
-    app = RpiApp(turns=[], show_builtin_models=False)
+    app = LatentApp(turns=[], show_builtin_models=False)
     try:
         app.wait_ready()
         app.sendline("/model")
@@ -59,7 +59,7 @@ def test_model_selector_hides_builtin_models_when_configured():
 
 
 def test_model_editor_entry_reloads_config(tmp_path):
-    """选中「编辑 models.json」→ RPI_EDITOR 脚本注入新 provider → 热重载
+    """选中「编辑 models.json」→ LATENT_EDITOR 脚本注入新 provider → 热重载
     → 选择器重开并显示新候选(挂起/恢复 + 热重载全链路)。"""
     script = tmp_path / "fake_editor.sh"
     script.write_text(
@@ -81,9 +81,9 @@ def test_model_editor_entry_reloads_config(tmp_path):
         encoding="utf-8",
     )
     script.chmod(0o755)
-    old_editor = os.environ.get("RPI_EDITOR")
-    os.environ["RPI_EDITOR"] = str(script)
-    app = RpiApp(turns=[])
+    old_editor = os.environ.get("LATENT_EDITOR")
+    os.environ["LATENT_EDITOR"] = str(script)
+    app = LatentApp(turns=[])
     try:
         app.wait_ready()
         app.sendline("/model")
@@ -100,7 +100,7 @@ def test_model_editor_entry_reloads_config(tmp_path):
         time.sleep(0.3)
     finally:
         if old_editor is None:
-            os.environ.pop("RPI_EDITOR", None)
+            os.environ.pop("LATENT_EDITOR", None)
         else:
-            os.environ["RPI_EDITOR"] = old_editor
+            os.environ["LATENT_EDITOR"] = old_editor
         app.close()

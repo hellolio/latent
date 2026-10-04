@@ -10,13 +10,13 @@
 
 ## 文档大纲（各章要点）
 
-1. **背景与目标** — 现状（rpi 无任何权限/审批/沙箱）、目标、非目标、Codex 语义对照。
+1. **背景与目标** — 现状（latent 无任何权限/审批/沙箱）、目标、非目标、Codex 语义对照。
 2. **总体模型** — 三个正交维度分析（会话模式 / 沙箱策略 / 审批策略），本设计将其收敛为用户可见的三模式；`SessionMode { Plan, Confirm, FullAccess }` 与底层 `SandboxPolicy`/审批引擎的映射表。
-3. **核心类型定义**（Rust 签名级）— `SessionMode`、`ApprovalDecision { Approve, ApproveForSession, Deny, Abort }`、`ApprovalRequest/Resolution`、`SandboxPolicy { ReadOnly, WorkspaceWrite{writable_roots, network_access}, DangerFullAccess }`、`ToolRiskClass { ReadOnly, FileWrite, Shell, Network }` 等，标注所属 crate（权限引擎放 rpi-core，审批 hook 装饰器放 rpi-cli 装配层，类型下沉位置论证）。
+3. **核心类型定义**（Rust 签名级）— `SessionMode`、`ApprovalDecision { Approve, ApproveForSession, Deny, Abort }`、`ApprovalRequest/Resolution`、`SandboxPolicy { ReadOnly, WorkspaceWrite{writable_roots, network_access}, DangerFullAccess }`、`ToolRiskClass { ReadOnly, FileWrite, Shell, Network }` 等，标注所属 crate（权限引擎放 latent-core，审批 hook 装饰器放 latent-cli 装配层，类型下沉位置论证）。
 4. **审批架构与数据流** — 以 `LoopHooks::before_tool_call`（hooks.rs:146，调用点 loop_.rs:1492）为唯一拦截点：async hook 内 await oneshot 应答实现"暂停等审批"；批准=返回 None，拒绝=复用 `ToolBlock`→`ToolOutcome::Blocked`；hooks 洋葱插入位置（assembly.rs:477，`ApprovalHooks` 包在 `ExtensionHooks` 内层）；事件流（`AgentEvent`/`AgentSessionEvent` 增加 ApprovalRequest/Resolved）；UI 反向通道三条路（interactive TUI 选择列表、rpc 照抄 `RpcCommand::ExtensionUiResponse` 的 id 路由、print/json 的 headless 降级语义=默认拒绝）。
 5. **三种模式语义详表** — 每种模式的：可用工具集、沙箱策略、哪些操作触发审批、系统提示词差异、状态栏显示、切换约束。
 6. **权限判定引擎** — 工具风险分类（read/grep/find/ls=只读；edit/write=FileWrite；bash=Shell 需命令级解析；MCP 工具默认最高风险）；shell 命令前缀解析与 allow/deny 规则（挂 `ShellSpawnHook`，bash.rs:24）；审批缓存键设计（命令指纹 / 文件路径，对标 Codex `ApprovalCacheKey`）；"本次会话允许"的内存缓存；写路径越界（workspace 外写入）判定。
-7. **Sandbox 设计（一次性完整实现）** — macOS Seatbelt（`sandbox-exec` + SBPL profile 生成，writable_roots 注入，绝对路径防 PATH 注入）；Linux（bwrap + seccomp，Landlock 备选）；平台选择与降级策略（无沙箱可用→审批升级，绝不静默裸跑）；writable_roots 自动含 cwd//tmp，`.git`/`.rpi` 永远只读；网络开关。Plan 模式 = ReadOnly 沙箱 + 只读工具集双保险。
+7. **Sandbox 设计（一次性完整实现）** — macOS Seatbelt（`sandbox-exec` + SBPL profile 生成，writable_roots 注入，绝对路径防 PATH 注入）；Linux（bwrap + seccomp，Landlock 备选）；平台选择与降级策略（无沙箱可用→审批升级，绝不静默裸跑）；writable_roots 自动含 cwd//tmp，`.git`/`.latent` 永远只读；网络开关。Plan 模式 = ReadOnly 沙箱 + 只读工具集双保险。
 8. **Plan 模式详解** — 新 session 默认进入；系统提示词 section（参考 Codex plan.md 模板：探索→澄清→规格三阶段，禁止变异操作，计划定稿输出 `<proposed_plan>` 块）；工具集收紧路径（`read_only_tools` 工厂 + `AgentSession::set_active_tools_by_name`，自动落 `ToolSetChange` entry）；计划块在 TUI 的特殊渲染；简化退出流程；与 TODO/计划工具的关系（对标 Codex update_plan 与 plan mode 的明确分离）。
 9. **持久化与恢复** — settings.json 新键（`sessionMode` 默认 `plan`、`sandbox`、审批规则）；会话 entry 增加 `ModeChange` 变体（或复用 `Entry::Custom`）；resume 时按 entry 恢复模式（对齐 seed_active_tools 恢复路径）；`/new` 新会话重置为 plan 模式。
 10. **CLI 与交互** — CLI 参数（`--mode plan|confirm|full-access`，默认 plan）；`/mode` slash 命令（按 slash.rs 四步扩展法）；Shift+Tab 循环切换；TUI 审批弹窗（选项：批准一次 / 本次会话批准 / 拒绝 / 中止，Esc=拒绝）；模式指示。

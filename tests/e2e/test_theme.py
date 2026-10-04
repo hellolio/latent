@@ -4,11 +4,11 @@
 交互不回归;配色本身由 Rust 单测覆盖)。
 """
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_theme_command_lists_available_themes():
-    app = RpiApp(turns=[])
+    app = LatentApp(turns=[])
     try:
         app.wait_ready()
         app.sendline("/theme")
@@ -26,7 +26,7 @@ def test_theme_command_lists_available_themes():
 
 
 def test_theme_switch_by_name_and_ui_keeps_working():
-    app = RpiApp(turns=load_scenario("ask_and_reply"))
+    app = LatentApp(turns=load_scenario("ask_and_reply"))
     try:
         app.wait_ready()
         app.sendline("/theme nord")
@@ -44,12 +44,12 @@ def test_theme_switch_by_name_and_ui_keeps_working():
 
 
 def test_theme_flag_selects_startup_theme():
-    app = RpiApp(turns=[], extra_args=["--theme", "nord"])
+    app = LatentApp(turns=[], extra_args=["--theme", "nord"])
     try:
         app.wait_ready()
         # 启动即应用主题:无报错、UI 正常
         app.expect_absent("未知主题")
-        app.expect_text("Ask rpi to do anything")
+        app.expect_text("Ask latent to do anything")
         app.sendline("/theme")
         app.expect_text("选择主题")
     finally:

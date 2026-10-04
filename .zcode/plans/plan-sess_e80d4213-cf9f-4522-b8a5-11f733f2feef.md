@@ -5,7 +5,7 @@
 
 ### 改动
 
-**1. 调整每帧渲染顺序(核心,`crates/rpi-cli/src/modes/interactive/mod.rs`)**
+**1. 调整每帧渲染顺序(核心,`crates/latent-cli/src/modes/interactive/mod.rs`)**
 
 把 `draw()` 拆为"构建帧 + 同步高度"与"绘制"两步,flush 挪到中间:
 
@@ -30,9 +30,9 @@ render_tick(state, app, partial):
 
 **3. 测试**
 
-- `rpi-tui/src/app.rs` 加 L2 测试(TestBackend):提交内容 → 绘制视口 → 收缩视口 → 再提交内容,断言收缩空出的行被新内容回填(验证第 1 条依赖的 insert_before 机制);
-- `rpi-cli` 更新 `preview_cap_is_constant_during_streaming`:思考中断言为 5;
-- 回归:`cargo test -p rpi-tui -p rpi-cli` 全绿 + `cargo build --workspace` 零警告。
+- `latent-tui/src/app.rs` 加 L2 测试(TestBackend):提交内容 → 绘制视口 → 收缩视口 → 再提交内容,断言收缩空出的行被新内容回填(验证第 1 条依赖的 insert_before 机制);
+- `latent-cli` 更新 `preview_cap_is_constant_during_streaming`:思考中断言为 5;
+- 回归:`cargo test -p latent-tui -p latent-cli` 全绿 + `cargo build --workspace` 零警告。
 
 ### 预期效果
 回合结束时模型输出/用量框紧贴输入区上方,无需 ctrl+o;流式期间空带从 ~13 行降到 3~5 行。

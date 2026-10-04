@@ -1,4 +1,4 @@
-"""会话恢复与切换:rpi -r 续聊最近会话、rpi -l 列出历史会话、
+"""会话恢复与切换:latent -r 续聊最近会话、latent -l 列出历史会话、
 TUI 内 /session 无参数弹出历史会话列表并切换。
 
 断言面向"人读到的文本"+ mock 侧请求体(上下文真值)。
@@ -9,15 +9,15 @@ import shutil
 import subprocess
 import tempfile
 
-from harness import RpiApp, _default_rpi_bin, load_scenario
+from harness import LatentApp, _default_latent_bin, load_scenario
 
 
 def test_r_flag_reopens_last_session():
-    """退出后 rpi -r 重启:回放上次问答,续聊携带上次上下文。"""
-    home = tempfile.mkdtemp(prefix="rpi_e2e_resume_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_resume_cwd_")
+    """退出后 latent -r 重启:回放上次问答,续聊携带上次上下文。"""
+    home = tempfile.mkdtemp(prefix="latent_e2e_resume_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_resume_cwd_")
     try:
-        first = RpiApp(turns=load_scenario("new_session"), home=home, workdir=workdir)
+        first = LatentApp(turns=load_scenario("new_session"), home=home, workdir=workdir)
         try:
             first.wait_ready()
             first.sendline("旧会话问题")
@@ -27,7 +27,7 @@ def test_r_flag_reopens_last_session():
         finally:
             first.close()
 
-        second = RpiApp(
+        second = LatentApp(
             turns=load_scenario("new_session_second"),
             home=home,
             workdir=workdir,
@@ -52,11 +52,11 @@ def test_r_flag_reopens_last_session():
 
 
 def test_list_flag_prints_sessions_with_preview():
-    """rpi -l:stdout 打印当前项目的历史会话(序号/时间/预览/路径)。"""
-    home = tempfile.mkdtemp(prefix="rpi_e2e_list_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_list_cwd_")
+    """latent -l:stdout 打印当前项目的历史会话(序号/时间/预览/路径)。"""
+    home = tempfile.mkdtemp(prefix="latent_e2e_list_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_list_cwd_")
     try:
-        app = RpiApp(turns=load_scenario("new_session"), home=home, workdir=workdir)
+        app = LatentApp(turns=load_scenario("new_session"), home=home, workdir=workdir)
         try:
             app.wait_ready()
             app.sendline("旧会话问题")
@@ -69,7 +69,7 @@ def test_list_flag_prints_sessions_with_preview():
         env = os.environ.copy()
         env["HOME"] = home
         proc = subprocess.run(
-            [_default_rpi_bin(), "-l"],
+            [_default_latent_bin(), "-l"],
             cwd=workdir,
             env=env,
             capture_output=True,
@@ -87,10 +87,10 @@ def test_list_flag_prints_sessions_with_preview():
 
 def test_session_slash_switches_to_previous_session():
     """/new 后 /session 弹出列表,选中旧会话:回放旧转录,上下文切回旧会话。"""
-    home = tempfile.mkdtemp(prefix="rpi_e2e_switch_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_switch_cwd_")
+    home = tempfile.mkdtemp(prefix="latent_e2e_switch_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_switch_cwd_")
     try:
-        app = RpiApp(turns=load_scenario("new_session"), home=home, workdir=workdir)
+        app = LatentApp(turns=load_scenario("new_session"), home=home, workdir=workdir)
         try:
             app.wait_ready()
             app.sendline("旧会话问题")
@@ -124,10 +124,10 @@ def test_session_slash_switches_to_previous_session():
 
 def test_partial_slash_input_opens_variant_page():
     """/sess 直接回车:补全命令名并展开变体选择页;再次回车执行选中变体。"""
-    home = tempfile.mkdtemp(prefix="rpi_e2e_variant_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_variant_cwd_")
+    home = tempfile.mkdtemp(prefix="latent_e2e_variant_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_variant_cwd_")
     try:
-        app = RpiApp(turns=[], home=home, workdir=workdir)
+        app = LatentApp(turns=[], home=home, workdir=workdir)
         try:
             app.wait_ready()
             app.sendline("/sess")

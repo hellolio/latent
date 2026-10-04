@@ -7,7 +7,7 @@
 
 import pytest
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def last_user_text(body: dict) -> str:
@@ -22,7 +22,7 @@ def last_user_text(body: dict) -> str:
 
 
 def test_shift_enter_inserts_newline_without_submitting():
-    app = RpiApp(turns=load_scenario("shift_enter"))
+    app = LatentApp(turns=load_scenario("shift_enter"))
     try:
         app.wait_ready()
         # Shift+Enter = CSI 13;2u(协议终端上报形式)
@@ -43,7 +43,7 @@ def test_shift_enter_inserts_newline_without_submitting():
 
 
 def test_ctrl_j_inserts_newline_without_submitting():
-    app = RpiApp(turns=load_scenario("shift_enter"))
+    app = LatentApp(turns=load_scenario("shift_enter"))
     try:
         app.wait_ready()
         # Ctrl+J = \x0a(任意终端可用的换行兜底)

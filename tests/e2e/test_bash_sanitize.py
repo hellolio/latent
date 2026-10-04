@@ -8,7 +8,7 @@
 断言面向 mock LLM 服务端收到的真实请求体(12 文档 L3 反向断言)。
 """
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def _tool_result_texts(body) -> list[str]:
@@ -30,7 +30,7 @@ def _tool_result_texts(body) -> list[str]:
 
 
 def test_tool_result_raw_and_bang_output_sanitized():
-    app = RpiApp(turns=load_scenario("bash_sanitize"), timeout=20.0)
+    app = LatentApp(turns=load_scenario("bash_sanitize"), timeout=20.0)
     try:
         app.wait_ready()
         # 第 1 轮:模型调用 bash,输出带 ANSI 码(屏幕上 pyte 会把 ESC 当

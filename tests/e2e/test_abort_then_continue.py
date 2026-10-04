@@ -1,10 +1,10 @@
 """T12:Esc 中断后同一会话继续对话(test_abort 的补集)。"""
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_conversation_continues_after_abort():
-    app = RpiApp(turns=load_scenario("abort_continue"), timeout=20.0)
+    app = LatentApp(turns=load_scenario("abort_continue"), timeout=20.0)
     try:
         app.wait_ready()
         app.sendline("开始一个很慢的回复")

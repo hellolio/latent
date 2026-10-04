@@ -3,14 +3,14 @@
 import shutil
 import tempfile
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_continue_replays_history_and_extends_session():
-    home = tempfile.mkdtemp(prefix="rpi_e2e_cont_home_")
-    workdir = tempfile.mkdtemp(prefix="rpi_e2e_cont_cwd_")
+    home = tempfile.mkdtemp(prefix="latent_e2e_cont_home_")
+    workdir = tempfile.mkdtemp(prefix="latent_e2e_cont_cwd_")
     try:
-        first = RpiApp(
+        first = LatentApp(
             turns=load_scenario("continue_first"), home=home, workdir=workdir
         )
         try:
@@ -22,7 +22,7 @@ def test_continue_replays_history_and_extends_session():
         finally:
             first.close()
 
-        second = RpiApp(
+        second = LatentApp(
             turns=load_scenario("continue_second"),
             home=home,
             workdir=workdir,

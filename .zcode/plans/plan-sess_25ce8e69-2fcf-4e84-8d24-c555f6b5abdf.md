@@ -4,7 +4,7 @@
 
 探索确认的根因:
 
-- **主题雷同(问题1)**:15 个外部主题全部走同一套映射规则(`crates/rpi-tui/src/theme/external.rs:17-48`)——`assistant_text = user_text = p.fg`、`thinking = p.muted`、dim/border/user_bg 全部用同一个 `blend()` 公式从 bg/fg 推导,只有 5 个主题有精选覆盖。所以换主题只是换了 fg/accent 色相,整体观感几乎一样。
+- **主题雷同(问题1)**:15 个外部主题全部走同一套映射规则(`crates/latent-tui/src/theme/external.rs:17-48`)——`assistant_text = user_text = p.fg`、`thinking = p.muted`、dim/border/user_bg 全部用同一个 `blend()` 公式从 bg/fg 推导,只有 5 个主题有精选覆盖。所以换主题只是换了 fg/accent 色相,整体观感几乎一样。
 - **颜色种类少(问题6)**:footer 全部用 `dim` 一色(`footer.rs:36-91`)、弹窗边框用 `dim`、提示行用 `dim`——多个区域共用同一角色。
 - **输入框闪烁(问题4)**:流式期间预览区行数在 1~8 行间变化(thinking 3行 → 正文涨到8行 → 工具参数1行),每次高度变化走 `set_viewport_height`(`app.rs:223-238`)→ `insert_before` + `Clear(FromCursorDown)` + Terminal 重建,整个视口(含输入框)被清屏重画。输入框内容本身没变,是高度抖动把它一起刷掉了。
 - **两次回车(问题3)**:`handlers.rs:64-70`,弹窗可见时 Enter 只做"补全文本进输入框",不是执行。
@@ -13,7 +13,7 @@
 
 ## 改动方案
 
-### 1. Footer 重构(问题2)— `crates/rpi-tui/src/footer.rs` + `view.rs`
+### 1. Footer 重构(问题2)— `crates/latent-tui/src/footer.rs` + `view.rs`
 
 - `FooterData` 新增 `cache_read: u64`、`cache_write: u64`(来自 `state.usage.total`,view.rs:282-295 填充处同步)。
 - `footer::lines()` 改为 **3 行**:

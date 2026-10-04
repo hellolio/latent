@@ -1,10 +1,10 @@
 """T13:provider 错误上屏——HTTP 500 自动重试后错误可见,会话仍可用。"""
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_provider_error_displayed_and_session_usable():
-    app = RpiApp(turns=load_scenario("provider_error"), timeout=40.0)
+    app = LatentApp(turns=load_scenario("provider_error"), timeout=40.0)
     try:
         app.wait_ready()
         app.sendline("触发一个错误")

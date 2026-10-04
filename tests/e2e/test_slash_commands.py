@@ -7,11 +7,11 @@ import time
 
 import pexpect
 
-from harness import RpiApp
+from harness import LatentApp
 
 
 def test_local_slash_commands_without_llm_requests():
-    app = RpiApp(turns=[])
+    app = LatentApp(turns=[])
     try:
         app.wait_ready()
         # /help:命令表(markdown 渲染:标题 + 列表,行内代码形式 /命令)
@@ -39,7 +39,7 @@ def test_local_slash_commands_without_llm_requests():
 
 
 def test_slash_quit_exits_cleanly():
-    app = RpiApp(turns=[])
+    app = LatentApp(turns=[])
     try:
         app.wait_ready()
         app.sendline("/quit")

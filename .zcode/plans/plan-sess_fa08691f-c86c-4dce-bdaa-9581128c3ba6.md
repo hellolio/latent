@@ -2,7 +2,7 @@
 
 ## 背景与目标
 
-现状：`rpi-tui/src/app.rs` 用 ratatui `Viewport::Inline`——定稿内容经 `insert_before` 滚入 scrollback，底部固定高度视口每帧重绘。这带来"预览高度守恒律"（busy 必须预留 `STREAM_PREVIEW_ROWS=1` 行、收缩前必须落盘、`set_viewport_height` 要插空行+重建 Terminal），导致：流式预览只有 1 行、输入框与输出间距固定为 3 行且不可调、改高/全文重绘走 hack 路径。
+现状：`latent-tui/src/app.rs` 用 ratatui `Viewport::Inline`——定稿内容经 `insert_before` 滚入 scrollback，底部固定高度视口每帧重绘。这带来"预览高度守恒律"（busy 必须预留 `STREAM_PREVIEW_ROWS=1` 行、收缩前必须落盘、`set_viewport_height` 要插空行+重建 Terminal），导致：流式预览只有 1 行、输入框与输出间距固定为 3 行且不可调、改高/全文重绘走 hack 路径。
 
 上游 pi（`packages/tui/src/tui-main-screen.ts`）的做法：**全帧行级差分**——维护整份文档的行数组，与上一帧渲染结果逐行比较，只重绘变化区间；追加行靠打印 `\r\n` 让终端自然滚入原生 scrollback；只有改到已滚出屏幕的历史行、宽度变化等才全量重绘。无任何高度预留约束。
 
@@ -24,7 +24,7 @@
 - 工具命令本身（`⏺ name args` 与 `! cmd`）永远完整折行显示，续行对齐参数列，不受 4 行上限与 ctrl+o 影响；ctrl+o 只作用于输出/思考折叠。
 - 工具输出定稿后仍按 `COLLAPSED_OUTPUT_ROWS=4` 折叠 + 提示行（现状保持）。
 
-## 一、rpi-tui：重写 app.rs 为全帧差分屏幕
+## 一、latent-tui：重写 app.rs 为全帧差分屏幕
 
 保留 `TuiApp` 类型名，内部从 ratatui Terminal/Inline 视口改为 pi 式自管渲染（组件层仍用 ratatui 的 Line/Span/Style，只替换终端层）：
 
@@ -59,5 +59,5 @@
 ## 四、测试与验收
 
 - `cargo test --workspace` + `cargo clippy --workspace --all-targets` 零警告（更新 app.rs/view.rs/tool_card.rs/interactive/tests.rs 中受影响用例：`viewport_layout_shape`、`viewport_reserves_full_preview_height`、`tool_box_top_expands_args_multiline` 等）。
-- E2E（`cargo build --bin rpi && cd tests/e2e && pytest`）：`test_output_display.py` 补断言（输出与 `❯` 间恰两空行、流式预览 ≤4 行、长命令工具卡片多行全显），回归 `test_ctrl_o.py`、`test_output_display.py::test_cjk_committed_without_injected_spaces`、`test_plan_mode`、`test_slash_commands` 等全部场景。
-- AGENTS.md 同步更新 rpi-tui `app.rs`、interactive `view.rs` 两行架构描述（Inline 视口 → 全帧差分）。
+- E2E（`cargo build --bin latent && cd tests/e2e && pytest`）：`test_output_display.py` 补断言（输出与 `❯` 间恰两空行、流式预览 ≤4 行、长命令工具卡片多行全显），回归 `test_ctrl_o.py`、`test_output_display.py::test_cjk_committed_without_injected_spaces`、`test_plan_mode`、`test_slash_commands` 等全部场景。
+- AGENTS.md 同步更新 latent-tui `app.rs`、interactive `view.rs` 两行架构描述（Inline 视口 → 全帧差分）。

@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/rpi-ai",
-    "crates/rpi-agent",
-    "crates/rpi-session",
-    "crates/rpi-tools",
-    "crates/rpi-web",
-    "crates/rpi-core",
-    "crates/rpi-tui",
-    "crates/rpi-sandbox",
-    "crates/rpi-cli",
+    "crates/latent-ai",
+    "crates/latent-agent",
+    "crates/latent-session",
+    "crates/latent-tools",
+    "crates/latent-web",
+    "crates/latent-core",
+    "crates/latent-tui",
+    "crates/latent-sandbox",
+    "crates/latent-cli",
 ]
 
 [workspace.package]
@@ -19,14 +19,14 @@ license = "MIT"
 
 [workspace.dependencies]
 # 内部 crate —— 依赖方向见 AGENTS.md,禁止反向/同层依赖
-rpi-ai = { path = "crates/rpi-ai" }
-rpi-agent = { path = "crates/rpi-agent" }
-rpi-session = { path = "crates/rpi-session" }
-rpi-tools = { path = "crates/rpi-tools" }
-rpi-web = { path = "crates/rpi-web" }
-rpi-core = { path = "crates/rpi-core" }
-rpi-tui = { path = "crates/rpi-tui" }
-rpi-sandbox = { path = "crates/rpi-sandbox" }
+latent-ai = { path = "crates/latent-ai" }
+latent-agent = { path = "crates/latent-agent" }
+latent-session = { path = "crates/latent-session" }
+latent-tools = { path = "crates/latent-tools" }
+latent-web = { path = "crates/latent-web" }
+latent-core = { path = "crates/latent-core" }
+latent-tui = { path = "crates/latent-tui" }
+latent-sandbox = { path = "crates/latent-sandbox" }
 
 async-trait = "0.1"
 futures = "0.3"
@@ -37,30 +37,30 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v7", "serde"] }
 
-# rpi-ai 真实适配器所需(M1):HTTP/SSE、错误文案正则分类、流式事件构造
+# latent-ai 真实适配器所需(M1):HTTP/SSE、错误文案正则分类、流式事件构造
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 regex = "1"
 async-stream = "0.3"
 bytes = "1"
 
-# rpi-tools 所需(M4):gitignore 感知的目录遍历(grep/find 后端,05 文档)
+# latent-tools 所需(M4):gitignore 感知的目录遍历(grep/find 后端,05 文档)
 ignore = "0.4"
-# rpi-tools 检索忽略列表(search_ignore):settings `searchIgnore` 条目的 glob 编译,
+# latent-tools 检索忽略列表(search_ignore):settings `searchIgnore` 条目的 glob 编译,
 # 钉死精确版本(与 ignore 0.4 内部使用同族)
 globset = "=0.4.20"
 
-# rpi-core 系统提示词 <cwd> 节的当前本地时间(本地时区渲染;钉死精确版本)
+# latent-core 系统提示词 <cwd> 节的当前本地时间(本地时区渲染;钉死精确版本)
 chrono = "=0.4.42"
 
-# rpi-tui(macOS)本地修饰键状态查询:Shift+Enter 兜底用,只读
+# latent-tui(macOS)本地修饰键状态查询:Shift+Enter 兜底用,只读
 # CoreGraphics 事件源,无需辅助功能权限;键盘状态属供应链敏感面,钉死精确版本
 readkey = "=0.2.2"
 
-# rpi-core 扩展机制(M5,07 §8):进程外 MCP 扩展,rmcp 钉死精确版本
+# latent-core 扩展机制(M5,07 §8):进程外 MCP 扩展,rmcp 钉死精确版本
 # (07 §8.7 风险条款:新 spec 支持为 beta → pin 精确版本 + in-memory 测试锁行为)
 rmcp = { version = "=3.4.1", features = ["client", "server", "elicitation", "transport-async-rw", "transport-child-process"] }
 
-# rpi-tui 代码高亮扩展语法集:补齐 syntect 默认集缺失的 TypeScript/TSX/
+# latent-tui 代码高亮扩展语法集:补齐 syntect 默认集缺失的 TypeScript/TSX/
 # TOML/Kotlin/Zig 等(默认集是老版 Sublime 包,现代语言大面积退化为纯文本);
 # syntect-default-fancy 与 syntect 依赖的 default-fancy 后端保持一致,
 # 避免两套 regex 后端同时编入;钉死精确版本(嵌入语法定义随版本变化)

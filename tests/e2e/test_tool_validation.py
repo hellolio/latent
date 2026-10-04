@@ -2,11 +2,11 @@
 
 import json
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_invalid_tool_arguments_become_error_tool_result():
-    app = RpiApp(turns=load_scenario("tool_invalid_args"))
+    app = LatentApp(turns=load_scenario("tool_invalid_args"))
     try:
         app.wait_ready()
         # mock 发的 read 调用缺 required 参数 `path`

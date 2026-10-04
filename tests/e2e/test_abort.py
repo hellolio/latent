@@ -2,11 +2,11 @@
 
 import time
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_esc_aborts_streaming_reply():
-    app = RpiApp(turns=load_scenario("abort"), timeout=20.0)
+    app = LatentApp(turns=load_scenario("abort"), timeout=20.0)
     try:
         app.wait_ready()
         app.sendline("开始一个很慢的回复")

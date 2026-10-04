@@ -1,8 +1,8 @@
-# rpi
+# latent
 
 > 终端里的 AI 编码 agent：在命令行中与 AI 对话，让它读写文件、执行命令、搜索代码，直接帮你完成开发任务。
 
-rpi 以流式方式驱动大语言模型，并行执行工具调用，支持会话持久化、自动上下文压缩、MCP 扩展、子代理与技能系统，并提供权限与沙箱护栏。
+latent 以流式方式驱动大语言模型，并行执行工具调用，支持会话持久化、自动上下文压缩、MCP 扩展、子代理与技能系统，并提供权限与沙箱护栏。
 
 ---
 
@@ -14,7 +14,7 @@ rpi 以流式方式驱动大语言模型，并行执行工具调用，支持会�
 - **会话管理**：对话自动保存为 JSONL 会话文件，`--continue` 一键续聊；上下文接近模型窗口上限时自动压缩摘要，长任务不中断。
 - **权限模式**：Plan（只读规划）/ Confirm（写操作需确认）/ FullAccess（全自动）三种模式，配合可选的 macOS Seatbelt / Linux bubblewrap / Landlock 沙箱。
 - **扩展系统**：通过 MCP 协议接入外部扩展进程，扩展可以注册新工具、订阅事件、弹出交互 UI。
-- **子代理与技能**：`.rpi/agents/*.md` 定义子代理（独立系统提示词并行干活），`.rpi/skills/*/SKILL.md` 定义可按需加载的技能。
+- **子代理与技能**：`.latent/agents/*.md` 定义子代理（独立系统提示词并行干活），`.latent/skills/*/SKILL.md` 定义可按需加载的技能。
 - **网页搜索与抓取**：内置 `web_search` / `fetch_content` 等四个联网工具，支持 Brave / Exa / Tavily / SearXNG / DuckDuckGo 多引擎路由，配置任一 key 即可用，没 key 也有免费引擎兜底。
 - **四种运行模式**：interactive（TUI）/ print（单次执行）/ json（事件流）/ rpc（编辑器集成），共享同一业务核。
 
@@ -25,14 +25,14 @@ rpi 以流式方式驱动大语言模型，并行执行工具调用，支持会�
 ### 从源码构建（需要 Rust 1.85+）
 
 ```bash
-git clone https://github.com/hellolio/rpi.git
-cd rpi
-cargo build --release -p rpi-cli
-# 产物在 target/release/rpi，可复制到 PATH：
-cp target/release/rpi /usr/local/bin/
+git clone https://github.com/hellolio/latent.git
+cd latent
+cargo build --release -p latent-cli
+# 产物在 target/release/latent，可复制到 PATH：
+cp target/release/latent /usr/local/bin/
 ```
 
-> 没有 API key 也能先体验：`cargo run -p rpi-cli -- --mock "你好"` 会用内置 mock provider 走通全链路。
+> 没有 API key 也能先体验：`cargo run -p latent-cli -- --mock "你好"` 会用内置 mock provider 走通全链路。
 
 ---
 
@@ -43,19 +43,19 @@ cp target/release/rpi /usr/local/bin/
 export ANTHROPIC_API_KEY=sk-ant-…
 
 # 2. 直接提问（在交互终端会自动进入 TUI）
-rpi "列出当前目录结构"
+latent "列出当前目录结构"
 
 # 3. 指定 provider 和模型
-rpi --provider anthropic --model claude-sonnet-4-5 "修复这个 bug"
+latent --provider anthropic --model claude-sonnet-4-5 "修复这个 bug"
 
 # 4. 交互模式
-rpi
+latent
 
 # 5. 续聊上次会话
-rpi --continue
+latent --continue
 ```
 
-也可以在项目根目录的 `.rpi/settings.json` 里配置默认 provider/model，之后无需每次传参：
+也可以在项目根目录的 `.latent/settings.json` 里配置默认 provider/model，之后无需每次传参：
 
 ```json
 {
@@ -64,7 +64,7 @@ rpi --continue
 }
 ```
 
-帮助：`rpi --help`。
+帮助：`latent --help`。
 
 ---
 
@@ -92,8 +92,8 @@ rpi --continue
 ### 四种运行模式
 
 - **interactive**：终端 TUI 聊天（默认，两端都是 TTY 时自动进入）。流式渲染回复与思考过程、工具卡片实时显示、footer 状态栏展示模型 / context 占用 / 花费。
-- **print**：单次执行，流式输出到 stdout 后退出。适合脚本与管道：`cat prompt.txt | rpi`。
-- **json**：事件逐行 JSONL 输出，适合被程序消费：`rpi --mode json "…" > events.jsonl`。
+- **print**：单次执行，流式输出到 stdout 后退出。适合脚本与管道：`cat prompt.txt | latent`。
+- **json**：事件逐行 JSONL 输出，适合被程序消费：`latent --mode json "…" > events.jsonl`。
 - **rpc**：stdio JSONL 协议，prompt/steer/abort/getState/setModel 等命令集，适合编辑器/IDE 集成。
 
 ### 交互模式常用操作
@@ -129,17 +129,17 @@ rpi --continue
 
 ## 配置
 
-配置目录按「项目 `.rpi/` 优先，逐字段覆盖全局 `~/.rpi/`」合并：
+配置目录按「项目 `.latent/` 优先，逐字段覆盖全局 `~/.latent/`」合并：
 
 | 文件 | 作用 |
 |---|---|
-| `.rpi/settings.json` | 默认模型、权限模式、bash 超时、MCP 扩展声明（`mcpServers`）、主题等 |
-| `.rpi/models.json` | 自定义 provider / model（baseUrl、定价、兼容开关） |
-| `.rpi/skills/<name>/SKILL.md` | 技能定义，AI 通过 `load_skill` 工具按需加载 |
-| `.rpi/agents/<name>.md` | 子代理定义（frontmatter 声明 name/model/tools，正文即系统提示词） |
-| `.rpi/system-prompt.md` | 自定义系统提示词 |
+| `.latent/settings.json` | 默认模型、权限模式、bash 超时、MCP 扩展声明（`mcpServers`）、主题等 |
+| `.latent/models.json` | 自定义 provider / model（baseUrl、定价、兼容开关） |
+| `.latent/skills/<name>/SKILL.md` | 技能定义，AI 通过 `load_skill` 工具按需加载 |
+| `.latent/agents/<name>.md` | 子代理定义（frontmatter 声明 name/model/tools，正文即系统提示词） |
+| `.latent/system-prompt.md` | 自定义系统提示词 |
 
-MCP 扩展示例（`.rpi/settings.json`）：
+MCP 扩展示例（`.latent/settings.json`）：
 
 ```json
 {
@@ -154,7 +154,7 @@ MCP 扩展示例（`.rpi/settings.json`）：
 }
 ```
 
-扩展以独立进程运行，崩溃或出错只会被跳过并打印诊断，不影响 rpi 本体。
+扩展以独立进程运行，崩溃或出错只会被跳过并打印诊断，不影响 latent 本体。
 
 ---
 
@@ -198,14 +198,14 @@ API key 从环境变量读取，`--model` 缺省时使用各 provider 默认模�
 ## 开发
 
 ```bash
-cargo clean && cargo build --release -p rpi-cli && cp target/release/rpi ~/.local/bin/
-cargo build --release -p rpi-cli         # 构建
+cargo clean && cargo build --release -p latent-cli && cp target/release/latent ~/.local/bin/
+cargo build --release -p latent-cli         # 构建
 cargo test --workspace                   # 运行全部测试
 cargo clippy --workspace --all-targets   # lint（要求零警告）
 ```
 
 ### todo list
- - [ ] .rpiignore文件独立
+ - [ ] .latentignore文件独立
  - [ ] 子agent调用和显示优化
  - [ ] harness适配微信qq，如何保证长时间工作不中断，定时任务
  - [ ] jev决策小模型引入

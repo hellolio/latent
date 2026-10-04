@@ -1569,6 +1569,159 @@ dependencies = [
 ]
 
 [[package]]
+name = "latent-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "jsonschema",
+ "latent-ai",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "latent-ai"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "futures",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "latent-cli"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "crossterm",
+ "futures",
+ "latent-agent",
+ "latent-ai",
+ "latent-core",
+ "latent-sandbox",
+ "latent-session",
+ "latent-tools",
+ "latent-tui",
+ "latent-web",
+ "ratatui",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "latent-core"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "futures",
+ "latent-agent",
+ "latent-ai",
+ "latent-session",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "latent-sandbox"
+version = "0.1.0"
+dependencies = [
+ "landlock",
+ "seccompiler",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "latent-session"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "latent-agent",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "latent-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "globset",
+ "ignore",
+ "latent-agent",
+ "nix 0.31.3",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "latent-tui"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "ratatui",
+ "ratatui-themes",
+ "readkey",
+ "syntect",
+ "two-face",
+]
+
+[[package]]
+name = "latent-web"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "htmd",
+ "latent-agent",
+ "latent-ai",
+ "regex",
+ "reqwest 0.12.28",
+ "scraper",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "unicode-normalization",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2752,159 +2905,6 @@ dependencies = [
  "quote",
  "serde_json",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "rpi-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "jsonschema",
- "proptest",
- "rpi-ai",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "rpi-ai"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "bytes",
- "futures",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "rpi-cli"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "crossterm",
- "futures",
- "ratatui",
- "rmcp",
- "rpi-agent",
- "rpi-ai",
- "rpi-core",
- "rpi-sandbox",
- "rpi-session",
- "rpi-tools",
- "rpi-tui",
- "rpi-web",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "rpi-core"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "chrono",
- "futures",
- "rmcp",
- "rpi-agent",
- "rpi-ai",
- "rpi-session",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "rpi-sandbox"
-version = "0.1.0"
-dependencies = [
- "landlock",
- "seccompiler",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rpi-session"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "rpi-agent",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "rpi-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "globset",
- "ignore",
- "nix 0.31.3",
- "regex",
- "rpi-agent",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "rpi-tui"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "ratatui",
- "ratatui-themes",
- "readkey",
- "syntect",
- "two-face",
-]
-
-[[package]]
-name = "rpi-web"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "htmd",
- "regex",
- "reqwest 0.12.28",
- "rpi-agent",
- "rpi-ai",
- "scraper",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "unicode-normalization",
- "url",
- "uuid",
 ]
 
 [[package]]

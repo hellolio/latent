@@ -1,13 +1,13 @@
-# rpi E2E 测试（L3：真终端 + 本地 mock LLM）
+# latent E2E 测试（L3：真终端 + 本地 mock LLM）
 
-像人一样测试：在真实 PTY 里启动 `rpi` 二进制、模拟键盘输入、把 ANSI 输出解析
+像人一样测试：在真实 PTY 里启动 `latent` 二进制、模拟键盘输入、把 ANSI 输出解析
 回"用户看到的屏幕"做断言；LLM 由本地 mock 服务替代，响应完全确定。
 
 ## 运行
 
 ```bash
-# 1. 编译被测二进制(默认路径 target/debug/rpi,可用 RPI_BIN 覆盖)
-cargo build --bin rpi
+# 1. 编译被测二进制(默认路径 target/debug/latent,可用 LATENT_BIN 覆盖)
+cargo build --bin latent
 
 # 2. 装 Python 依赖(首次;装进当前全局/conda 环境)
 pip install -r requirements.txt
@@ -25,8 +25,8 @@ Python(本机为 conda base)环境,不建虚拟环境。
 
 | 文件 | 职责 |
 |---|---|
-| `mock_llm.py` | 本地 mock LLM 服务:伪装 anthropic-messages 端点，按场景脚本逐 turn 返回 SSE 流;记录 rpi 发来的每个请求供反向断言 |
-| `harness.py` | `RpiApp`:临时隔离 HOME(写入指向 mock 的 models.json)+ pexpect 启动真实二进制 + pyte 解析屏幕;提供打字/断言/退出 API |
+| `mock_llm.py` | 本地 mock LLM 服务:伪装 anthropic-messages 端点，按场景脚本逐 turn 返回 SSE 流;记录 latent 发来的每个请求供反向断言 |
+| `harness.py` | `LatentApp`:临时隔离 HOME(写入指向 mock 的 models.json)+ pexpect 启动真实二进制 + pyte 解析屏幕;提供打字/断言/退出 API |
 | `test_*.py` | 场景测试,每个对应一条用户使用流程 |
 
 ## 写一个新场景
@@ -35,10 +35,10 @@ Python(本机为 conda base)环境,不建虚拟环境。
 2. 新建 `test_xxx.py`:
 
 ```python
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 def test_my_flow():
-    app = RpiApp(turns=load_scenario("my_flow"))
+    app = LatentApp(turns=load_scenario("my_flow"))
     try:
         app.wait_ready()                      # 等横幅/编辑器就绪
         app.sendline("用户输入")               # 像打字一样输入并回车
@@ -59,7 +59,7 @@ def test_my_flow():
 | `expect_text(pattern, timeout)` | 等正则出现在可见输出中(**忽略空白**与 ANSI) |
 | `expect_absent(pattern)` | 输出静默后断言未出现 |
 | `visible_text()` / `transcript()` | 当前屏幕 / 全量可见输出 |
-| `wait_for_requests(n)` / `request_bodies()` | mock 侧:等 / 读 rpi 发出的请求体 |
+| `wait_for_requests(n)` / `request_bodies()` | mock 侧:等 / 读 latent 发出的请求体 |
 | `quit()` + `exit_status` | Ctrl+D 退出并校验退出码 |
 
 ### 注意事项
@@ -68,4 +68,4 @@ def test_my_flow():
   `expect_text` 对空白不敏感,写 pattern 时不要依赖排版。
 - 应用在 Inline 视口变化时会查询光标位置,harness 的后台读线程会自动应答
   (模拟真终端);不要在测试里绕过 harness 直接读 child 输出。
-- `RpiApp` 用临时目录做 `HOME`,session 写进隔离环境,不会污染真实 `~/.rpi`。
+- `LatentApp` 用临时目录做 `HOME`,session 写进隔离环境,不会污染真实 `~/.latent`。

@@ -9,11 +9,11 @@
 import re
 import time
 
-from harness import RpiApp, load_scenario, strip_ansi
+from harness import LatentApp, load_scenario, strip_ansi
 
 
 def test_reply_commits_with_usage_and_footer():
-    app = RpiApp(turns=load_scenario("ask_and_reply"))
+    app = LatentApp(turns=load_scenario("ask_and_reply"))
     try:
         app.wait_ready()
         app.sendline("你好")
@@ -25,7 +25,7 @@ def test_reply_commits_with_usage_and_footer():
         app.expect_text(r"↑10")
         app.expect_text(r"↑")
         # 编辑器回到可输入状态
-        app.expect_text("Ask rpi to do anything")
+        app.expect_text("Ask latent to do anything")
     finally:
         app.close()
 
@@ -58,16 +58,16 @@ def test_two_blank_lines_between_output_and_editor():
     用量行上下各带一行间隔(避免与其他内容挤在一起),加上输出→输入框
     的固定两行空行,用量行下方共 3 行纯空行。
     """
-    app = RpiApp(turns=load_scenario("ask_and_reply"))
+    app = LatentApp(turns=load_scenario("ask_and_reply"))
     try:
         app.wait_ready()
         app.sendline("你好")
         app.expect_text("这是 mock LLM 的固定回复")
         app.expect_text("↓7")
-        app.expect_text("Ask rpi to do anything")
+        app.expect_text("Ask latent to do anything")
         time.sleep(0.5)
         rows = _screen_rows(app)
-        editor = max(i for i, row in enumerate(rows) if "Ask rpi to do anything" in row)
+        editor = max(i for i, row in enumerate(rows) if "Ask latent to do anything" in row)
         # 占位文本行上方是编辑器背景内边距行,再往上是固定两行空行 + 用量行
         # 自带的下方间隔空行(共 3 行纯空行),空行之上就是用量行
         assert _row_has_bg(app, editor - 1), "占位文本上方应是编辑器内边距行"
@@ -85,7 +85,7 @@ def test_tool_command_fully_displayed_in_card():
         "true # AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKKLLLLMMMMNNNNOOOO"
         "PPPPQQQQRRRRSSSSTTTTUUUUVVVVWWWWXXXXYYYYZZZZ"
     )
-    app = RpiApp(turns=load_scenario("long_command"))
+    app = LatentApp(turns=load_scenario("long_command"))
     try:
         app.wait_ready()
         app.sendline("执行一下")
@@ -105,7 +105,7 @@ def test_tool_command_fully_displayed_in_card():
 
 
 def test_cjk_committed_without_injected_spaces():
-    app = RpiApp(turns=[{"text": "AB中文CD测试"}], timeout=15.0)
+    app = LatentApp(turns=[{"text": "AB中文CD测试"}], timeout=15.0)
     try:
         app.wait_ready()
         app.sendline("测试中文消息")

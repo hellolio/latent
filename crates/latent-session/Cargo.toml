@@ -1,0 +1,18 @@
+[package]
+name = "latent-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+latent-agent.workspace = true
+serde.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tokio.workspace = true
+async-trait.workspace = true

@@ -2,7 +2,7 @@
 
 import time
 
-from harness import RpiApp, load_scenario
+from harness import LatentApp, load_scenario
 
 
 def test_compact_short_conversation_no_empty_summarizer_request():
@@ -11,7 +11,7 @@ def test_compact_short_conversation_no_empty_summarizer_request():
     此前 bug:切点落在首个 user 消息,待摘要范围只有 system 元数据,
     序列化为空 → LLM 在看不到对话的情况下编造"摘要"入库。
     """
-    app = RpiApp(turns=load_scenario("compact"), timeout=20.0)
+    app = LatentApp(turns=load_scenario("compact"), timeout=20.0)
     try:
         app.wait_ready()
         app.sendline("第一问")
@@ -35,7 +35,7 @@ def test_compact_short_conversation_no_empty_summarizer_request():
 
 
 def test_compact_with_arg_warns_but_still_compacts():
-    app = RpiApp(turns=load_scenario("compact"), timeout=20.0)
+    app = LatentApp(turns=load_scenario("compact"), timeout=20.0)
     try:
         app.wait_ready()
         app.sendline("第一问")
