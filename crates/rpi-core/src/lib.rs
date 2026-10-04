@@ -15,7 +15,11 @@ pub mod skills;
 pub mod subagent;
 pub mod system_prompt;
 
-pub use config::{create_model_resolver_from_config, load_default_model_selection, load_theme_setting};
+pub use config::{
+    create_model_resolver_from_config, load_default_model_selection, load_theme_setting,
+    preferred_models_path, upsert_models_json_entry, write_models_template_if_absent,
+    NewModelEntry,
+};
 pub use extensions::{
     bridge_elicitation, connect_stdio, create_diagnostics_sink, create_extension_event_bus,
     spawn_diagnostics_printer, Extension, ExtensionActions, ExtensionApi, ExtensionDiagnostic,

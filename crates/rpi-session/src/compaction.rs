@@ -649,6 +649,27 @@ fn format_file_operations(read_files: &[String], modified_files: &[String]) -> S
     }
 }
 
+/// 从摘要文本解析 `<read-files>`/`<modified-files>` XML 节(format_file_operations
+/// 的对偶,增量压缩时从旧摘要回收累积清单);缺节或格式不符返回空表,安全降级。
+fn parse_file_lists(summary: &str) -> (Vec<String>, Vec<String>) {
+    let parse_section = |tag: &str| -> Vec<String> {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        summary
+            .split_once(&open)
+            .and_then(|(_, rest)| rest.split_once(&close))
+            .map(|(inner, _)| {
+                inner
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    (parse_section("read-files"), parse_section("modified-files"))
+}
+
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {
     pub summary: String,
@@ -662,6 +683,9 @@ pub struct CompactionOutcome {
 /// 运行一次压缩摘要(06 文档 §3.4 的 M3 实现):对 `entries`(活动分支路径,
 /// leaf→root)做切点 → 序列化 → Summarizer 调用 → 产出可 append 的 Compaction
 /// 数据。无有效切点/无可摘要内容时返回 None。
+///
+/// 增量语义:范围内已有 Compaction entry 时,只把该 entry 之后的新消息序列化
+/// 进请求,旧摘要经 `<previous-summary>` 标签成为历史唯一来源(update 模板)。
 ///
 /// 取舍:分割 turn 时不做 history/prefix 两次请求,
 /// 单请求覆盖全范围,turn_start_index 经 `CompactionOutcome` 的 details 之外
@@ -680,24 +704,45 @@ pub async fn run_compaction(
         return Ok(None);
     }
 
-    // 待摘要范围的上下文消息
-    let summarized_messages: Vec<AgentMessage> = entries[..first_kept]
+    // 增量:待摘要范围里已有 compaction 摘要时,只序列化该 entry 之后的新消息,
+    // 旧摘要经 <previous-summary> 成为历史唯一来源(append-only 树上原始 entry
+    // 仍在,但重发全量历史既重复付费又让旧摘要在请求里出现两次)
+    let previous_compaction: Option<(usize, String)> = entries[..first_kept]
         .iter()
-        .flat_map(crate::projection::session_entry_to_context_messages)
-        .collect();
-    if summarized_messages.is_empty() {
-        return Ok(None);
-    }
-
-    // 增量:范围里已有 compaction 摘要时走 update 模板(旧摘要进 <previous-summary>)
-    let previous_summary = entries[..first_kept]
-        .iter()
+        .enumerate()
         .rev()
-        .find_map(|entry| match entry {
-            Entry::Compaction { summary, .. } => Some(summary.clone()),
+        .find_map(|(idx, entry)| match entry {
+            Entry::Compaction { summary, .. } => Some((idx, summary.clone())),
             _ => None,
         });
-    let (conversation, instruction) = match previous_summary {
+
+    let (summarized_messages, previous_summary): (Vec<AgentMessage>, Option<String>) =
+        match previous_compaction {
+            Some((prev_idx, summary)) => {
+                let new_messages: Vec<AgentMessage> = entries[prev_idx + 1..first_kept]
+                    .iter()
+                    .flat_map(crate::projection::session_entry_to_context_messages)
+                    .collect();
+                // 新切点紧贴旧 compaction(之后无上下文消息):旧摘要 + 保留尾部
+                // 已覆盖全部信息,无内容可压缩
+                if new_messages.is_empty() {
+                    return Ok(None);
+                }
+                (new_messages, Some(summary))
+            }
+            None => {
+                let all_messages: Vec<AgentMessage> = entries[..first_kept]
+                    .iter()
+                    .flat_map(crate::projection::session_entry_to_context_messages)
+                    .collect();
+                if all_messages.is_empty() {
+                    return Ok(None);
+                }
+                (all_messages, None)
+            }
+        };
+
+    let (conversation, instruction) = match previous_summary.as_deref() {
         Some(previous) => (
             format!(
                 "<previous-summary>\n{previous}\n</previous-summary>\n\n{}",
@@ -733,7 +778,23 @@ pub async fn run_compaction(
         return Err(failure);
     }
 
-    let (read_files, modified_files) = compute_file_lists(&summarized_messages);
+    // 文件清单:新范围内提取的 ∪ 旧摘要里累积的(增量路径只看得到新消息);
+    // read 集合统一剔除 modified(新消息可能把旧摘要里 read 过的文件改掉)
+    let (new_read, new_modified) = compute_file_lists(&summarized_messages);
+    let (prev_read, prev_modified) = match previous_summary.as_deref() {
+        Some(previous) => parse_file_lists(previous),
+        None => (Vec::new(), Vec::new()),
+    };
+    let modified: std::collections::BTreeSet<String> = new_modified
+        .into_iter()
+        .chain(prev_modified)
+        .collect();
+    let read_files: Vec<String> = new_read
+        .into_iter()
+        .chain(prev_read)
+        .filter(|file| !modified.contains(file))
+        .collect();
+    let modified_files: Vec<String> = modified.into_iter().collect();
     // pi 语义:文件清单以 XML 节追加到摘要文本,同时存 details
     let summary = format!(
         "{}{}",

@@ -77,42 +77,57 @@ pub async fn run_interactive_mode(
 
     let mut app = TuiApp::open().map_err(|e| e.to_string())?;
 
+    // 键盘线程暂停开关:TUI 挂起跑外部编辑器($EDITOR)期间置位,线程
+    // 停止读取 crossterm 事件,把终端输入让给子进程。
+    let keys_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // 键盘线程:crossterm 事件 → 归一 Key → channel。
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<Key>();
-    std::thread::spawn(move || {
-        use ratatui::crossterm::event;
-        loop {
-            match event::poll(Duration::from_millis(50)) {
-                Ok(true) => match event::read() {
-                    Ok(event) => {
-                        // 协议终端的修饰 Enter 已由 from_event 归一;裸 Enter
-                        // 经本地修饰键兜底(macOS,见 normalize_native_enter)
-                        let Some(key) =
-                            rpi_tui::from_event(&event).map(rpi_tui::normalize_native_enter)
-                        else {
-                            continue;
-                        };
-                        if key_tx.send(key).is_err() {
-                            return;
+    {
+        let keys_paused = Arc::clone(&keys_paused);
+        std::thread::spawn(move || {
+            use ratatui::crossterm::event;
+            loop {
+                if keys_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                match event::poll(Duration::from_millis(50)) {
+                    Ok(true) => match event::read() {
+                        Ok(event) => {
+                            // 协议终端的修饰 Enter 已由 from_event 归一;裸 Enter
+                            // 经本地修饰键兜底(macOS,见 normalize_native_enter)
+                            let Some(key) =
+                                rpi_tui::from_event(&event).map(rpi_tui::normalize_native_enter)
+                            else {
+                                continue;
+                            };
+                            if key_tx.send(key).is_err() {
+                                return;
+                            }
                         }
-                    }
+                        Err(_) => return,
+                    },
+                    Ok(false) => {}
                     Err(_) => return,
-                },
-                Ok(false) => {}
-                Err(_) => return,
+                }
             }
-        }
-    });
+        });
+    }
 
     // session 事件与扩展 UI 调用共用同一事件通道(主循环统一渲染)
     session.subscribe(Arc::new(events::SessionToUiSubscriber {
         tx: ui.tx.clone(),
     }));
 
-    // /model 解析与主流程同源:models.json + 内置 provider 默认表
+    // /model 解析与主流程同源:models.json + 内置 provider 默认表。
+    // RwLock:/model 配置入口(编辑 models.json/表单)运行期热重载
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let resolver = rpi_core::create_model_resolver_from_config(Some(&cwd), home.as_deref());
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver_from_config(
+        Some(&cwd),
+        home.as_deref(),
+    ));
     let router = crate::modes::interactive::handlers::SessionRouter::new(session.clone());
     let ctx = InteractiveCtx {
         session: &router,
@@ -137,7 +152,8 @@ pub async fn run_interactive_mode(
     commit_startup(&ctx, &mut state);
     replay::replay_history(&ctx, &mut state);
 
-    let result = event_loop(&ctx, &mut state, &mut app, &mut key_rx, &mut ui_rx).await;
+    let result =
+        event_loop(&ctx, &mut state, &mut app, &mut key_rx, &mut ui_rx, &keys_paused).await;
 
     app.finish().map_err(|e| e.to_string())?;
     result
@@ -149,6 +165,7 @@ async fn event_loop(
     app: &mut TuiApp,
     key_rx: &mut mpsc::UnboundedReceiver<Key>,
     ui_rx: &mut mpsc::UnboundedReceiver<UiEvent>,
+    keys_paused: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     let partial = ctx.session.current().agent().partial_message();
     render_tick(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
@@ -206,6 +223,15 @@ async fn event_loop(
                 state.spin = state.spin.wrapping_add(1);
             }
         }
+
+        // handlers 置位的挂起动作(如 $EDITOR 编辑 models.json):TUI 挂起
+        // 期间同步执行,返回后恢复渲染
+        match state.suspend_action.take() {
+            Some(state::SuspendAction::EditModelsJson) => {
+                run_models_editor(ctx, state, app, keys_paused)?;
+            }
+            None => {}
+        }
     }
 
     // 退出清理:停掉全部存活后台 subagent(抑制完成通知);当前会话与主
@@ -219,6 +245,71 @@ async fn event_loop(
         ctx.session.main().wait_idle().await;
     }
     ctx.session.current().wait_idle().await;
+    Ok(())
+}
+
+/// /model 配置入口「$EDITOR 编辑 models.json」:TUI 挂起 → 子进程继承终端
+/// 跑编辑器(缺文件先写模板)→ 恢复并热重载 → 重开 /model 选择器。
+/// 阻塞事件循环是有意的:编辑期间键盘线程已暂停、UI 不渲染。
+fn run_models_editor(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    app: &mut TuiApp,
+    keys_paused: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    let path = rpi_core::preferred_models_path(Some(&state.cwd), state.home.as_deref());
+    if let Err(error) = rpi_core::write_models_template_if_absent(&path) {
+        state.commit_ephemeral(view::error_line(
+            &format!("无法创建 {}: {error}", path.display()),
+            &state.theme,
+        ));
+        return Ok(());
+    }
+    // RPI_EDITOR 便于测试注入;否则走通用 VISUAL/EDITOR,兜底 vi
+    let editor = std::env::var("RPI_EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+    keys_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Err(e) = app.suspend() {
+        keys_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+        return Err(e.to_string());
+    }
+    // `editor "$1"`:编辑器串可带参数(如 `code -w`),路径含空格也安全
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh")
+        .arg(&path)
+        .status();
+    keys_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+    let document = full_redraw_lines(state);
+    app.resume(&document).map_err(|e| e.to_string())?;
+    state.needs_full_redraw = false;
+    match status {
+        Ok(status) if !status.success() => {
+            let code = status.code().map(|c| c.to_string()).unwrap_or_default();
+            state.commit_ephemeral(handlers::warning_line_theme(
+                &format!("编辑器异常退出({code}),models.json 可能未保存"),
+                &state.theme,
+            ));
+        }
+        Err(e) => {
+            state.commit_ephemeral(view::error_line(
+                &format!("无法启动编辑器 `{editor}`: {e}"),
+                &state.theme,
+            ));
+        }
+        Ok(_) => {}
+    }
+    // 无论编辑成败都重载(幂等);诊断由 rpi-core 打 stderr
+    handlers::reload_model_resolver(ctx, state);
+    let count = ctx.resolver.read().unwrap().available_models().len();
+    state.commit_ephemeral(handlers::warning_line_theme(
+        &format!("models.json 已重载({count} 个候选模型)"),
+        &state.theme,
+    ));
+    handlers::open_model_selector(ctx, state);
     Ok(())
 }
 

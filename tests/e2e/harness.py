@@ -94,6 +94,7 @@ class RpiApp:
         extra_args: list | None = None,
         home: str | None = None,
         session_mode: str | None = "full-access",
+        show_builtin_models: bool | None = None,
     ):
         self.mock = MockLLM(turns).start()
         self.timeout = timeout
@@ -117,6 +118,8 @@ class RpiApp:
                 }
             }
         }
+        if show_builtin_models is not None:
+            models["showBuiltinModels"] = show_builtin_models
         with open(os.path.join(self.home, ".rpi", "models.json"), "w", encoding="utf-8") as f:
             json.dump(models, f, ensure_ascii=False)
 

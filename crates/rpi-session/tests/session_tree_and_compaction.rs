@@ -643,7 +643,8 @@ async fn run_compaction_uses_update_template_when_previous_summary_exists() {
     let outcome = run_compaction(
         &entries,
         &CompactionSettings {
-            keep_recent_tokens: 10,
+            // 切点落在最后一条 assistant:新 user 消息进摘要范围,旧消息不进
+            keep_recent_tokens: 1,
             ..Default::default()
         },
         &summarizer,
@@ -671,6 +672,138 @@ async fn run_compaction_uses_update_template_when_previous_summary_exists() {
         .expect("user 承载序列化对话");
     assert!(conversation.contains("<previous-summary>\nprevious summary\n</previous-summary>"));
     let _ = outcome;
+    // 增量只发新消息:旧摘要成为历史唯一来源,原始旧消息不再重发
+    assert!(conversation.contains("new question"), "新消息应进入序列化对话");
+    assert!(
+        !conversation.contains("old question") && !conversation.contains("old answer"),
+        "旧消息不应随增量请求重发: {conversation}"
+    );
+}
+
+#[tokio::test]
+async fn run_compaction_incremental_merges_file_lists_from_previous_summary() {
+    let session = create_session(None::<String>).unwrap();
+    session
+        .append_message(AgentMessage::user("read old file"))
+        .unwrap();
+    session
+        .append_message(tool_call_assistant("t0", "read", "/tmp/old-read.txt"))
+        .unwrap();
+    session
+        .append_message(AgentMessage::tool_result_text(
+            "t0", "read", "contents", false,
+        ))
+        .unwrap();
+    session
+        .append_message(assistant("old done", 0, StopReason::Stop))
+        .unwrap();
+    let old_leaf = session.get_leaf_id().unwrap();
+    // 旧摘要自带上一轮累积的文件清单(与 format_file_operations 输出同构)
+    session
+        .append_compaction(
+            "## Goal\nold work\n\n<read-files>\n/tmp/old-read.txt\n</read-files>\n\n<modified-files>\n/tmp/old-edit.txt\n</modified-files>",
+            old_leaf,
+            100,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+    // 新消息把旧摘要里 read 过的文件改掉,又 read 了一个新文件
+    session
+        .append_message(AgentMessage::user("now edit"))
+        .unwrap();
+    session
+        .append_message(tool_call_assistant("t1", "edit", "/tmp/old-read.txt"))
+        .unwrap();
+    session
+        .append_message(AgentMessage::tool_result_text("t1", "edit", "ok", false))
+        .unwrap();
+    session
+        .append_message(tool_call_assistant("t2", "read", "/tmp/new-read.txt"))
+        .unwrap();
+    session
+        .append_message(AgentMessage::tool_result_text(
+            "t2", "read", "new contents", false,
+        ))
+        .unwrap();
+    session
+        .append_message(assistant("new done", 0, StopReason::Stop))
+        .unwrap();
+    let entries = session.entries();
+
+    let summarizer = CapturingSummarizer {
+        summary: "updated".into(),
+        stop_reason: StopReason::Stop,
+        captured: std::sync::Mutex::new(Vec::new()),
+    };
+    let outcome = run_compaction(
+        &entries,
+        &CompactionSettings {
+            keep_recent_tokens: 1,
+            ..Default::default()
+        },
+        &summarizer,
+    )
+    .await
+    .unwrap()
+    .expect("应产出压缩结果");
+
+    let details = outcome.details.as_object().unwrap();
+    // read = 新 read ∪ 旧 read − modified:old-read 被改掉后移出 read
+    assert_eq!(
+        details["readFiles"],
+        serde_json::json!(["/tmp/new-read.txt"])
+    );
+    // modified = 新 modified ∪ 旧 modified
+    assert_eq!(
+        details["modifiedFiles"],
+        serde_json::json!(["/tmp/old-edit.txt", "/tmp/old-read.txt"])
+    );
+    // 清单以 XML 节追加进摘要文本,供下次增量继续解析
+    assert!(outcome.summary.contains("<read-files>\n/tmp/new-read.txt\n</read-files>"));
+    assert!(outcome.summary.contains("/tmp/old-edit.txt"));
+}
+
+#[tokio::test]
+async fn run_compaction_returns_none_when_nothing_new_since_last_compaction() {
+    let session = create_session(None::<String>).unwrap();
+    session
+        .append_message(AgentMessage::user("old question"))
+        .unwrap();
+    session
+        .append_message(assistant("old answer", 0, StopReason::Stop))
+        .unwrap();
+    let old_leaf = session.get_leaf_id().unwrap();
+    session
+        .append_compaction("previous summary", old_leaf, 100, None, None, false)
+        .unwrap();
+    // keep_recent_tokens=1 时切点落在最新 user 消息:上次压缩后无新消息进入摘要范围
+    session
+        .append_message(AgentMessage::user("new question"))
+        .unwrap();
+    let entries = session.entries();
+
+    let summarizer = CapturingSummarizer {
+        summary: "should not be used".into(),
+        stop_reason: StopReason::Stop,
+        captured: std::sync::Mutex::new(Vec::new()),
+    };
+    let outcome = run_compaction(
+        &entries,
+        &CompactionSettings {
+            keep_recent_tokens: 1,
+            ..Default::default()
+        },
+        &summarizer,
+    )
+    .await
+    .unwrap();
+    assert!(outcome.is_none(), "无新内容不应产出压缩结果");
+    assert!(
+        summarizer.captured.lock().unwrap().is_empty(),
+        "不应发出摘要请求"
+    );
 }
 
 #[tokio::test]

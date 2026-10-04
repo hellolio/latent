@@ -19,7 +19,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "model",
         args: "[provider/model]",
-        description: "查看/切换模型",
+        description: "查看/切换模型(空参数选择器末尾可添加模型或编辑 models.json)",
     },
     SlashCommand {
         name: "thinking",
@@ -171,24 +171,21 @@ pub fn parse(input: &str) -> SlashInput {
     }
 }
 
-/// /help 渲染行:命令表 + 快捷键(pi 无 /help,用 header 键位提示;这里
-/// 以命令形式提供等价信息)。
-pub fn help_lines() -> Vec<String> {
-    let mut lines = vec!["命令:".to_string()];
+/// /help 内容(markdown 源文本;调用方经 `assistant_markdown` 渲染上屏,
+/// 与模型回复同一渲染管线:标题/列表/行内代码着色)。
+pub fn help_markdown() -> String {
+    let mut out = String::from("## 命令\n\n");
     for command in COMMANDS {
         let signature = format!("{} {}", command.name, command.args)
             .trim()
             .to_string();
-        lines.push(format!("  /{:<28} {}", signature, command.description));
+        out.push_str(&format!("- `/{signature}` — {}\n", command.description));
     }
-    lines.push(String::new());
-    lines.push("快捷键:".to_string());
-    lines.push(
-        "  输入 / 弹出命令补全(↑/↓ 选择 · Tab/Enter 补全 · Esc 关闭)".to_string(),
-    );
-    lines.push("  Shift+Tab 循环切换会话模式(plan → confirm → full-access)".to_string());
-    lines.push("  Enter 发送 · Esc 中止当前 run · Ctrl+C 中断/双击退出 · Ctrl+D 退出".to_string());
-    lines
+    out.push_str("\n## 快捷键\n\n");
+    out.push_str("- 输入 `/` 弹出命令补全(↑/↓ 选择 · Tab/Enter 补全 · Esc 关闭)\n");
+    out.push_str("- `Shift+Tab` 循环切换会话模式(plan → confirm → full-access)\n");
+    out.push_str("- `Enter` 发送 · `Esc` 中止当前 run · `Ctrl+C` 中断/双击退出 · `Ctrl+D` 退出\n");
+    out
 }
 
 #[cfg(test)]
@@ -259,9 +256,8 @@ mod tests {
     }
 
     #[test]
-    fn help_lines_list_every_command() {
-        let lines = help_lines();
-        let text = lines.join("\n");
+    fn help_markdown_lists_every_command() {
+        let text = help_markdown();
         for command in COMMANDS {
             assert!(
                 text.contains(&format!("/{}", command.name)),

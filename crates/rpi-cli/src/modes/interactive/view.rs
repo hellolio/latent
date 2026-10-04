@@ -196,6 +196,47 @@ pub fn viewport(
     let mut lines: Vec<UiLine> = Vec::new();
     let mut cursor: Option<(u16, u16)> = None;
 
+    // 0. 「添加模型」表单信息区:标题 + 字段清单(全部字段恒显示,已配置
+    //    的显示内容、未配置的留空)+ 当前问题行;选择列表/编辑器作为
+    //    "具体配置选项"紧随其后。api 协议选择的选择器 prompt 即问题行,
+    //    激活时跳过问题行避免重复。
+    if let Some(form) = &state.model_form {
+        lines.push(Line::from(Span::styled(
+            "模型信息",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )));
+        // 键名一律灰色;值按字段着色区分(provider/api/baseUrl/apiKey/model 各一色)
+        let value_colors = [
+            theme.assistant_text,
+            theme.md_code,
+            theme.md_link,
+            theme.success,
+            theme.warning,
+        ];
+        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+        for ((name, value), color) in form.fields().into_iter().zip(value_colors) {
+            if spans.len() > 1 {
+                spans.push(Span::styled("  ", Style::new().fg(theme.dim)));
+            }
+            spans.push(Span::styled(
+                format!("{name}="),
+                Style::new().fg(theme.dim),
+            ));
+            if let Some(value) = value {
+                spans.push(Span::styled(value.to_string(), Style::new().fg(color)));
+            }
+        }
+        lines.push(Line::from(spans));
+        if state.select.is_none() {
+            // 字段行与问题行之间空一行
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                form.question(),
+                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+
     // 1. 预览区:选择列表 > 正文流式 > thinking > 工具命令卡片 + 实时
     //    输出。流式内容全量滚动(超 preview_cap 取尾窗,cap 由 build_frame
     //    按屏高给出,不受 ctrl+o 影响);命令卡片全显。

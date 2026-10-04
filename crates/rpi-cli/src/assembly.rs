@@ -1481,15 +1481,16 @@ impl rpi_session::Summarizer for ProviderSummarizer {
         }
         use rpi_agent::LoopHooks as _;
         let llm_messages = rpi_agent::PassthroughHooks.convert_to_llm(&messages);
+        // 摘要请求挂专用 system 提示词(一次性异构请求,不参与正常对话的缓存前缀);
+        // 无工具定义,防止摘要模型续写对话或调用工具
+        let transcript = rpi_ai::normalize_context(rpi_ai::Context {
+            system_prompt: Some(rpi_session::SUMMARIZATION_SYSTEM_PROMPT.to_string()),
+            messages: llm_messages,
+            tools: Vec::new(),
+        });
         let mut stream = self
             .provider
-            .stream(
-                &self.model,
-                rpi_ai::TranscriptContext {
-                    messages: llm_messages,
-                },
-                Default::default(),
-            )
+            .stream(&self.model, transcript, Default::default())
             .await;
         use futures::StreamExt;
         let mut result: Option<rpi_session::SummarizationResponse> = None;
@@ -2147,5 +2148,71 @@ mod tests {
         let (prompt, rules) = rpi_core::split_prompt_and_rules(&text);
         assert_eq!(prompt.as_deref(), Some("You are my agent."));
         assert_eq!(rules.as_deref(), Some("Always run cargo clippy before commit."));
+    }
+
+    // ---- ProviderSummarizer:摘要请求挂专用 system 提示词 ----
+
+    struct RecordingProvider {
+        captured: std::sync::Mutex<Vec<Vec<rpi_ai::Message>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl rpi_ai::Provider for RecordingProvider {
+        async fn stream(
+            &self,
+            model: &rpi_ai::Model,
+            ctx: rpi_ai::TranscriptContext,
+            _opts: rpi_ai::StreamOptions,
+        ) -> rpi_ai::AssistantMessageEventStream {
+            self.captured.lock().unwrap().push(ctx.messages);
+            let message = rpi_ai::assistant_message(
+                model,
+                vec![rpi_ai::ContentBlock::text("summary text")],
+                rpi_ai::StopReason::Stop,
+            );
+            Box::pin(futures::stream::iter(vec![
+                rpi_ai::AssistantMessageEvent::Start,
+                rpi_ai::AssistantMessageEvent::Done(Box::new(message)),
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_summarizer_prepends_summarization_system_prompt() {
+        use rpi_session::Summarizer as _;
+
+        let provider = std::sync::Arc::new(RecordingProvider {
+            captured: std::sync::Mutex::new(Vec::new()),
+        });
+        let summarizer = ProviderSummarizer {
+            provider: provider.clone(),
+            model: rpi_ai::Model::minimal("m1", "mock", "mock"),
+        };
+        let response = summarizer
+            .summarize(&rpi_session::SummarizationRequest {
+                messages: vec![rpi_agent::AgentMessage::user("conversation body")],
+                instruction: "summarize it".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.summary, "summary text");
+
+        let captured = provider.captured.lock().unwrap();
+        let messages = &captured[0];
+        assert_eq!(messages.len(), 2, "system + 单条 user");
+        match &messages[0] {
+            rpi_ai::Message::System { content, .. } => assert!(
+                content.contains("context summarization assistant"),
+                "首条应为摘要 system 提示词: {content}"
+            ),
+            other => panic!("首条消息应为 System: {other:?}"),
+        }
+        match &messages[1] {
+            rpi_ai::Message::User {
+                content: rpi_ai::UserContent::Text(text),
+                ..
+            } => assert_eq!(text, "conversation body\n\nsummarize it"),
+            other => panic!("第二条应为承载对话+指令的 user 消息: {other:?}"),
+        }
     }
 }

@@ -104,6 +104,96 @@ pub enum SelectKind {
     Approval {
         responder: tokio::sync::oneshot::Sender<rpi_core::ApprovalDecision>,
     },
+    /// /model「添加模型」表单中途的 api 协议选择(选择列表覆盖在表单上,
+    /// Enter 后写回 `state.model_form`)
+    ModelApiChoice,
+    /// /model「添加模型」表单第一步的写入位置选择(项目/全局)
+    ModelTargetChoice,
+}
+
+/// /model「添加模型」表单当前步骤。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelFormStep {
+    /// 第一步:写入项目还是全局 models.json(选择列表)
+    Target,
+    Provider,
+    /// 仅新 provider:api 协议(选择列表)
+    Api,
+    /// 仅新 provider:baseUrl
+    BaseUrl,
+    /// 仅新 provider:apiKey 环境变量名
+    ApiKeyEnv,
+    ModelId,
+}
+
+/// 配置写回目标(项目 `.rpi/models.json` 或全局 `~/.rpi/models.json`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelFormTarget {
+    Project,
+    Global,
+}
+
+/// /model「添加模型」交互式表单:主编辑器作输入,Enter 提交当前步骤,
+/// Esc 取消整张表单。provider 已存在(builtin 或 models.json 已声明)时
+/// 跳过 api/baseUrl/apiKey 步骤。
+pub struct ModelForm {
+    pub target: Option<ModelFormTarget>,
+    pub provider_id: Option<String>,
+    pub api: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
+    pub model_id: Option<String>,
+    pub known_provider: bool,
+    pub step: ModelFormStep,
+}
+
+impl ModelForm {
+    pub fn new() -> Self {
+        ModelForm {
+            target: None,
+            provider_id: None,
+            api: None,
+            base_url: None,
+            api_key_env: None,
+            model_id: None,
+            known_provider: false,
+            step: ModelFormStep::Target,
+        }
+    }
+
+    /// 当前步骤的提问文本(view 渲染)。
+    pub fn question(&self) -> String {
+        match self.step {
+            ModelFormStep::Target => "添加模型 · 写入位置(项目/全局)".into(),
+            ModelFormStep::Provider => {
+                "添加模型 · provider id(内置名或自定义名,Esc 取消)".into()
+            }
+            ModelFormStep::Api => "添加模型 · api 协议".into(),
+            ModelFormStep::BaseUrl => "添加模型 · baseUrl(如 https://host/v1)".into(),
+            ModelFormStep::ApiKeyEnv => {
+                "添加模型 · apiKey(输入环境变量名,或直接粘贴密钥;留空跳过)".into()
+            }
+            ModelFormStep::ModelId => "添加模型 · 模型 id(写入 models.json 并切换)".into(),
+        }
+    }
+
+    /// 表单字段固定清单(view 渲染):全部字段恒显示,未配置为 None。
+    pub fn fields(&self) -> Vec<(&'static str, Option<&str>)> {
+        vec![
+            ("provider", self.provider_id.as_deref()),
+            ("api", self.api.as_deref()),
+            ("baseUrl", self.base_url.as_deref()),
+            ("apiKey", self.api_key_env.as_deref()),
+            ("model", self.model_id.as_deref()),
+        ]
+    }
+}
+
+/// 事件循环代办的挂起动作(handlers 不直接持有 TuiApp,置标记由事件循环
+/// 在 TUI 挂起期间执行)。
+pub enum SuspendAction {
+    /// 用 $EDITOR 打开 models.json,返回后热重载并重开 /model 选择器
+    EditModelsJson,
 }
 
 pub struct InteractiveState {
@@ -167,6 +257,13 @@ pub struct InteractiveState {
     pub pending_tool_output: Option<(String, String)>,
     /// 最近一次工具执行的错误标记
     pub last_tool_error: bool,
+    /// /model「添加模型」表单(None = 未激活)
+    pub model_form: Option<ModelForm>,
+    /// 待事件循环挂起 TUI 执行的动作(置位后由事件循环取走)
+    pub suspend_action: Option<SuspendAction>,
+    /// /model 配置入口:工作目录与 HOME(models.json 目标路径与热重载推导)
+    pub cwd: std::path::PathBuf,
+    pub home: Option<std::path::PathBuf>,
 }
 
 impl InteractiveState {
@@ -203,6 +300,10 @@ impl InteractiveState {
             pending_tool_output: None,
             last_tool_error: false,
             resources: Vec::new(),
+            model_form: None,
+            suspend_action: None,
+            cwd: std::env::current_dir().unwrap_or_default(),
+            home: std::env::var_os("HOME").map(std::path::PathBuf::from),
         }
     }
 

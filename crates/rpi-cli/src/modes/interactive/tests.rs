@@ -56,7 +56,7 @@ async fn built_memory_session() -> crate::assembly::BuiltSession {
 
 fn ctx_of<'a>(
     built: &'a crate::assembly::BuiltSession,
-    resolver: &'a rpi_core::ModelResolver,
+    resolver: &'a std::sync::RwLock<rpi_core::ModelResolver>,
     router: &'a crate::modes::interactive::handlers::SessionRouter,
 ) -> InteractiveCtx<'a> {
     InteractiveCtx {
@@ -98,7 +98,7 @@ fn committed_text(state: &InteractiveState) -> String {
 #[tokio::test]
 async fn unknown_slash_input_is_local_warning_not_prompt() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -122,7 +122,7 @@ async fn unknown_slash_input_is_local_warning_not_prompt() {
 #[tokio::test]
 async fn submit_resets_status_to_thinking() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -139,7 +139,7 @@ async fn submit_resets_status_to_thinking() {
 #[tokio::test]
 async fn double_ctrl_c_exits_and_single_press_hints() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -172,7 +172,7 @@ async fn double_ctrl_c_exits_and_single_press_hints() {
 #[tokio::test]
 async fn ctrl_o_toggles_expansion_and_requests_full_redraw() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -226,7 +226,7 @@ fn assistant_start() -> rpi_agent::AgentEvent {
 #[tokio::test]
 async fn thinking_commits_into_transcript_when_text_starts() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -263,7 +263,7 @@ async fn thinking_commits_into_transcript_when_text_starts() {
 #[tokio::test]
 async fn assistant_message_finalizes_as_markdown_item() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -304,7 +304,7 @@ async fn assistant_message_finalizes_as_markdown_item() {
 #[tokio::test]
 async fn assistant_message_with_tool_call_not_boxed() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -359,7 +359,7 @@ fn error_assistant(message: &str) -> rpi_ai::AssistantMessage {
 #[tokio::test]
 async fn turn_end_error_renders_without_usage_line() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -395,7 +395,7 @@ async fn turn_end_error_renders_without_usage_line() {
 #[tokio::test]
 async fn turn_end_success_records_usage_and_context() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -431,7 +431,7 @@ async fn turn_end_success_records_usage_and_context() {
 #[tokio::test]
 async fn auto_retry_end_failure_renders_red() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -461,7 +461,7 @@ async fn auto_retry_end_failure_renders_red() {
 #[tokio::test]
 async fn tool_result_renders_title_and_collapsed_output() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -521,7 +521,7 @@ async fn parallel_results_pair_with_own_args() {
     // 按完成序到达 —— 每个结果必须按 tool_call_id 配对自己的标题(回归:
     // 单槽"最近一次 start"配对会把最后一个调用的 args 安到第一个结果上)
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -574,7 +574,7 @@ async fn parallel_results_pair_with_own_args() {
 #[tokio::test]
 async fn agent_settled_commits_dangling_tool_title() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -607,7 +607,7 @@ async fn agent_settled_commits_dangling_tool_title() {
 #[tokio::test]
 async fn concurrent_select_requests_queue_and_promote() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -663,7 +663,7 @@ async fn concurrent_select_requests_queue_and_promote() {
 #[tokio::test]
 async fn bash_passthrough_runs_and_injects_context() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -700,7 +700,7 @@ async fn bash_passthrough_runs_and_injects_context() {
 #[tokio::test]
 async fn bash_bang_bang_skips_context_injection() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -778,7 +778,7 @@ async fn replay_renders_thinking_blocks() {
         ))])
         .unwrap();
 
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -836,7 +836,7 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
         ])
         .unwrap();
 
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -854,7 +854,7 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
 #[tokio::test]
 async fn execute_help_and_session_commit_lines() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -872,7 +872,7 @@ async fn execute_help_and_session_commit_lines() {
     )
     .await;
     let rendered = committed_text(&state);
-    assert!(rendered.contains("session"), "{rendered}");
+    assert!(rendered.contains("会话信息"), "{rendered}");
     assert!(rendered.contains("model:"), "{rendered}");
     assert!(rendered.contains("usage:"), "{rendered}");
 }
@@ -880,7 +880,7 @@ async fn execute_help_and_session_commit_lines() {
 #[tokio::test]
 async fn execute_thinking_with_arg_updates_footer() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -920,7 +920,7 @@ async fn execute_thinking_with_arg_updates_footer() {
 #[tokio::test]
 async fn execute_model_with_arg_updates_footer() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -950,7 +950,7 @@ async fn execute_model_with_arg_updates_footer() {
 #[tokio::test]
 async fn execute_model_without_arg_opens_selector_at_current_model() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1000,10 +1000,179 @@ async fn execute_model_without_arg_opens_selector_at_current_model() {
     );
 }
 
+// ---- /model 配置入口(添加模型表单 / $EDITOR 条目) ----
+
+/// 在真实按键路径下选中 /model 选择器的配置条目并回车
+/// (`from_end`:true = 末位「编辑 models.json」,false = 次末位「添加模型」)。
+async fn enter_model_config_entry(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    from_end: bool,
+) {
+    super::handlers::execute_command(ctx, state, slash::SlashAction::Model { arg: None }).await;
+    let mut request = state.select.take().unwrap();
+    request.list.selected = if from_end {
+        request.list.options.len() - 1
+    } else {
+        request.list.options.len() - 2
+    };
+    state.select = Some(request);
+    handle_key(ctx, state, Key::Enter).await;
+}
+
+#[tokio::test]
+async fn model_selector_lists_config_entries() {
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+    super::handlers::execute_command(&ctx, &mut state, slash::SlashAction::Model { arg: None })
+        .await;
+    let select = state.select.as_ref().expect("应打开模型选择器");
+    assert!(select.list.options.len() >= 2, "至少含两个配置条目");
+    let last = select.list.options.len() - 1;
+    assert_eq!(
+        select.list.options[last],
+        super::handlers::MODEL_EDITOR_ENTRY
+    );
+    assert_eq!(
+        select.list.options[last - 1],
+        super::handlers::MODEL_FORM_ENTRY
+    );
+}
+
+#[tokio::test]
+async fn model_selector_editor_entry_requests_suspend() {
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+    enter_model_config_entry(&ctx, &mut state, true).await;
+    assert!(
+        matches!(
+            state.suspend_action,
+            Some(super::state::SuspendAction::EditModelsJson)
+        ),
+        "编辑条目应置挂起动作标记"
+    );
+    assert!(state.select.is_none());
+}
+
+#[tokio::test]
+async fn model_form_known_provider_skips_provider_steps() {
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+    enter_model_config_entry(&ctx, &mut state, false).await;
+    assert!(state.model_form.is_some(), "回车配置条目应打开表单");
+    assert!(
+        matches!(
+            state.select.as_ref().unwrap().kind,
+            SelectKind::ModelTargetChoice
+        ),
+        "第一步应弹出写入位置选择"
+    );
+    handle_key(&ctx, &mut state, Key::Enter).await; // 选中「当前目录」
+    assert_eq!(
+        state.model_form.as_ref().unwrap().target,
+        Some(super::state::ModelFormTarget::Project)
+    );
+
+    // 已知 provider(zai 内置)→ 跳过 api/baseUrl/apiKey,直达模型 id
+    state.editor.set_text("zai");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    let form = state.model_form.as_ref().unwrap();
+    assert!(form.known_provider);
+    assert_eq!(form.step, super::state::ModelFormStep::ModelId);
+
+    // Esc 取消整张表单
+    handle_key(&ctx, &mut state, Key::Esc).await;
+    assert!(state.model_form.is_none());
+}
+
+#[tokio::test]
+async fn model_form_adds_new_provider_and_switches() {
+    let dir = std::env::temp_dir().join(format!(
+        "rpi_model_form_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+    state.cwd = dir.clone();
+    state.home = None;
+
+    enter_model_config_entry(&ctx, &mut state, false).await;
+    handle_key(&ctx, &mut state, Key::Enter).await; // 写入位置:当前目录
+    assert_eq!(
+        state.model_form.as_ref().unwrap().step,
+        super::state::ModelFormStep::Provider
+    );
+
+    // 新 provider:provider → api(选择列表) → baseUrl(留空跳过) → apiKey → model
+    state.editor.set_text("tprov");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    let form = state.model_form.as_ref().unwrap();
+    assert_eq!(
+        form.step,
+        super::state::ModelFormStep::Api,
+        "未知 provider 应进入 api 选择"
+    );
+    assert!(state.select.is_some(), "api 协议应弹出选择列表");
+    handle_key(&ctx, &mut state, Key::Enter).await; // 选中 openai-completions
+    assert_eq!(
+        state.model_form.as_ref().unwrap().api.as_deref(),
+        Some("openai-completions")
+    );
+    handle_key(&ctx, &mut state, Key::Enter).await; // baseUrl 留空跳过
+    assert_eq!(
+        state.model_form.as_ref().unwrap().step,
+        super::state::ModelFormStep::ApiKeyEnv
+    );
+    state.editor.set_text("TPROV_API_KEY");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    assert_eq!(
+        state.model_form.as_ref().unwrap().step,
+        super::state::ModelFormStep::ModelId
+    );
+    state.editor.set_text("test-model");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+
+    // 落盘 + 热重载 + 自动切换
+    assert!(state.model_form.is_none());
+    assert_eq!(state.model_label, "tprov/test-model");
+    let file = dir.join(".rpi/models.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("tprov") && text.contains("test-model"),
+        "{text}"
+    );
+    let model = resolver
+        .read()
+        .unwrap()
+        .resolve("tprov/test-model")
+        .unwrap();
+    assert_eq!(model.api, "openai-completions");
+    // env 未设置 → apiKey 字面值兜底(与配置体系语义一致)
+    assert_eq!(model.api_key.as_deref(), Some("TPROV_API_KEY"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn compact_done_resets_context_estimate_and_reports() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1051,7 +1220,8 @@ async fn popup_state_with_input(input: &str) -> (crate::assembly::BuiltSession, 
     let mut state = test_state();
     for c in input.chars() {
         let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
-        handle_key(&ctx_of(&built, &rpi_core::create_model_resolver(), &router), &mut state, Key::Char(c)).await;
+        let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
+        handle_key(&ctx_of(&built, &resolver, &router), &mut state, Key::Char(c)).await;
     }
     (built, state)
 }
@@ -1070,7 +1240,7 @@ async fn typing_slash_opens_filtered_popup() {
 
     // 继续输入到无匹配:弹窗退场
     let (built, mut state) = popup_state_with_input("/m").await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     for c in "zz".chars() {
@@ -1083,7 +1253,7 @@ async fn typing_slash_opens_filtered_popup() {
 async fn slash_quit_via_enter_returns_quit_signal() {
     // 回归:submit_input 曾丢弃 execute_command 的退出信号,/quit 静默失效
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1097,7 +1267,7 @@ async fn slash_quit_via_enter_returns_quit_signal() {
 #[tokio::test]
 async fn enter_executes_partial_slash_directly() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1113,7 +1283,7 @@ async fn enter_executes_partial_slash_directly() {
 #[tokio::test]
 async fn exact_slash_input_executes_directly_on_enter() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1128,7 +1298,7 @@ async fn exact_slash_input_executes_directly_on_enter() {
 #[tokio::test]
 async fn tab_completes_and_esc_dismisses_popup() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1182,7 +1352,7 @@ fn approval_request() -> rpi_core::ApprovalRequest {
 #[tokio::test]
 async fn approval_overlay_digit_keys_resolve_decisions() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1215,7 +1385,7 @@ async fn approval_overlay_digit_keys_resolve_decisions() {
 #[tokio::test]
 async fn approval_overlay_esc_denies_and_ctrl_c_aborts() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1251,7 +1421,7 @@ async fn approval_overlay_esc_denies_and_ctrl_c_aborts() {
 #[tokio::test]
 async fn slash_mode_switches_session_mode() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1384,7 +1554,7 @@ async fn variant_command_enter_completes_then_second_enter_executes() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let built = built_session_with_store(crate::assembly::SessionStore::New { dir: dir.clone() }).await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
@@ -1420,7 +1590,7 @@ async fn variant_command_enter_completes_then_second_enter_executes() {
 #[tokio::test]
 async fn bare_variant_commands_show_usage_only() {
     let built = built_memory_session().await;
-    let resolver = rpi_core::create_model_resolver();
+    let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();

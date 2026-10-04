@@ -18,11 +18,18 @@ struct ProviderOverride {
 pub struct ModelResolver {
     extra_models: Vec<Model>,
     provider_overrides: BTreeMap<String, ProviderOverride>,
+    /// false 时 available_models 不追加内置 provider 默认表(models.json
+    /// 顶层 `showBuiltinModels: false`);自定义模型照常列出
+    show_builtin_models: bool,
 }
 
-/// 工厂:空 resolver(内置 provider 端点表始终可用)。
+/// 工厂:空 resolver(内置 provider 端点表始终可用;默认追加内置默认模型
+/// 到 /model 候选)。
 pub fn create_model_resolver() -> ModelResolver {
-    ModelResolver::default()
+    ModelResolver {
+        show_builtin_models: true,
+        ..ModelResolver::default()
+    }
 }
 
 /// 各 provider 的默认模型(pi model-resolver 默认值的对应表)。
@@ -48,20 +55,28 @@ impl ModelResolver {
         self.extra_models.push(model);
     }
 
+    /// `/model` 候选是否追加内置 provider 默认表(缺省 true)。
+    pub fn set_show_builtin_models(&mut self, show: bool) {
+        self.show_builtin_models = show;
+    }
+
     /// `/model` 选择器的候选清单:models.json 注册的自定义模型在前,其后是
-    /// 各内置 provider 的默认模型。自定义模型与所在 provider 的内置默认
-    /// 模型**并列**(如 models.json 覆盖 openai 代理模型时,openai 官方默认
-    /// 模型仍可选);全部候选均可用 `resolve` 解析。
+    /// 各内置 provider 的默认模型(`showBuiltinModels: false` 时省略)。
+    /// 自定义模型与所在 provider 的内置默认模型**并列**(如 models.json
+    /// 覆盖 openai 代理模型时,openai 官方默认模型仍可选);全部候选均可用
+    /// `resolve` 解析。
     pub fn available_models(&self) -> Vec<Model> {
         let mut models: Vec<Model> = self.extra_models.clone();
-        for provider in rpi_ai::builtin_providers() {
-            if let Some(model_id) = default_model_for(provider) {
-                if let Ok(model) = self.resolve(&format!("{provider}/{model_id}")) {
-                    if !models
-                        .iter()
-                        .any(|m| m.provider == model.provider && m.id == model.id)
-                    {
-                        models.push(model);
+        if self.show_builtin_models {
+            for provider in rpi_ai::builtin_providers() {
+                if let Some(model_id) = default_model_for(provider) {
+                    if let Ok(model) = self.resolve(&format!("{provider}/{model_id}")) {
+                        if !models
+                            .iter()
+                            .any(|m| m.provider == model.provider && m.id == model.id)
+                        {
+                            models.push(model);
+                        }
                     }
                 }
             }

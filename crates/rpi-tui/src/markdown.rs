@@ -380,11 +380,14 @@ fn is_hr(trimmed: &str) -> bool {
         || (trimmed.chars().all(|c| c == '*') && trimmed.chars().count() >= 3)
 }
 
+/// 从 `from` 下标起找目标字符(含 from)。必须真正从 from 起扫:闭合
+/// 字符与起始字符相同时(`` `code` ``、`*斜体*`),若从 0 扫会先命中
+/// 起始字符自身,行内标记永远配不上对。
 fn find_char(chars: &[char], from: usize, target: char) -> Option<usize> {
-    chars
+    chars[from..]
         .iter()
         .position(|c| *c == target)
-        .filter(|pos| *pos >= from)
+        .map(|pos| pos + from)
 }
 
 fn find_pattern(chars: &[char], from: usize, pattern: &str) -> Option<usize> {
@@ -442,6 +445,39 @@ mod tests {
         let text = &out[0];
         assert!(text.contains("x") && text.contains("bold") && text.contains("it"));
         assert!(text.contains("l"));
+    }
+
+    #[test]
+    fn inline_code_strips_backticks_and_takes_code_color() {
+        let t = theme();
+        let lines = Markdown::new(&t).render("`/help` — 显示", 80);
+        assert_eq!(lines.len(), 1);
+        // 反引号必须被剥掉;行首 code span(闭合符与起始符同字符)也不能漏配对
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "/help — 显示", "{text:?}");
+        let code_span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "/help")
+            .expect("code span 应独立存在");
+        assert_eq!(code_span.style.fg, Some(t.md_code));
+    }
+
+    #[test]
+    fn italic_takes_italic_style() {
+        let t = theme();
+        let lines = Markdown::new(&t).render("*it* ok", 80);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "it ok", "{text:?}");
+        let span = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "it")
+            .expect("italic span 应独立存在");
+        assert!(
+            span.style.add_modifier.contains(ratatui::style::Modifier::ITALIC),
+            "斜体应有 ITALIC 修饰: {span:?}"
+        );
     }
 
     #[test]

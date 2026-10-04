@@ -20,59 +20,70 @@ use crate::model::{create_model_resolver, ModelResolver};
 // models.json 数据模型(serde camelCase,与 Pi 字段层级一致)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelsFile {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    show_builtin_models: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     providers: BTreeMap<String, ProviderConfig>,
+    /// 保留未知顶层字段(/model 配置入口写回时不丢用户手写的其它配置)
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     base_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     api: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     headers: Option<BTreeMap<String, String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     compat: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     models: Vec<ModelConfig>,
+    /// 保留未知 provider 级字段
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     base_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     api: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     headers: Option<BTreeMap<String, String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     compat: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     input: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     context_window: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     thinking_level_map: Option<BTreeMap<String, Option<String>>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     sampling_params: Option<serde_json::Map<String, serde_json::Value>>,
+    /// 保留未知 model 级字段
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// 合并 provider 配置:覆盖方(项目)的非空字段逐项覆盖,models 按 id 合并。
@@ -264,16 +275,21 @@ fn register_config(resolver: &mut ModelResolver, providers: BTreeMap<String, Pro
 
 /// 从 项目 `.rpi/models.json` + 全局 `~/.rpi/models.json` 加载配置并构建
 /// resolver(内置 provider 端点表始终可用)。文件缺失 = 空配置;解析失败 =
-/// 诊断 + 跳过。
+/// 诊断 + 跳过。顶层 `showBuiltinModels`(项目覆盖全局)控制 `/model`
+/// 候选是否追加内置 provider 默认表。
 pub fn create_model_resolver_from_config(
     project_dir: Option<&Path>,
     home: Option<&Path>,
 ) -> ModelResolver {
     let mut resolver = create_model_resolver();
     let mut providers = BTreeMap::new();
+    let mut show_builtin_models = true;
     for path in models_config_paths(project_dir, home) {
         match parse_models_file(&path) {
             Ok(file) => {
+                if let Some(flag) = file.show_builtin_models {
+                    show_builtin_models = flag;
+                }
                 for (id, provider) in file.providers {
                     match providers.get_mut(&id) {
                         Some(existing) => merge_provider(existing, provider),
@@ -287,6 +303,7 @@ pub fn create_model_resolver_from_config(
         }
     }
     register_config(&mut resolver, providers);
+    resolver.set_show_builtin_models(show_builtin_models);
     resolver
 }
 
@@ -300,6 +317,128 @@ fn models_config_paths(project_dir: Option<&Path>, home: Option<&Path>) -> Vec<s
         paths.push(project.join(".rpi/models.json"));
     }
     paths
+}
+
+// ---------------------------------------------------------------------------
+// models.json 写回(/model 配置入口):读改写走同一数据模型,未知字段经
+// serde(flatten) 保留
+// ---------------------------------------------------------------------------
+
+/// 读单个 models.json 为可写回的数据模型;文件不存在 = 空配置。
+fn read_models_file(path: &Path) -> Result<ModelsFile, String> {
+    parse_models_file(path)
+}
+
+/// 原子写回 models.json:先写同目录临时文件再 rename,失败不留半截文件。
+fn save_models_file(path: &Path, file: &ModelsFile) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(file)
+        .map_err(|e| format!("models.json 序列化失败:{e}"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// `/model` 交互式添加的一条记录:provider 已存在时 api/baseUrl/apiKey
+/// 沿用配置原值(只追加 model);新 provider 三者必填 api。
+#[derive(Debug, Clone)]
+pub struct NewModelEntry {
+    pub provider_id: String,
+    pub api: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
+    pub model_id: String,
+}
+
+/// 把一条新模型 upsert 进 models.json 并原子写回:provider 按 id 查找,
+/// 已存在则只追加 model(缺 api 等由 provider 级承担),不存在则要求 api
+/// 字段并新建 provider;model 按 id 去重(重复 = 覆盖 name)。
+pub fn upsert_models_json_entry(path: &Path, entry: &NewModelEntry) -> Result<(), String> {
+    let mut file = read_models_file(path)?;
+    let provider_id = entry.provider_id.trim();
+    let model_id = entry.model_id.trim();
+    if provider_id.is_empty() || model_id.is_empty() {
+        return Err("provider 与 model id 不能为空".into());
+    }
+    let provider = match file.providers.get_mut(provider_id) {
+        Some(existing) => {
+            if existing.api.is_none() && entry.api.is_some() {
+                existing.api = entry.api.clone();
+            }
+            existing
+        }
+        None => {
+            let api = entry.api.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let Some(api) = api else {
+                return Err(format!("新 provider `{provider_id}` 需要指定 api 协议"));
+            };
+            let mut created = ProviderConfig {
+                api: Some(api.to_string()),
+                ..ProviderConfig::default()
+            };
+            if let Some(url) = entry.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                created.base_url = Some(url.to_string());
+            }
+            if let Some(key) = entry.api_key_env.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            {
+                created.api_key = Some(key.to_string());
+            }
+            file.providers.insert(provider_id.to_string(), created);
+            file.providers.get_mut(provider_id).unwrap()
+        }
+    };
+    match provider.models.iter_mut().find(|m| m.id == model_id) {
+        Some(existing) => existing.name = Some(model_id.to_string()),
+        None => provider.models.push(ModelConfig {
+            id: model_id.to_string(),
+            name: Some(model_id.to_string()),
+            ..ModelConfig::default()
+        }),
+    }
+    save_models_file(path, &file)
+}
+
+/// models.json 不存在时的初始模板:一个占位示例 provider,字段齐全、
+/// 保存后即可解析(URL 是占位符,使用前必须改掉)。
+pub fn write_models_template_if_absent(path: &Path) -> Result<bool, String> {
+    if path.exists() {
+        return Ok(false);
+    }
+    save_models_file(path, &default_models_template())?;
+    Ok(true)
+}
+
+fn default_models_template() -> ModelsFile {
+    let mut provider = ProviderConfig {
+        base_url: Some("https://your-endpoint.example.com/v1".into()),
+        api: Some("openai-completions".into()),
+        api_key: Some("YOUR_API_ENV_VAR_NAME".into()),
+        ..ProviderConfig::default()
+    };
+    provider.models.push(ModelConfig {
+        id: "example-model".into(),
+        name: Some("example-model".into()),
+        ..ModelConfig::default()
+    });
+    let mut file = ModelsFile::default();
+    file.providers.insert("example".into(), provider);
+    file
+}
+
+/// `/model` 配置入口的写回目标:项目 `.rpi/models.json` 存在则写它,
+/// 否则全局 `~/.rpi/models.json`;两者都缺 = 项目路径(由调用方创建)。
+pub fn preferred_models_path(project_dir: Option<&Path>, home: Option<&Path>) -> std::path::PathBuf {
+    if let Some(project) = project_dir {
+        let path = project.join(".rpi/models.json");
+        if path.exists() {
+            return path;
+        }
+        return path;
+    }
+    home.map(|home| home.join(".rpi/models.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".rpi/models.json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +698,201 @@ mod tests {
         assert_eq!(
             load_theme_setting(Some(&project.0), Some(&global.0)).as_deref(),
             Some("nord")
+        );
+    }
+
+    #[test]
+    fn show_builtin_models_flag_controls_available_models() {
+        let dir = TempDir::new("showflag");
+        dir.write(
+            ".rpi/models.json",
+            r#"{ "showBuiltinModels": false, "providers": {
+                "local": { "baseUrl": "http://localhost:1/v1", "api": "openai-completions",
+                    "models": [{ "id": "m1" }] }
+            } }"#,
+        );
+        let resolver = create_model_resolver_from_config(Some(&dir.0), None);
+        let specs: Vec<String> = resolver
+            .available_models()
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.id))
+            .collect();
+        assert_eq!(specs, vec!["local/m1".to_string()], "{specs:?}");
+        // resolve 不受开关影响(内置默认模型仍可显式解析)
+        assert!(resolver.resolve("anthropic/claude-sonnet-4-5").is_ok());
+
+        // 缺省字段 = true;项目覆盖全局
+        let global = TempDir::new("showflag_g");
+        let project = TempDir::new("showflag_p");
+        global.write(
+            ".rpi/models.json",
+            r#"{ "showBuiltinModels": false, "providers": {} }"#,
+        );
+        project.write(
+            ".rpi/models.json",
+            r#"{ "showBuiltinModels": true, "providers": {} }"#,
+        );
+        let resolver = create_model_resolver_from_config(Some(&project.0), Some(&global.0));
+        assert!(
+            !resolver.available_models().is_empty(),
+            "项目 true 覆盖全局 false"
+        );
+    }
+
+    #[test]
+    fn save_models_file_round_trip_preserves_unknown_fields() {
+        let dir = TempDir::new("save_rt");
+        let path = dir.0.join(".rpi/models.json");
+        dir.write(
+            ".rpi/models.json",
+            r#"{ "showBuiltinModels": false,
+                "providers": { "p1": { "baseUrl": "http://p1/v1",
+                    "api": "openai-completions", "customField": "keep-me",
+                    "models": [{ "id": "m1", "modelField": 42 }] } } }"#,
+        );
+        let mut file = read_models_file(&path).unwrap();
+        assert_eq!(file.show_builtin_models, Some(false));
+        // 模拟表单添加:新 provider + 已有 provider 追加模型
+        let provider = ProviderConfig {
+            base_url: Some("http://p2/v1".into()),
+            api: Some("anthropic-messages".into()),
+            models: vec![ModelConfig {
+                id: "m2".into(),
+                name: Some("m2".into()),
+                ..ModelConfig::default()
+            }],
+            ..ProviderConfig::default()
+        };
+        file.providers.insert("p2".into(), provider);
+        file.providers.get_mut("p1").unwrap().models.push(ModelConfig {
+            id: "m3".into(),
+            ..ModelConfig::default()
+        });
+        save_models_file(&path, &file).unwrap();
+
+        // 往返:新条目在,未知字段保留,原字段不丢
+        let text = std::fs::read_to_string(&path).unwrap();
+        let reloaded = read_models_file(&path).unwrap();
+        assert_eq!(reloaded.show_builtin_models, Some(false));
+        let p1 = reloaded.providers.get("p1").unwrap();
+        assert_eq!(p1.base_url.as_deref(), Some("http://p1/v1"));
+        assert_eq!(
+            p1.extra.get("customField").and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
+        assert_eq!(p1.models.len(), 2, "{text}");
+        assert_eq!(
+            p1.models[0].extra.get("modelField").and_then(|v| v.as_u64()),
+            Some(42)
+        );
+        assert_eq!(reloaded.providers.get("p2").unwrap().api.as_deref(), Some("anthropic-messages"));
+    }
+
+    #[test]
+    fn upsert_models_json_entry_merges_and_validates() {
+        let dir = TempDir::new("upsert");
+        let path = dir.0.join(".rpi/models.json");
+        dir.write(
+            ".rpi/models.json",
+            r#"{ "providers": { "p1": { "baseUrl": "http://p1/v1",
+                "api": "openai-completions", "customField": "keep",
+                "models": [{ "id": "m1" }] } } }"#,
+        );
+        // 新 provider 缺 api → 拒绝
+        let err = upsert_models_json_entry(
+            &path,
+            &NewModelEntry {
+                provider_id: "p2".into(),
+                api: None,
+                base_url: Some("http://p2/v1".into()),
+                api_key_env: None,
+                model_id: "m9".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("api"), "{err}");
+        // 已有 provider:只追加 model,provider 字段不动
+        upsert_models_json_entry(
+            &path,
+            &NewModelEntry {
+                provider_id: "p1".into(),
+                api: Some("anthropic-messages".into()),
+                base_url: None,
+                api_key_env: Some("P1_KEY_ENV".into()),
+                model_id: "m2".into(),
+            },
+        )
+        .unwrap();
+        // 新 provider 全字段
+        upsert_models_json_entry(
+            &path,
+            &NewModelEntry {
+                provider_id: "p2".into(),
+                api: Some("anthropic-messages".into()),
+                base_url: Some("http://p2/v1".into()),
+                api_key_env: Some("P2_KEY_ENV".into()),
+                model_id: "m9".into(),
+            },
+        )
+        .unwrap();
+        let resolver = create_model_resolver_from_config(Some(&dir.0), None);
+        let m2 = resolver.resolve("p1/m2").unwrap();
+        assert_eq!(m2.api, "openai-completions", "已有 provider 沿用原 api");
+        assert_eq!(m2.base_url, "http://p1/v1");
+        let m9 = resolver.resolve("p2/m9").unwrap();
+        assert_eq!(m9.api, "anthropic-messages");
+        assert_eq!(m9.base_url, "http://p2/v1");
+        assert_eq!(m9.api_key.as_deref(), Some("P2_KEY_ENV"));
+        // 未知字段保留
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("customField"), "{text}");
+        // 幂等:重复 model id 只覆盖 name 不重复追加
+        upsert_models_json_entry(
+            &path,
+            &NewModelEntry {
+                provider_id: "p1".into(),
+                api: None,
+                base_url: None,
+                api_key_env: None,
+                model_id: "m2".into(),
+            },
+        )
+        .unwrap();
+        let reloaded = read_models_file(&path).unwrap();
+        assert_eq!(reloaded.providers.get("p1").unwrap().models.len(), 2);
+    }
+
+    #[test]
+    fn models_template_parses_and_resolves() {
+        let dir = TempDir::new("template");
+        let path = dir.0.join(".rpi/models.json");
+        save_models_file(&path, &default_models_template()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap();
+        let resolver = create_model_resolver_from_config(Some(&dir.0), None);
+        let model = resolver.resolve("example/example-model").unwrap();
+        assert_eq!(model.api, "openai-completions");
+        assert!(resolver.available_models().len() > 1, "缺省显示内置默认表");
+    }
+
+    #[test]
+    fn preferred_models_path_prefers_project_dir() {
+        let global = TempDir::new("pref_g");
+        let project = TempDir::new("pref_p");
+        // 提供项目目录 → 恒写项目路径(存在与否一致,避免歧义)
+        assert_eq!(
+            preferred_models_path(Some(&project.0), Some(&global.0)),
+            project.0.join(".rpi/models.json")
+        );
+        project.write(".rpi/models.json", r#"{ "providers": {} }"#);
+        assert_eq!(
+            preferred_models_path(Some(&project.0), Some(&global.0)),
+            project.0.join(".rpi/models.json")
+        );
+        // 无项目目录 → 全局
+        assert_eq!(
+            preferred_models_path(None, Some(&global.0)),
+            global.0.join(".rpi/models.json")
         );
     }
 }

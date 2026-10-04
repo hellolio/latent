@@ -14,9 +14,9 @@ def test_local_slash_commands_without_llm_requests():
     app = RpiApp(turns=[])
     try:
         app.wait_ready()
-        # /help:命令表
+        # /help:命令表(markdown 渲染:标题 + 列表,行内代码形式 /命令)
         app.sendline("/help")
-        app.expect_text("命令:")
+        app.expect_text("命令")
         app.expect_text("/quit")
         # /session info:会话信息(id/file);裸 /session 打开历史会话选择器
         app.sendline("/session info")

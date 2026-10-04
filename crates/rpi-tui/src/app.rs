@@ -295,6 +295,45 @@ impl<W: Write> TuiApp<W> {
         Ok(())
     }
 
+    /// 挂起 TUI:恢复终端常规态,把整个屏幕让给外部子进程(如 $EDITOR)。
+    /// 期间调用方不得渲染,且应暂停自己的输入读取;子进程退出后必须调用
+    /// `resume` 恢复(全量重绘)。
+    pub fn suspend(&mut self) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        let mut out = String::from(AUTO_WRAP_ON);
+        out.push_str(SHOW_CURSOR);
+        // 清可视屏幕:外部编辑器从干净屏幕开始(scrollback 不受影响)
+        out.push_str("\x1b[2J");
+        out.push_str(&move_to(0, 0));
+        if self.restores_terminal {
+            // 内存 sink(测试)不写,避免污染回放字节流
+            out.push_str(BRACKETED_PASTE_OFF);
+            out.push_str(KEYBOARD_POP);
+        }
+        self.write_raw(out.as_bytes())?;
+        disable_raw_mode()?;
+        Ok(())
+    }
+
+    /// 从 `suspend` 恢复:重回 raw mode + 终端模式序列,按当前定稿文档
+    /// 全量重绘(编辑期间窗口尺寸变化经 sync_size 感知,走重折行)。
+    pub fn resume(&mut self, lines: &[UiLine]) -> io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        enable_raw_mode()?;
+        let mut out = String::from(AUTO_WRAP_OFF);
+        out.push_str(HIDE_CURSOR);
+        if self.restores_terminal {
+            out.push_str(KEYBOARD_PUSH);
+            out.push_str(BRACKETED_PASTE_ON);
+        }
+        self.write_raw(out.as_bytes())?;
+        self.redraw_all(lines)
+    }
+
     /// 收尾:清掉活动尾部区,光标落回最后一条定稿行末尾,恢复终端
     /// (定稿文档留在屏幕/scrollback)。
     pub fn finish(&mut self) -> io::Result<()> {

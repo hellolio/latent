@@ -73,8 +73,9 @@ pub struct InteractiveCtx<'a> {
     pub subagent_factory: Option<&'a Arc<rpi_core::SubagentSessionFactory>>,
     /// None = 内存会话(无 SessionManager);经 holder 读取当前值(/new 可切换)
     pub manager_holder: Option<&'a crate::assembly::SessionManagerHolder>,
-    /// `/model` 的候选与解析(models.json + 内置 provider 默认表)
-    pub resolver: &'a ModelResolver,
+    /// `/model` 的候选与解析(models.json + 内置 provider 默认表)。
+    /// RwLock 支持配置入口热重载(编辑 models.json 后整体替换)。
+    pub resolver: &'a std::sync::RwLock<ModelResolver>,
     /// 装配生效的压缩配置(/session 展示)
     pub compaction_config: &'a crate::assembly::CompactionConfig,
     /// 后台 subagent 运行注册表(footer 计数与 /new、退出清理;None = 未装配)
@@ -107,6 +108,11 @@ pub async fn handle_key(
     if state.select.is_some() {
         handle_select_key(ctx, state, key).await;
         return false;
+    }
+
+    // 「添加模型」表单激活:Enter 提交当前步骤,Esc 取消,其余键进编辑器
+    if state.model_form.is_some() {
+        return handle_model_form_key(ctx, state, key).await;
     }
 
     // 斜杠补全弹窗跟随编辑器内容(直接 set_text 的路径也同步)
@@ -299,15 +305,72 @@ async fn handle_select_key(
                         }
                     }
                     SelectKind::Model { models } => {
-                        if let Some(model) = models.get(index) {
-                            ctx.session.current().set_model(model.clone()).await;
-                            refresh_footer(ctx, state);
+                        if index < models.len() {
+                            if let Some(model) = models.get(index) {
+                                ctx.session.current().set_model(model.clone()).await;
+                                refresh_footer(ctx, state);
+                                state.status = Status::Idle;
+                                state.commit_ephemeral(warning_line_theme(
+                                    &format!("model → {}", state.model_label),
+                                    &state.theme,
+                                ));
+                            }
+                        } else if index == models.len() {
+                            // 末尾配置条目 1:交互式添加模型(第一步选写入位置)
+                            state.model_form = Some(super::state::ModelForm::new());
+                            let home_str = state.home.as_deref().and_then(|p| p.to_str());
+                            let project = state.cwd.join(".rpi/models.json");
+                            let options = vec![
+                                format!(
+                                    "当前目录  {}(仅本项目)",
+                                    rpi_tui::footer::abbreviate_home(
+                                        &project.display().to_string(),
+                                        home_str
+                                    )
+                                ),
+                                match &state.home {
+                                    Some(home) => format!(
+                                        "全局  {}(所有项目)",
+                                        rpi_tui::footer::abbreviate_home(
+                                            &home.join(".rpi/models.json").display().to_string(),
+                                            home_str
+                                        )
+                                    ),
+                                    None => "全局(未检测到 HOME)".to_string(),
+                                },
+                            ];
+                            state.select = Some(SelectRequest {
+                                prompt: "添加模型 · 写入哪个 models.json?".into(),
+                                list: SelectList::new(options),
+                                kind: SelectKind::ModelTargetChoice,
+                            });
                             state.status = Status::Idle;
-                            state.commit_ephemeral(warning_line_theme(
-                                &format!("model → {}", state.model_label),
-                                &state.theme,
-                            ));
+                        } else {
+                            // 末尾配置条目 2:$EDITOR 打开 models.json(事件循环代办)
+                            state.suspend_action = Some(super::state::SuspendAction::EditModelsJson);
+                            state.status = Status::Idle;
                         }
+                    }
+                    SelectKind::ModelApiChoice => {
+                        // api 协议选择列表(0/1);Esc 分支已把表单整体取消
+                        let apis = ["openai-completions", "anthropic-messages"];
+                        if let Some(form) = state.model_form.as_mut() {
+                            form.api = apis.get(index).map(|s| (*s).to_string());
+                            form.step = super::state::ModelFormStep::BaseUrl;
+                        }
+                        state.status = Status::Idle;
+                    }
+                    SelectKind::ModelTargetChoice => {
+                        // 写入位置选择列表(0=项目 1=全局);Esc 分支取消表单
+                        if let Some(form) = state.model_form.as_mut() {
+                            form.target = Some(if index == 0 {
+                                super::state::ModelFormTarget::Project
+                            } else {
+                                super::state::ModelFormTarget::Global
+                            });
+                            form.step = super::state::ModelFormStep::Provider;
+                        }
+                        state.status = Status::Idle;
                     }
                     SelectKind::Thinking => {
                         if let Some(name) = thinking_level_options().get(index) {
@@ -349,6 +412,10 @@ async fn handle_select_key(
                     }
                     SelectKind::SubagentAgent { .. } | SelectKind::Session { .. } => {}
                     SelectKind::Model { .. } | SelectKind::Thinking => {}
+                    // Esc 在表单中途的选择列表上 = 取消整张表单
+                    SelectKind::ModelApiChoice | SelectKind::ModelTargetChoice => {
+                        state.model_form = None;
+                    }
                     SelectKind::Theme { .. } => {}
                     SelectKind::Approval { responder } => {
                         // Esc = 拒绝;Ctrl+C = 中止本次任务(13 文档 §10.3)
@@ -523,6 +590,15 @@ async fn switch_to_subagent(
     }
 }
 
+/// 命令信息输出统一管线:markdown 源文本 → 与 assistant 正文同一渲染
+/// (标题/列表/行内代码着色)→ 逐行入转录。
+fn commit_markdown(state: &mut InteractiveState, markdown: &str) {
+    let rendered = view::assistant_markdown(markdown, &state.theme, state.width.max(1));
+    for line in rendered {
+        state.commit_line(line);
+    }
+}
+
 /// 斜杠命令执行(解析在 slash.rs)。
 pub async fn execute_command(
     ctx: &InteractiveCtx<'_>,
@@ -531,11 +607,10 @@ pub async fn execute_command(
 ) -> bool {
     match action {
         slash::SlashAction::Help => {
-            // 与上文留一行间隔(commit_blank 去重,不会双写)
+            // 与上文留一行间隔(commit_blank 去重,不会双写)。命令输出是
+            // rpi 自己"创作"的内容,与 assistant 正文同走 markdown 渲染管线
             state.commit_blank();
-            for line in slash::help_lines() {
-                state.commit_line(plain_dim(&line, &state.theme));
-            }
+            commit_markdown(state, &slash::help_markdown());
         }
         slash::SlashAction::Quit => return true,
         slash::SlashAction::Session { arg } => match arg.as_deref() {
@@ -543,9 +618,7 @@ pub async fn execute_command(
             Some("info") => {
                 // 与上文留一行间隔(commit_blank 去重,不会双写)
                 state.commit_blank();
-                for line in session_info_lines(ctx, state) {
-                    state.commit_line(plain_dim(&line, &state.theme));
-                }
+                commit_markdown(state, &session_info_markdown(ctx, state));
             }
             Some(other) => {
                 state.commit_ephemeral(view::error_line(
@@ -721,19 +794,22 @@ pub async fn execute_command(
             }
         }
         slash::SlashAction::Model { arg } => match arg {
-            Some(spec) => match ctx.resolver.resolve(&spec) {
-                Ok(model) => {
-                    ctx.session.current().set_model(model).await;
-                    refresh_footer(ctx, state);
-                    state.status = Status::Idle;
+            Some(spec) => {
+                let resolved = ctx.resolver.read().unwrap().resolve(&spec);
+                match resolved {
+                    Ok(model) => {
+                        ctx.session.current().set_model(model).await;
+                        refresh_footer(ctx, state);
+                        state.status = Status::Idle;
+                    }
+                    Err(error) => {
+                        state.commit_ephemeral(view::error_line(
+                            &format!("model 切换失败: {error}"),
+                            &state.theme,
+                        ));
+                    }
                 }
-                Err(error) => {
-                    state.commit_ephemeral(view::error_line(
-                        &format!("model 切换失败: {error}"),
-                        &state.theme,
-                    ));
-                }
-            },
+            }
             None => open_model_selector(ctx, state),
         },
         slash::SlashAction::Theme { arg } => match arg {
@@ -770,20 +846,20 @@ pub async fn execute_command(
     false
 }
 
-fn open_model_selector(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
-    let models = ctx.resolver.available_models();
-    if models.is_empty() {
-        state.commit_ephemeral(warning_line_theme(
-            "没有可选模型(models.json 或内置 provider)",
-            &state.theme,
-        ));
-        return;
-    }
-    let specs: Vec<String> = models
+/// /model 选择器末尾的两个配置入口(index 越界 = 特殊条目,同 /subagent
+/// 的 off 项模式)。
+pub const MODEL_FORM_ENTRY: &str = "＋ 添加模型…";
+pub const MODEL_EDITOR_ENTRY: &str = "⚙ 编辑 models.json…";
+
+pub(crate) fn open_model_selector(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
+    let models = ctx.resolver.read().unwrap().available_models();
+    let mut options: Vec<String> = models
         .iter()
         .map(|model| format!("{}/{}", model.provider, model.id))
         .collect();
-    let mut list = SelectList::new(specs);
+    options.push(MODEL_FORM_ENTRY.into());
+    options.push(MODEL_EDITOR_ENTRY.into());
+    let mut list = SelectList::new(options);
     if let Some(index) = list
         .options
         .iter()
@@ -792,10 +868,154 @@ fn open_model_selector(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
         list.selected = index;
     }
     state.select = Some(SelectRequest {
-        prompt: "选择模型".into(),
+        prompt: "选择模型(↓ 到末尾可配置)".into(),
         list,
         kind: SelectKind::Model { models },
     });
+}
+
+/// 「添加模型」表单激活时的按键分派:Enter 提交当前步骤,Esc 取消,
+/// 其余键交给编辑器(正常输入体验)。
+async fn handle_model_form_key(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    key: rpi_tui::Key,
+) -> bool {
+    match key {
+        rpi_tui::Key::Esc => {
+            state.model_form = None;
+            state.commit_ephemeral(warning_line_theme("已取消添加模型", &state.theme));
+        }
+        rpi_tui::Key::Enter => {
+            // 不走 take_input(它拦截空输入):可选字段允许直接回车跳过,
+            // 必填字段(provider/model)的空提交由 advance_model_form 忽略
+            let text = state.editor.expanded_text().trim().to_string();
+            state.editor.commit_history();
+            state.editor.clear();
+            advance_model_form(ctx, state, &text).await;
+        }
+        key => state.editor_key(&key),
+    }
+    false
+}
+
+/// 提交表单当前步骤:逐步收集 provider/api/baseUrl/apiKey/model,收齐后
+/// upsert 进 models.json 并热重载、切换到新模型。
+async fn advance_model_form(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState, text: &str) {
+    use super::state::ModelFormStep;
+    let Some(form) = state.model_form.as_mut() else {
+        return;
+    };
+    match form.step {
+        ModelFormStep::Target => unreachable!("写入位置经选择列表写入,不经文本提交"),
+        ModelFormStep::Provider => {
+            if text.is_empty() {
+                return; // 空输入不推进,等有效 provider id
+            }
+            // 已知 provider(builtin 表或 models.json 声明)→ 跳过 provider 级步骤
+            let probe = ctx.resolver.read().unwrap().resolve(&format!("{text}/_probe"));
+            form.provider_id = Some(text.to_string());
+            form.known_provider = probe.is_ok();
+            if form.known_provider {
+                form.step = ModelFormStep::ModelId;
+            } else {
+                form.step = ModelFormStep::Api;
+                let apis: Vec<String> = ["openai-completions", "anthropic-messages"]
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect();
+                state.select = Some(SelectRequest {
+                    prompt: "添加模型 · 选择 api 协议".into(),
+                    list: SelectList::new(apis),
+                    kind: SelectKind::ModelApiChoice,
+                });
+            }
+        }
+        ModelFormStep::Api => unreachable!("api 协议经选择列表写入,不经文本提交"),
+        ModelFormStep::BaseUrl => {
+            form.base_url = if text.is_empty() { None } else { Some(text.to_string()) };
+            form.step = ModelFormStep::ApiKeyEnv;
+        }
+        ModelFormStep::ApiKeyEnv => {
+            form.api_key_env = if text.is_empty() { None } else { Some(text.to_string()) };
+            form.step = ModelFormStep::ModelId;
+        }
+        ModelFormStep::ModelId => {
+            if text.is_empty() {
+                return;
+            }
+            // 先收走表单(upsert/reload 期间不再渲染问题行)
+            let mut form = state.model_form.take().unwrap();
+            form.model_id = Some(text.to_string());
+            finish_model_form(ctx, state, form, text).await;
+        }
+    }
+}
+
+/// 表单收尾:写 models.json → 热重载 resolver → 切到新模型。失败时提示
+/// 并放弃(表单已关闭,可从 /model 重新进入)。
+async fn finish_model_form(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    form: super::state::ModelForm,
+    model_id: &str,
+) {
+    use rpi_core::NewModelEntry;
+    // 写回位置按表单第一步的选择;缺省(异常路径)回退项目优先
+    let path = match form.target {
+        Some(super::state::ModelFormTarget::Project) => state.cwd.join(".rpi/models.json"),
+        Some(super::state::ModelFormTarget::Global) => state
+            .home
+            .as_deref()
+            .map(|home| home.join(".rpi/models.json"))
+            .unwrap_or_else(|| state.cwd.join(".rpi/models.json")),
+        None => rpi_core::preferred_models_path(Some(&state.cwd), state.home.as_deref()),
+    };
+    let entry = NewModelEntry {
+        provider_id: form.provider_id.clone().unwrap_or_default(),
+        api: form.api.clone(),
+        base_url: form.base_url.clone(),
+        api_key_env: form.api_key_env.clone(),
+        model_id: model_id.to_string(),
+    };
+    if let Err(error) = rpi_core::upsert_models_json_entry(&path, &entry) {
+        state.commit_ephemeral(view::error_line(
+            &format!("写入 {} 失败: {error}", path.display()),
+            &state.theme,
+        ));
+        return;
+    }
+    reload_model_resolver(ctx, state);
+    // 新模型已注册,直接切换(热重载只刷新本侧 resolver,见 reload 注释)
+    let spec = format!("{}/{}", entry.provider_id, entry.model_id);
+    let resolved = ctx.resolver.read().unwrap().resolve(&spec);
+    match resolved {
+        Ok(model) => {
+            ctx.session.current().set_model(model).await;
+            refresh_footer(ctx, state);
+            state.commit_ephemeral(warning_line_theme(
+                &format!("已添加 {spec} 并切换(models.json:{})", path.display()),
+                &state.theme,
+            ));
+        }
+        Err(error) => {
+            state.commit_ephemeral(view::error_line(
+                &format!("{spec} 写入成功但解析失败: {error}"),
+                &state.theme,
+            ));
+        }
+    }
+}
+
+/// 热重载 models.json → 整体替换 interactive 侧 resolver。已知限制:
+/// build_session 装配期为 web 工具/subagent 建的 resolver 快照不跟随,
+/// 重启后生效。
+pub(crate) fn reload_model_resolver(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
+    let reloaded = rpi_core::create_model_resolver_from_config(
+        Some(&state.cwd),
+        state.home.as_deref(),
+    );
+    *ctx.resolver.write().unwrap() = reloaded;
 }
 
 fn open_thinking_selector(state: &mut InteractiveState) {
@@ -951,40 +1171,45 @@ async fn switch_to_session(
     state.status = Status::Idle;
 }
 
-fn session_info_lines(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> Vec<String> {    let mut lines = vec!["session".to_string()];
+/// /session info 内容(markdown 源文本,经 `commit_markdown` 渲染上屏)。
+fn session_info_markdown(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> String {
+    let mut out = String::from("## 会话信息\n\n");
     match ctx.current_manager() {
         Some(manager) => {
-            lines.push(format!("  id:   {}", manager.session_id()));
-            lines.push(format!(
-                "  file: {}",
-                manager
-                    .file_path()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "(内存)".into())
-            ));
+            out.push_str(&format!("- id: `{}`\n", manager.session_id()));
+            let file = manager
+                .file_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(内存)".into());
+            out.push_str(&format!("- file: `{file}`\n"));
         }
-        None => lines.push("  (无会话存储)".into()),
+        None => out.push_str("- (无会话存储)\n"),
     }
-    lines.push(format!("  model:    {}", state.model_label));
-    lines.push(format!("  thinking: {}", state.thinking_label));
-    lines.push(format!(
-        "  messages: {}",
+    out.push_str(&format!("- model: `{}`\n", state.model_label));
+    out.push_str(&format!("- thinking: `{}`\n", state.thinking_label));
+    out.push_str(&format!(
+        "- messages: {}\n",
         ctx.session.current().agent().messages().len()
     ));
-    lines.push(format!(
-        "  usage:    {} tok · ${:.6}",
+    out.push_str(&format!(
+        "- usage: {} tok · ${:.6}\n",
         state.usage.total.total_tokens, state.usage.total.cost.total
     ));
     // reserve 显示:< 1.0 是窗口百分比,换算成当前模型的实际 token 数一起展示
     let reserve = &ctx.compaction_config.reserve_tokens;
     let reserve_display = if *reserve > 0.0 && *reserve < 1.0 {
         let resolved = rpi_session::reserve_tokens_for_window(*reserve, state.context_window);
-        format!("{:.0}% ({} tok of {})", reserve * 100.0, resolved, state.context_window)
+        format!(
+            "{:.0}%({} tok of {})",
+            reserve * 100.0,
+            resolved,
+            state.context_window
+        )
     } else {
         format!("{} tok", reserve)
     };
-    lines.push(format!(
-        "  compact:  {} (reserve {}, keep recent {} tok)",
+    out.push_str(&format!(
+        "- compact: {}(reserve {}, keep recent {} tok)\n",
         if ctx.compaction_config.enabled {
             "auto"
         } else {
@@ -993,7 +1218,7 @@ fn session_info_lines(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> Vec
         reserve_display,
         ctx.compaction_config.keep_recent_tokens
     ));
-    lines
+    out
 }
 
 /// 从 Agent 状态快照刷新 footer 的模型/thinking/窗口字段。
@@ -1036,7 +1261,7 @@ fn plain_dim(text: &str, theme: &Theme) -> rpi_tui::UiLine {
     ))
 }
 
-fn warning_line_theme(text: &str, theme: &Theme) -> rpi_tui::UiLine {
+pub(crate) fn warning_line_theme(text: &str, theme: &Theme) -> rpi_tui::UiLine {
     ratatui::text::Line::from(ratatui::text::Span::styled(
         text.to_string(),
         ratatui::style::Style::new().fg(theme.warning),
