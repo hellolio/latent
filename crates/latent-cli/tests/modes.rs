@@ -4,8 +4,8 @@
 use std::sync::{Arc, Mutex};
 
 use latent_ai::{ContentBlock, Model, ScriptedProvider, ScriptedTurn};
-use latent_cli::assembly::{build_session, BuildOptions};
-use latent_cli::modes;
+use latent::assembly::{build_session, BuildOptions};
+use latent::modes;
 
 fn test_model() -> Model {
     Model::minimal("test-model", "anthropic-messages", "anthropic")
@@ -15,14 +15,14 @@ fn scripted_provider(turns: Vec<ScriptedTurn>) -> Arc<ScriptedProvider> {
     Arc::new(ScriptedProvider::new(&test_model(), turns))
 }
 
-async fn build_with(provider: Arc<ScriptedProvider>) -> latent_cli::assembly::BuiltSession {
+async fn build_with(provider: Arc<ScriptedProvider>) -> latent::assembly::BuiltSession {
     build_session(BuildOptions {
         provider,
         model: test_model(),
         ui: Arc::new(latent_core::NoopUi),
         extension_specs: Vec::new(),
         spawn_hook: None,
-        session_store: latent_cli::assembly::SessionStore::Memory,
+        session_store: latent::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: None,
         search_ignore: Default::default(),
@@ -409,7 +409,7 @@ async fn print_mode_runs_one_prompt_to_completion() {
         test_model(),
         "hello".into(),
         Vec::new(),
-        latent_cli::assembly::SessionStore::Memory,
+        latent::assembly::SessionStore::Memory,
         Default::default(),
         None,
     )
@@ -507,7 +507,7 @@ async fn switch_new_session_starts_fresh_file_and_keeps_old() {
 
     let built = build_with_store(
         scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]),
-        latent_cli::assembly::SessionStore::New { dir: dir.clone() },
+        latent::assembly::SessionStore::New { dir: dir.clone() },
     )
     .await;
     built.session.prompt("第一轮").await.expect("prompt");
@@ -518,7 +518,7 @@ async fn switch_new_session_starts_fresh_file_and_keeps_old() {
     let old_lines = old_content.lines().count();
 
     // /new:新文件建立,转录清空
-    let new_file = latent_cli::assembly::switch_new_session(&built.session, &built.manager_holder)
+    let new_file = latent::assembly::switch_new_session(&built.session, &built.manager_holder)
         .await
         .unwrap()
         .expect("文件会话应产生新文件");
@@ -561,8 +561,8 @@ async fn switch_new_session_starts_fresh_file_and_keeps_old() {
 
 async fn build_with_store(
     provider: Arc<ScriptedProvider>,
-    store: latent_cli::assembly::SessionStore,
-) -> latent_cli::assembly::BuiltSession {
+    store: latent::assembly::SessionStore,
+) -> latent::assembly::BuiltSession {
     build_with_snapshot(provider, store, Some(false)).await
 }
 
@@ -570,18 +570,18 @@ async fn build_with_store(
 /// 不可控,故测试一律显式传入)。`active_tools`:Some = 显式激活工具集。
 async fn build_with_snapshot(
     provider: Arc<ScriptedProvider>,
-    store: latent_cli::assembly::SessionStore,
+    store: latent::assembly::SessionStore,
     context_snapshot: Option<bool>,
-) -> latent_cli::assembly::BuiltSession {
+) -> latent::assembly::BuiltSession {
     build_with_tools(provider, store, context_snapshot, None).await
 }
 
 async fn build_with_tools(
     provider: Arc<ScriptedProvider>,
-    store: latent_cli::assembly::SessionStore,
+    store: latent::assembly::SessionStore,
     context_snapshot: Option<bool>,
     active_tools: Option<Vec<String>>,
-) -> latent_cli::assembly::BuiltSession {
+) -> latent::assembly::BuiltSession {
     build_session(BuildOptions {
         provider,
         model: test_model(),
@@ -626,7 +626,7 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         let provider = scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]);
         let built = build_with_store(
             provider,
-            latent_cli::assembly::SessionStore::New { dir: dir.clone() },
+            latent::assembly::SessionStore::New { dir: dir.clone() },
         )
         .await;
         let manager = built.session_manager.clone().expect("file-backed manager");
@@ -666,7 +666,7 @@ async fn file_backed_session_persists_jsonl_and_resumes() {
         drop(resumed);
         let provider = scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-2")]);
         let built =
-            build_with_store(provider, latent_cli::assembly::SessionStore::Resume { file }).await;
+            build_with_store(provider, latent::assembly::SessionStore::Resume { file }).await;
         built.session.prompt("再来一条").await.expect("prompt");
         built.session.wait_idle().await;
         let manager = built.session_manager.clone().unwrap();
@@ -698,7 +698,7 @@ async fn context_snapshot_recorded_per_request_and_excluded_from_projection() {
 
     let built = build_with_snapshot(
         scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]),
-        latent_cli::assembly::SessionStore::New { dir: dir.clone() },
+        latent::assembly::SessionStore::New { dir: dir.clone() },
         Some(true),
     )
     .await;
@@ -771,7 +771,7 @@ async fn context_snapshot_disabled_by_default_writes_nothing() {
 
     let built = build_with_snapshot(
         scripted_provider(vec![ScriptedTurn::text(&test_model(), "reply-1")]),
-        latent_cli::assembly::SessionStore::New { dir: dir.clone() },
+        latent::assembly::SessionStore::New { dir: dir.clone() },
         Some(false),
     )
     .await;
@@ -821,7 +821,7 @@ async fn active_tools_narrows_installed_set() {
     );
     let built = build_with_tools(
         scripted_provider(vec![ScriptedTurn::new(first), ScriptedTurn::text(&m, "done")]),
-        latent_cli::assembly::SessionStore::Memory,
+        latent::assembly::SessionStore::Memory,
         Some(false),
         Some(vec!["bash".to_string()]),
     )
@@ -846,7 +846,7 @@ async fn active_tools_narrows_installed_set() {
         ui: Arc::new(latent_core::NoopUi),
         extension_specs: Vec::new(),
         spawn_hook: None,
-        session_store: latent_cli::assembly::SessionStore::Memory,
+        session_store: latent::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: Some(vec!["bask".to_string()]),
         search_ignore: Default::default(),
@@ -875,7 +875,7 @@ async fn active_tools_narrows_installed_set() {
 async fn empty_active_tools_installs_nothing_and_declares_nothing() {
     let built = build_with_tools(
         scripted_provider(vec![ScriptedTurn::text(&test_model(), "好的")]),
-        latent_cli::assembly::SessionStore::Memory,
+        latent::assembly::SessionStore::Memory,
         Some(false),
         Some(Vec::new()),
     )
@@ -925,7 +925,7 @@ async fn jsonl_rebuild_matches_agent_context_after_tool_run() {
     ]);
     let built = build_with_store(
         provider,
-        latent_cli::assembly::SessionStore::New { dir: dir.clone() },
+        latent::assembly::SessionStore::New { dir: dir.clone() },
     )
     .await;
     built.session.prompt("跑一下命令").await.expect("prompt");
@@ -1047,7 +1047,7 @@ async fn bash_command_executes_through_sandbox_hook_in_confirm_mode() {
         ui: Arc::new(latent_core::NoopUi),
         extension_specs: Vec::new(),
         spawn_hook: None,
-        session_store: latent_cli::assembly::SessionStore::Memory,
+        session_store: latent::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: None,
         search_ignore: Default::default(),
@@ -1096,7 +1096,7 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         ui: Arc::new(latent_core::NoopUi),
         extension_specs: Vec::new(),
         spawn_hook: None,
-        session_store: latent_cli::assembly::SessionStore::New { dir: dir.clone() },
+        session_store: latent::assembly::SessionStore::New { dir: dir.clone() },
         context_snapshot: None,
         active_tools: None,
         search_ignore: Default::default(),
@@ -1134,7 +1134,7 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         ui: Arc::new(latent_core::NoopUi),
         extension_specs: Vec::new(),
         spawn_hook: None,
-        session_store: latent_cli::assembly::SessionStore::Resume {
+        session_store: latent::assembly::SessionStore::Resume {
             file: manager.file_path().unwrap().to_path_buf(),
         },
         context_snapshot: None,
@@ -1169,7 +1169,7 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         ui: Arc::new(latent_core::NoopUi),
         extension_specs: Vec::new(),
         spawn_hook: None,
-        session_store: latent_cli::assembly::SessionStore::Memory,
+        session_store: latent::assembly::SessionStore::Memory,
         context_snapshot: None,
         active_tools: None,
         search_ignore: Default::default(),

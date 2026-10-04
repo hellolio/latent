@@ -1,8 +1,11 @@
 [package]
-name = "latent-cli"
+# 包名用产品名 latent(cargo install latent);目录名保留 latent-cli 不影响
+name = "latent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Terminal AI coding agent (the `latent` binary): streaming LLM, parallel tools, sessions, MCP extensions, permissions and sandbox"
 
 [[bin]]
 name = "latent"

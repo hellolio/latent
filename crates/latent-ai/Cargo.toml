@@ -3,6 +3,8 @@ name = "latent-ai"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Unified multi-provider LLM streaming API: types, provider registry, protocol adapters, retry and overflow detection"
 
 [dependencies]
 async-stream.workspace = true

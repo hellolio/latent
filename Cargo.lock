@@ -1569,6 +1569,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "latent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "crossterm",
+ "futures",
+ "latent-agent",
+ "latent-ai",
+ "latent-core",
+ "latent-sandbox",
+ "latent-session",
+ "latent-tools",
+ "latent-tui",
+ "latent-web",
+ "ratatui",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "latent-agent"
 version = "0.1.0"
 dependencies = [
@@ -1598,29 +1621,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "latent-cli"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "crossterm",
- "futures",
- "latent-agent",
- "latent-ai",
- "latent-core",
- "latent-sandbox",
- "latent-session",
- "latent-tools",
- "latent-tui",
- "latent-web",
- "ratatui",
- "rmcp",
- "serde",
- "serde_json",
  "tokio",
  "tokio-util",
 ]

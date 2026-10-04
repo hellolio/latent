@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use latent_agent::AgentEvent;
-use latent_cli::assembly::{run_session, SessionRequest};
-use latent_cli::mcp_mock::MOCK_EXTENSION_NAME;
+use latent::assembly::{run_session, SessionRequest};
+use latent::mcp_mock::MOCK_EXTENSION_NAME;
 use latent_core::{McpServerSpec, SessionSharedSubscriber, SessionSubscriber};
 
 fn mock_spec() -> McpServerSpec {
@@ -90,7 +90,7 @@ async fn e2e_mock_extension_registers_tool_blocks_bash_and_confirms_via_elicitat
         prompt: "go".into(),
         extension_specs: vec![mock_spec()],
         extra_subscriber: Some(subscriber),
-        session_store: latent_cli::assembly::SessionStore::Memory,
+        session_store: latent::assembly::SessionStore::Memory,
         // Plan 模式默认收掉 MCP 扩展工具(13 文档 §5),此用例测扩展全链路
         // → 显式 FullAccess 保持旧行为
         settings: Default::default(),

@@ -3,6 +3,8 @@ name = "latent-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Built-in coding tools (read/bash/edit/write/grep/find/ls) with unified output truncation"
 
 [dependencies]
 latent-agent.workspace = true

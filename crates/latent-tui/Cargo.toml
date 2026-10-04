@@ -3,6 +3,8 @@ name = "latent-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Terminal UI for the latent coding agent: full-frame diff rendering, multi-line editor, markdown and themes"
 
 [dependencies]
 # 与 ratatui 0.30 内部 ratatui-crossterm 的 crossterm 0.29 对齐(ratatui::crossterm 再导出同一实例)

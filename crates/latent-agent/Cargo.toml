@@ -3,6 +3,8 @@ name = "latent-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Agent main loop with parallel tool execution, steering/follow-up injection and budget guardrails, built on latent-ai"
 
 [dependencies]
 latent-ai.workspace = true

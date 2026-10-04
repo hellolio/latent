@@ -3,6 +3,8 @@ name = "latent-session"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Append-only JSONL session tree with branching, context projection and auto-compaction"
 
 [dependencies]
 latent-agent.workspace = true

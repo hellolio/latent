@@ -3,6 +3,8 @@ name = "latent-sandbox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Command sandboxing backends (macOS Seatbelt, Linux bubblewrap/Landlock) for the latent agent"
 
 # L2 平台能力 crate:零内部依赖(纯类型 + 平台 API),可选组件 —— 拆卸后
 # 其余 crate 照常编译(10 文档 §1 判据;latent-core 不依赖本 crate,权限引擎

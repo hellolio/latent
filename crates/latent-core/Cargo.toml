@@ -3,6 +3,8 @@ name = "latent-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Business core for the latent coding agent: session, permissions, MCP extensions, subagents and skills"
 
 # 依赖只有 latent-ai/latent-agent:latent-session/latent-tools/latent-tui 是可选组件,
 # 由装配方(latent-cli)经 trait 注入 —— 移除任一可选 crate,本 crate 照常编译

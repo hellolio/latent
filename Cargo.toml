@@ -16,17 +16,19 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/hellolio/latent"
 
 [workspace.dependencies]
 # 内部 crate —— 依赖方向见 AGENTS.md,禁止反向/同层依赖
-latent-ai = { path = "crates/latent-ai" }
-latent-agent = { path = "crates/latent-agent" }
-latent-session = { path = "crates/latent-session" }
-latent-tools = { path = "crates/latent-tools" }
-latent-web = { path = "crates/latent-web" }
-latent-core = { path = "crates/latent-core" }
-latent-tui = { path = "crates/latent-tui" }
-latent-sandbox = { path = "crates/latent-sandbox" }
+# (version 供 crates.io 发布:path 就地开发用,发布时按 version 解析)
+latent-ai = { path = "crates/latent-ai", version = "0.1.0" }
+latent-agent = { path = "crates/latent-agent", version = "0.1.0" }
+latent-session = { path = "crates/latent-session", version = "0.1.0" }
+latent-tools = { path = "crates/latent-tools", version = "0.1.0" }
+latent-web = { path = "crates/latent-web", version = "0.1.0" }
+latent-core = { path = "crates/latent-core", version = "0.1.0" }
+latent-tui = { path = "crates/latent-tui", version = "0.1.0" }
+latent-sandbox = { path = "crates/latent-sandbox", version = "0.1.0" }
 
 async-trait = "0.1"
 futures = "0.3"

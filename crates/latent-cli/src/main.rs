@@ -12,8 +12,8 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use latent_cli::assembly::load_mcp_server_specs;
-use latent_cli::modes;
+use latent::assembly::load_mcp_server_specs;
+use latent::modes;
 
 #[tokio::main]
 async fn main() {
@@ -195,7 +195,7 @@ fn parse_args(args: &[String]) -> Args {
 
 async fn run(args: &[String]) -> Result<(), String> {
     match parse_args(args) {
-        Args::MockExtensionServer => latent_cli::mcp_mock::run_mock_server().await,
+        Args::MockExtensionServer => latent::mcp_mock::run_mock_server().await,
         Args::LandlockHelper(args) => latent_sandbox::landlock::run_helper(&args)
             .map_err(|error| format!("landlock helper: {error}")),
         Args::Invalid(message) => {
@@ -225,7 +225,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         let extension_specs = load_mcp_server_specs();
         let session_store = resolve_session_store(cont, resume_index)?;
             // settings 运行期开关在入口解析一次,装配层不读用户配置文件
-            let mut settings = latent_cli::assembly::load_session_settings();
+            let mut settings = latent::assembly::load_session_settings();
             // CLI flag > settings(13 文档 §12 优先级)
             if let Some(name) = &session_mode {
                 settings.session_mode = latent_core::SessionMode::parse(name)
@@ -328,8 +328,8 @@ async fn run(args: &[String]) -> Result<(), String> {
 fn resolve_session_store(
     cont: bool,
     resume_index: Option<usize>,
-) -> Result<latent_cli::assembly::SessionStore, String> {
-    use latent_cli::assembly::SessionStore;
+) -> Result<latent::assembly::SessionStore, String> {
+    use latent::assembly::SessionStore;
     let Some(home) = dirs_home() else {
         if cont {
             return Err("--continue 需要 HOME 目录".into());

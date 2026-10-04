@@ -3,6 +3,8 @@ name = "latent-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Web search and fetch tools with multi-engine routing, bounded output and SSRF guards"
 
 [dependencies]
 latent-agent.workspace = true
