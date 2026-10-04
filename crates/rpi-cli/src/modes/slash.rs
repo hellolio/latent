@@ -57,6 +57,11 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "list = 切换历史会话;info = 显示会话信息",
     },
     SlashCommand {
+        name: "setting",
+        args: "",
+        description: "打开设置(全屏模式 / 复制快捷键 / 鼠标选中复制;写入 settings.json)",
+    },
+    SlashCommand {
         name: "quit",
         args: "",
         description: "退出 rpi",
@@ -75,6 +80,7 @@ pub enum SlashAction {
     Mode { arg: Option<String> },
     Subagent { arg: Option<String> },
     Session { arg: Option<String> },
+    Setting,
     Quit,
 }
 
@@ -161,6 +167,7 @@ pub fn parse(input: &str) -> SlashInput {
             arg: arg.map(str::to_string),
         }),
         "new" => SlashInput::Command(SlashAction::New),
+        "setting" => SlashInput::Command(SlashAction::Setting),
         "subagent" => SlashInput::Command(SlashAction::Subagent {
             arg: arg.map(str::to_string),
         }),
@@ -196,6 +203,7 @@ mod tests {
     fn parses_known_commands_with_and_without_args() {
         assert_eq!(parse("/help"), SlashInput::Command(SlashAction::Help));
         assert_eq!(parse("/quit"), SlashInput::Command(SlashAction::Quit));
+        assert_eq!(parse("/setting"), SlashInput::Command(SlashAction::Setting));
         assert_eq!(
             parse("  /session  "),
             SlashInput::Command(SlashAction::Session { arg: None })

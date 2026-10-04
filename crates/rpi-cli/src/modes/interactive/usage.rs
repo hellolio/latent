@@ -141,7 +141,7 @@ mod tests {
         let tps = line.spans.first().unwrap();
         assert_eq!(tps.content, "> TPS 12.8 tok/s");
         assert_eq!(tps.style.fg, Some(theme.usage_output));
-        let ttft = line.spans.iter().nth(1).unwrap();
+        let ttft = line.spans.get(1).unwrap();
         assert_eq!(ttft.content, " · TTFT 6.0s");
         assert_eq!(ttft.style.fg, Some(theme.usage_input));
     }

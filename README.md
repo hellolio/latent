@@ -56,11 +56,11 @@ cat prompt.txt | rpi                   # prompt 可经 stdin 管道输入
 rpi --mode interactive                 # 需要终端
 ```
 
-- 差分渲染 TUI:编辑器、消息流、footer 状态栏(当前模型 · thinking 级别 · context% · 会话累计用量;context 超 70%/90% 变色);
+- 差分渲染 TUI,双渲染模式(对齐 pi):**fullscreen**(默认,alternate screen)输入区钉死在底部、历史内容在屏幕内滚动(`PageUp`/`PageDown`/`Home`/`End` + 鼠标滚轮,上滚不被新内容拉走,光标永远钉在输入框),退出时转录 dump 回主屏 scrollback。`/setting` 打开设置:全屏模式开关、复制快捷键固定为 Ctrl+X(有选区时复制到系统剪贴板并右上角短暂显示 Copied!;Ctrl+X 复制可在 /setting 开关,Ctrl+C 保持中断/退出语义)、选中后自动复制开关(默认关;拖选反色高亮、快捷键复制与 Alt+点击扩展选区(Shift+点击被多数终端截留为原生选择)在全屏模式下恒可用,选区锚定内容——滚动后高亮仍跟随文字),设置写入 ~/.rpi/settings.json);**regular** 滚入终端原生 scrollback。`--tui-mode fullscreen|regular`、settings.json `tuiMode` 或运行时 `/fullscreen [on|off]` 切换;footer 状态栏(当前模型 · thinking 级别 · context% · 会话累计用量;context 超 70%/90% 变色);
 - **流式可见思考过程与工具参数逐块增长**(delta 为主 + partial 快照读口);
 - 每回合结束显示用量行(输入/输出/缓存读/缓存写 token + 费用);错误/中止回合红字上屏(`Error: …` / `Operation aborted`),自动重试最终失败同样可见;
 - 启动/续聊时回放当前转录:user 反色块、assistant 正文、工具调用与结果、压缩摘要(`--continue` 恢复历史可见);
-- 斜杠命令:`/help` `/model [provider/model]` `/thinking [level]` `/compact` `/session` `/quit`;未识别的 `/xxx` 本地警告(不发给模型);
+- 斜杠命令:`/help` `/model [provider/model]` `/thinking [level]` `/compact` `/session` `/setting` `/quit`;未识别的 `/xxx` 本地警告(不发给模型);
 - `Enter` 发送;`Shift+Enter`/`Ctrl+J` 换行(kitty keyboard protocol 终端开箱即用;macOS 本地会话对不支持的终端自动兜底,详见下文终端兼容性);run 进行中输入自动转为 **steering**(当前 turn 结束后注入);`Ctrl+C` 中断当前 run(空闲时 500ms 内双击退出),`Ctrl+D` 退出。
 
 #### Shift+Enter 与终端兼容性

@@ -1,7 +1,11 @@
 //! 按键抽象(crossterm 0.29 承担字节级解析;这里只做语义归一):
 //! 上层(handle_key)与编辑器只认 `Key`,不感知终端转义细节。
 
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
+
+use crate::selection::MouseAction;
 
 /// 归一化按键。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +31,12 @@ pub enum Key {
     /// Ctrl+字母(小写归一)
     Ctrl(char),
     Paste(String),
+    /// 鼠标滚轮上行(fullscreen 模式捕获鼠标后到达)
+    ScrollUp,
+    /// 鼠标滚轮下行
+    ScrollDown,
+    /// 左键选择手势(按下/拖动/抬起;fullscreen 应用层选区)
+    Mouse(MouseAction),
     /// 终端尺寸变化
     Resize,
     /// 未映射的按键(方向键 + 修饰符组合等;编辑器不消费)
@@ -39,6 +49,29 @@ pub fn from_event(event: &Event) -> Option<Key> {
         Event::Key(key) if key.kind == KeyEventKind::Press => Some(from_key_event(key)),
         Event::Paste(text) => Some(Key::Paste(text.clone())),
         Event::Resize(_, _) => Some(Key::Resize),
+        Event::Mouse(mouse) => {
+            let col = mouse.column;
+            let row = mouse.row;
+            // 扩展选区手势:Shift(xterm 约定下多数终端截留给原生选择)
+            // 或 Alt(通常正常上报)修饰的左键按下
+            let extend = mouse.modifiers.contains(KeyModifiers::SHIFT)
+                || mouse.modifiers.contains(KeyModifiers::ALT);
+            match mouse.kind {
+                MouseEventKind::ScrollUp => Some(Key::ScrollUp),
+                MouseEventKind::ScrollDown => Some(Key::ScrollDown),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    Some(Key::Mouse(MouseAction::Down { col, row, extend }))
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    Some(Key::Mouse(MouseAction::Drag { col, row }))
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    Some(Key::Mouse(MouseAction::Up { col, row }))
+                }
+                // 右/中键与移动不消费
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -170,6 +203,57 @@ mod tests {
     fn plain_chars_pass_through() {
         assert_eq!(key(K::Char('x'), KeyModifiers::empty()), Key::Char('x'));
         assert_eq!(key(K::Char('中'), KeyModifiers::empty()), Key::Char('中'));
+    }
+
+    #[test]
+    fn mouse_wheel_and_left_button_map_to_selection() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent};
+        let mouse = |kind, modifiers| {
+            from_event(&Event::Mouse(MouseEvent {
+                kind,
+                column: 4,
+                row: 7,
+                modifiers,
+            }))
+        };
+        assert_eq!(mouse(MouseEventKind::ScrollUp, KeyModifiers::empty()), Some(Key::ScrollUp));
+        assert_eq!(mouse(MouseEventKind::ScrollDown, KeyModifiers::empty()), Some(Key::ScrollDown));
+        assert_eq!(
+            mouse(MouseEventKind::Down(MouseButton::Left), KeyModifiers::empty()),
+            Some(Key::Mouse(MouseAction::Down {
+                col: 4,
+                row: 7,
+                extend: false
+            }))
+        );
+        // Shift/Alt+左键:扩展选区手势(Shift 常被终端截留,Alt 是可靠替代)
+        assert_eq!(
+            mouse(MouseEventKind::Down(MouseButton::Left), KeyModifiers::SHIFT),
+            Some(Key::Mouse(MouseAction::Down {
+                col: 4,
+                row: 7,
+                extend: true
+            }))
+        );
+        assert_eq!(
+            mouse(MouseEventKind::Down(MouseButton::Left), KeyModifiers::ALT),
+            Some(Key::Mouse(MouseAction::Down {
+                col: 4,
+                row: 7,
+                extend: true
+            }))
+        );
+        assert_eq!(
+            mouse(MouseEventKind::Drag(MouseButton::Left), KeyModifiers::empty()),
+            Some(Key::Mouse(MouseAction::Drag { col: 4, row: 7 }))
+        );
+        assert_eq!(
+            mouse(MouseEventKind::Up(MouseButton::Left), KeyModifiers::empty()),
+            Some(Key::Mouse(MouseAction::Up { col: 4, row: 7 }))
+        );
+        // 右/中键与移动不消费
+        assert_eq!(mouse(MouseEventKind::Down(MouseButton::Right), KeyModifiers::empty()), None);
+        assert_eq!(mouse(MouseEventKind::Moved, KeyModifiers::empty()), None);
     }
 
     #[test]

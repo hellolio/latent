@@ -28,6 +28,7 @@ pub mod key;
 pub mod loader;
 pub mod markdown;
 pub mod select_list;
+pub mod selection;
 pub mod text;
 pub mod theme;
 pub mod tool_card;
@@ -43,6 +44,7 @@ pub use key::{from_event, normalize_native_enter, Key};
 pub use loader as loader_view;
 pub use markdown::Markdown;
 pub use select_list::SelectList;
+pub use selection::{MouseAction, SelPoint};
 pub use theme::{Theme, ThemeName};
 pub use width::{char_width, display_width, truncate_to_width, wrap_to_width};
 

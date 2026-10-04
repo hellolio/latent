@@ -456,6 +456,16 @@ struct SettingsDefaults {
     /// interactive 模式读取,这里只存字符串、不解析
     #[serde(default)]
     theme: Option<String>,
+    /// TUI 渲染模式:`fullscreen`(alternate screen,输入区钉底、屏幕内
+    /// 滚动)或 `regular`(终端原生 scrollback);缺省 fullscreen
+    #[serde(default)]
+    tui_mode: Option<String>,
+    /// Ctrl+X 复制选区开关(有选区时 Ctrl+X = 复制);缺省开启
+    #[serde(default)]
+    ctrl_x_copy: Option<bool>,
+    /// 选中后自动复制(选择/高亮/快捷键复制不受此开关影响);缺省关闭
+    #[serde(default)]
+    copy_on_select: Option<bool>,
 }
 
 /// 默认模型选择:项目 `.rpi/settings.json` 优先于全局,首个非空 defaultProvider
@@ -513,6 +523,90 @@ pub fn load_theme_setting(project_dir: Option<&Path>, home: Option<&Path>) -> Op
         }
     }
     None
+}
+
+/// TUI 渲染模式:项目 `.rpi/settings.json` 优先于全局,首个非空 `tuiMode`
+/// 生效。只返回原始字符串(`fullscreen` | `regular`);解析与缺省值
+/// (fullscreen)由 interactive 装配负责。
+pub fn load_tui_mode_setting(project_dir: Option<&Path>, home: Option<&Path>) -> Option<String> {
+    load_setting_by(
+        project_dir,
+        home,
+        |settings| settings.tui_mode.filter(|v| !v.trim().is_empty()),
+    )
+}
+
+/// Ctrl+X 复制选区开关(`ctrlXCopy`)。
+pub fn load_ctrl_x_copy_setting(project_dir: Option<&Path>, home: Option<&Path>) -> Option<bool> {
+    load_setting_by(project_dir, home, |settings| settings.ctrl_x_copy)
+}
+
+/// 选中后自动复制开关(`copyOnSelect`)。
+pub fn load_copy_on_select_setting(
+    project_dir: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<bool> {
+    load_setting_by(project_dir, home, |settings| settings.copy_on_select)
+}
+
+fn load_setting_by<T>(
+    project_dir: Option<&Path>,
+    home: Option<&Path>,
+    pick: impl Fn(SettingsDefaults) -> Option<T>,
+) -> Option<T> {
+    let mut paths = Vec::new();
+    if let Some(project) = project_dir {
+        paths.push(project.join(".rpi/settings.json"));
+    }
+    if let Some(home) = home {
+        paths.push(home.join(".rpi/settings.json"));
+    }
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(settings) = serde_json::from_str::<SettingsDefaults>(&text) else {
+            continue;
+        };
+        if let Some(value) = pick(settings) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// 把单个设置字段写入项目 `.rpi/settings.json`(无项目目录时写全局;
+/// 文件不存在则创建,已有字段与其他键保留)。`/setting` 的各项开关
+/// 切换即写回,默认落项目级。
+pub fn write_setting_field(
+    project_dir: Option<&Path>,
+    home: Option<&Path>,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let path = match project_dir {
+        Some(dir) => dir.join(".rpi/settings.json"),
+        None => home
+            .map(|home| home.join(".rpi/settings.json"))
+            .ok_or_else(|| "无法定位 settings.json(缺少项目目录与 HOME)".to_string())?,
+    };
+    let mut root = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    let Some(obj) = root.as_object_mut() else {
+        return Err(format!("{} 顶层必须是 JSON 对象", path.display()));
+    };
+    obj.insert(key.to_string(), value);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text + "\n")
+        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    Ok(())
 }
 
 // 引用 model.rs 的工厂(避免循环 use):见文件底 re-export
@@ -672,6 +766,43 @@ mod tests {
         let (provider, model) = load_default_model_selection(Some(&project.0), Some(&global.0));
         assert_eq!(provider.as_deref(), Some("local"));
         assert_eq!(model.as_deref(), Some("my-model"));
+    }
+
+    #[test]
+    fn mouse_and_shortcut_settings_project_overrides_global() {
+        let global = TempDir::new("cs_global");
+        let project = TempDir::new("cs_project");
+        assert_eq!(load_copy_on_select_setting(Some(&project.0), Some(&global.0)), None);
+        assert_eq!(load_ctrl_x_copy_setting(Some(&project.0), Some(&global.0)), None);
+        global.write(
+            ".rpi/settings.json",
+            r#"{ "copyOnSelect": true, "ctrlXCopy": false }"#,
+        );
+        assert_eq!(
+            load_copy_on_select_setting(Some(&project.0), Some(&global.0)),
+            Some(true)
+        );
+        assert_eq!(
+            load_ctrl_x_copy_setting(Some(&project.0), Some(&global.0)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn write_setting_field_merges_and_persists() {
+        let home = TempDir::new("wf");
+        // 写入新键:文件自动创建(无项目目录 → 全局 ~/.rpi/settings.json,
+        // /setting 的默认写回路径)
+        write_setting_field(None, Some(&home.0), "tuiMode", serde_json::json!("regular")).unwrap();
+        // 再写另一个键:已有键保留
+        write_setting_field(None, Some(&home.0), "copyOnSelect", serde_json::json!(true)).unwrap();
+        let text = std::fs::read_to_string(home.0.join(".rpi/settings.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["tuiMode"], "regular");
+        assert_eq!(value["copyOnSelect"], true);
+        // 读回一致
+        assert_eq!(load_tui_mode_setting(None, Some(&home.0)).as_deref(), Some("regular"));
+        assert_eq!(load_copy_on_select_setting(None, Some(&home.0)), Some(true));
     }
 
     #[test]

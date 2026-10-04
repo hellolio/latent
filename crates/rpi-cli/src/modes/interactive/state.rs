@@ -96,6 +96,8 @@ pub enum SelectKind {
     Thinking,
     /// 内部选择器(/theme):携带候选主题枚举
     Theme { names: Vec<rpi_tui::ThemeName> },
+    /// 内部选择器(/setting):全屏模式 / 复制快捷键 / 鼠标选中复制
+    Setting,
     /// 内部选择器(/subagent):候选 agent 定义
     SubagentAgent { defs: Vec<rpi_core::AgentDef> },
     /// 内部选择器(/session):候选历史会话(mtime 倒序)
@@ -196,6 +198,17 @@ pub enum SuspendAction {
     EditModelsJson,
 }
 
+/// 全屏模式的滚动请求(handlers 不持有 TuiApp,置标记由事件循环转交)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollRequest {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+    /// 有向滚动 n 行(正数向下、负数向上;鼠标滚轮)
+    Lines(isize),
+}
+
 pub struct InteractiveState {
     pub theme: Theme,
     /// 当前主题名(kebab-case;ANSI 兜底时为 None,`/theme` 列表定位用)
@@ -266,8 +279,20 @@ pub struct InteractiveState {
     pub last_tool_error: bool,
     /// /model「添加模型」表单(None = 未激活)
     pub model_form: Option<ModelForm>,
+    /// 选中后自动复制(/setting 开关,默认关;选择/高亮/快捷键复制恒可用)
+    pub copy_on_select: bool,
+    /// Ctrl+X 复制开关(/setting 开关,默认开;关闭后有选区时 Ctrl+X 也不复制)
+    pub ctrl_x_copy: bool,
     /// 待事件循环挂起 TUI 执行的动作(置位后由事件循环取走)
     pub suspend_action: Option<SuspendAction>,
+    /// 当前是否全屏渲染模式(事件循环每轮从 TuiApp 同步;滚动按键与
+    /// /fullscreen 的判据)
+    pub fullscreen: bool,
+    /// 待事件循环转交 TuiApp 的滚动请求(全屏模式)
+    pub scroll_request: Option<ScrollRequest>,
+    /// 待事件循环执行的渲染模式切换目标(true = 全屏;Some 时由事件循环
+    /// set_fullscreen + 全量重绘)
+    pub tui_mode_switch: Option<bool>,
     /// /model 配置入口:工作目录与 HOME(models.json 目标路径与热重载推导)
     pub cwd: std::path::PathBuf,
     pub home: Option<std::path::PathBuf>,
@@ -312,7 +337,12 @@ impl InteractiveState {
             last_tool_error: false,
             resources: Vec::new(),
             model_form: None,
+            copy_on_select: false,
+            ctrl_x_copy: true,
             suspend_action: None,
+            fullscreen: false,
+            scroll_request: None,
+            tui_mode_switch: None,
             cwd: std::env::current_dir().unwrap_or_default(),
             home: std::env::var_os("HOME").map(std::path::PathBuf::from),
         }

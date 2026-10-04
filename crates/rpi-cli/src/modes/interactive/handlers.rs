@@ -14,7 +14,7 @@ use super::bash;
 use super::events::UiEvent;
 use super::replay;
 use super::state::{
-    InteractiveState, SelectKind, SelectRequest, Status, ToolStatus, TranscriptItem,
+    InteractiveState, ScrollRequest, SelectKind, SelectRequest, Status, ToolStatus, TranscriptItem,
 };
 use super::usage::{context_tokens_of, usage_line};
 use super::view;
@@ -223,6 +223,32 @@ pub async fn handle_key(
             false
         }
         rpi_tui::Key::Ctrl('d') if state.editor.is_empty() => true,
+        // 全屏模式滚动按键(选择列表/弹窗接管时不达此处;regular 模式
+        // 交给终端 scrollback,保持原生行为)
+        rpi_tui::Key::PageUp if state.fullscreen => {
+            state.scroll_request = Some(ScrollRequest::PageUp);
+            false
+        }
+        rpi_tui::Key::PageDown if state.fullscreen => {
+            state.scroll_request = Some(ScrollRequest::PageDown);
+            false
+        }
+        rpi_tui::Key::Home if state.fullscreen => {
+            state.scroll_request = Some(ScrollRequest::Top);
+            false
+        }
+        rpi_tui::Key::End if state.fullscreen => {
+            state.scroll_request = Some(ScrollRequest::Bottom);
+            false
+        }
+        rpi_tui::Key::ScrollUp if state.fullscreen => {
+            state.scroll_request = Some(ScrollRequest::Lines(-3));
+            false
+        }
+        rpi_tui::Key::ScrollDown if state.fullscreen => {
+            state.scroll_request = Some(ScrollRequest::Lines(3));
+            false
+        }
         key => {
             state.last_ctrl_c = None;
             state.editor_key(&key);
@@ -385,6 +411,9 @@ async fn handle_select_key(
                             apply_theme(state, *name);
                         }
                     }
+                    SelectKind::Setting => {
+                        apply_setting_selection(state, index);
+                    }
                     SelectKind::Approval { responder } => {
                         // 13 文档 §10.3:1=批准一次 2=本会话批准 3=拒绝 4=中止
                         let decision = match index {
@@ -416,7 +445,7 @@ async fn handle_select_key(
                     SelectKind::ModelApiChoice | SelectKind::ModelTargetChoice => {
                         state.model_form = None;
                     }
-                    SelectKind::Theme { .. } => {}
+                    SelectKind::Theme { .. } | SelectKind::Setting => {}
                     SelectKind::Approval { responder } => {
                         // Esc = 拒绝;Ctrl+C = 中止本次任务(13 文档 §10.3)
                         let decision = if matches!(key, rpi_tui::Key::Ctrl('c')) {
@@ -613,6 +642,7 @@ pub async fn execute_command(
             commit_markdown(state, &slash::help_markdown());
         }
         slash::SlashAction::Quit => return true,
+        slash::SlashAction::Setting => open_setting_selector(state),
         slash::SlashAction::Session { arg } => match arg.as_deref() {
             Some("list") => open_session_selector(ctx, state).await,
             Some("info") => {
@@ -1044,6 +1074,78 @@ fn apply_theme(state: &mut InteractiveState, name: rpi_tui::ThemeName) {
         &format!("theme → {}", name.display_name()),
         &state.theme,
     ));
+}
+
+/// `/setting`:打开设置选择器(当前值内联在条目里,Enter 切换/循环)。
+fn open_setting_selector(state: &mut InteractiveState) {
+    let options = vec![
+        format!(
+            "全屏模式: {}(输入区钉底,屏幕内滚动)",
+            if state.fullscreen { "开" } else { "关" }
+        ),
+        format!(
+            "Ctrl+X 复制: {}(有选区时 Ctrl+X 复制到剪贴板)",
+            if state.ctrl_x_copy { "开" } else { "关" }
+        ),
+        format!(
+            "选中后自动复制: {}(松开拖选入剪贴板;选择/快捷键复制不受影响)",
+            if state.copy_on_select { "开" } else { "关" }
+        ),
+    ];
+    state.select = Some(SelectRequest {
+        prompt: "设置(Enter 切换 · Esc 关闭 · 写入 ~/.rpi/settings.json)".into(),
+        list: SelectList::new(options),
+        kind: SelectKind::Setting,
+    });
+}
+
+/// 应用 /setting 选择:切换后立即写回项目 settings.json 并重开选择器
+/// (条目标签反映新值)。
+fn apply_setting_selection(state: &mut InteractiveState, index: usize) {
+    match index {
+        0 => {
+            let target = !state.fullscreen;
+            state.fullscreen = target;
+            state.tui_mode_switch = Some(target);
+            persist_setting(
+                state,
+                "tuiMode",
+                serde_json::json!(if target { "fullscreen" } else { "regular" }),
+            );
+            state.commit_ephemeral(warning_line_theme(
+                if target {
+                    "TUI → fullscreen(输入区钉底,PageUp/PageDown/滚轮滚动)"
+                } else {
+                    "TUI → regular(内容滚入终端 scrollback)"
+                },
+                &state.theme,
+            ));
+        }
+        1 => {
+            state.ctrl_x_copy = !state.ctrl_x_copy;
+            persist_setting(state, "ctrlXCopy", serde_json::json!(state.ctrl_x_copy));
+        }
+        2 => {
+            state.copy_on_select = !state.copy_on_select;
+            persist_setting(
+                state,
+                "copyOnSelect",
+                serde_json::json!(state.copy_on_select),
+            );
+        }
+        _ => {}
+    }
+    open_setting_selector(state);
+}
+
+/// 设置项写回全局 ~/.rpi/settings.json(失败仅提示,不阻断交互)。
+fn persist_setting(state: &mut InteractiveState, key: &str, value: serde_json::Value) {
+    if let Err(e) = rpi_core::write_setting_field(None, state.home.as_deref(), key, value) {
+        state.commit_ephemeral(view::error_line(
+            &format!("写入 settings.json 失败: {e}"),
+            &state.theme,
+        ));
+    }
 }
 
 fn open_theme_selector(state: &mut InteractiveState) {

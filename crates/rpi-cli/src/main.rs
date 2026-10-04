@@ -45,6 +45,7 @@ enum Args {
         provider: Option<String>,
         model: Option<String>,
         theme: Option<String>,
+        tui_mode: Option<String>,
         cont: bool,
         resume_index: Option<usize>,
         list: bool,
@@ -69,6 +70,7 @@ fn parse_args(args: &[String]) -> Args {
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
     let mut theme: Option<String> = None;
+    let mut tui_mode: Option<String> = None;
     let mut mock = false;
     let mut cont = false;
     let mut resume_index: Option<usize> = None;
@@ -100,6 +102,10 @@ fn parse_args(args: &[String]) -> Args {
             }
             "--theme" if i + 1 < args.len() => {
                 theme = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--tui-mode" if i + 1 < args.len() => {
+                tui_mode = Some(args[i + 1].clone());
                 i += 2;
             }
             "--mock" => {
@@ -176,6 +182,7 @@ fn parse_args(args: &[String]) -> Args {
         provider,
         model,
         theme,
+        tui_mode,
         cont,
         resume_index,
         list,
@@ -201,6 +208,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         provider,
         model,
         theme,
+        tui_mode,
         cont,
         resume_index,
         list,
@@ -306,7 +314,8 @@ async fn run(args: &[String]) -> Result<(), String> {
                         cli_session_mode,
                     )
                     .await?;
-                    modes::interactive::run_interactive_mode(built, ui, ui_rx, theme).await
+                    modes::interactive::run_interactive_mode(built, ui, ui_rx, theme, tui_mode)
+                        .await
                 }
             }
         }
@@ -469,6 +478,7 @@ fn print_help() {
          \x20 rpi --mode rpc                                         stdio JSONL RPC(编辑器集成)\n\
          \x20 rpi --provider <id> [--model <id>] \"prompt\"            指定真实 provider\n\
          \x20 rpi --model <provider>/<id> \"prompt\"                    provider/model 形式\n\
+         \x20 rpi --tui-mode fullscreen|regular                       全屏(默认)/ scrollback 渲染模式\n\
          \x20 rpi --continue [\"prompt\"]                               续聊当前项目最近的会话\n\
          \x20 rpi -r [序号]                                            同 --continue(序号 = -l 列表序号)\n\
          \x20 rpi -l                                                   列出当前项目的历史会话\n\

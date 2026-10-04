@@ -27,7 +27,7 @@ use crate::assembly::BuiltSession;
 pub use events::{create_tui_ui, TuiApprovalUi, TuiUi, UiEvent};
 
 use handlers::InteractiveCtx;
-use state::InteractiveState;
+use state::{InteractiveState, ScrollRequest};
 
 /// 主题解析(三层优先级):`--theme` / `/theme` 传入值 → settings.json 的
 /// `theme` 字段 → 终端能力自动探测(默认 ratatui-themes Tokyo Night,
@@ -59,11 +59,39 @@ fn resolve_theme(explicit: Option<&str>) -> (Theme, Option<String>) {
 /// busy 时的 spinner 帧间隔。
 const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
 
+/// TUI 渲染模式解析(三层优先级):`--tui-mode` → settings.json `tuiMode`
+/// → 默认 fullscreen(pi 同款)。非法值告警后继续走默认链路。
+/// 返回 true = fullscreen(alternate screen)。
+fn resolve_tui_mode(explicit: Option<&str>) -> bool {
+    let parse = |name: &str, source: &str| match name.trim() {
+        "fullscreen" => Some(true),
+        "regular" => Some(false),
+        _ => {
+            eprintln!("[rpi] {source} 的 tuiMode `{name}` 无效(fullscreen|regular),已回退默认");
+            None
+        }
+    };
+    if let Some(name) = explicit.map(str::trim).filter(|n| !n.is_empty()) {
+        if let Some(resolved) = parse(name, "参数") {
+            return resolved;
+        }
+    }
+    let cwd = std::env::current_dir().ok();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    if let Some(name) = rpi_core::load_tui_mode_setting(cwd.as_deref(), home.as_deref()) {
+        if let Some(resolved) = parse(&name, "settings.json") {
+            return resolved;
+        }
+    }
+    true
+}
+
 pub async fn run_interactive_mode(
     built: BuiltSession,
     ui: TuiUi,
     mut ui_rx: mpsc::UnboundedReceiver<UiEvent>,
     theme_override: Option<String>,
+    tui_mode_override: Option<String>,
 ) -> Result<(), String> {
     let BuiltSession {
         session,
@@ -75,7 +103,17 @@ pub async fn run_interactive_mode(
     } = built;
     let (theme, theme_name) = resolve_theme(theme_override.as_deref());
 
-    let mut app = TuiApp::open().map_err(|e| e.to_string())?;
+    let fullscreen = resolve_tui_mode(tui_mode_override.as_deref());
+    let mut app = TuiApp::open_with_mode(fullscreen).map_err(|e| e.to_string())?;
+
+    // /setting 可持久化设置:选中后自动复制(默认关)与 Ctrl+X 复制
+    // 开关(默认开)
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let copy_on_select =
+        rpi_core::load_copy_on_select_setting(Some(&cwd), home.as_deref()).unwrap_or(false);
+    let ctrl_x_copy =
+        rpi_core::load_ctrl_x_copy_setting(Some(&cwd), home.as_deref()).unwrap_or(true);
 
     // 键盘线程暂停开关:TUI 挂起跑外部编辑器($EDITOR)期间置位,线程
     // 停止读取 crossterm 事件,把终端输入让给子进程。
@@ -122,8 +160,6 @@ pub async fn run_interactive_mode(
 
     // /model 解析与主流程同源:models.json + 内置 provider 默认表。
     // RwLock:/model 配置入口(编辑 models.json/表单)运行期热重载
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let resolver = std::sync::RwLock::new(rpi_core::create_model_resolver_from_config(
         Some(&cwd),
         home.as_deref(),
@@ -141,6 +177,9 @@ pub async fn run_interactive_mode(
 
     let mut state = InteractiveState::new(theme, app.width());
     state.theme_name = theme_name;
+    state.fullscreen = fullscreen;
+    state.copy_on_select = copy_on_select;
+    state.ctrl_x_copy = ctrl_x_copy;
     state.cwd_display = rpi_tui::footer::abbreviate_home(
         &cwd.display().to_string(),
         home.as_deref().and_then(|p| p.to_str()),
@@ -171,8 +210,32 @@ async fn event_loop(
     render_tick(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
 
     loop {
+        // 每轮取 toast 到期时刻(拥有值,避免 select 分支间借用冲突)
+        let toast_deadline = app.toast_deadline();
         // 每轮同步宽度(Resize 经 crossterm 事件/逐帧尺寸查询进入全量重绘)
         state.width = app.width();
+        state.fullscreen = app.is_fullscreen();
+        app.set_auto_copy_on_select(state.copy_on_select);
+
+        // 全屏滚动请求:handlers 只置标记,这里转交 TuiApp(下一次
+        // render 按新视口位置差分输出)
+        if let Some(request) = state.scroll_request.take() {
+            match request {
+                ScrollRequest::PageUp => app.scroll_page_up(),
+                ScrollRequest::PageDown => app.scroll_page_down(),
+                ScrollRequest::Top => app.scroll_top(),
+                ScrollRequest::Bottom => app.scroll_bottom(),
+                ScrollRequest::Lines(n) => app.scroll_lines(n),
+            }
+        }
+
+        // 全屏 ↔ regular 切换(/fullscreen):写终端序列后走全文重绘
+        // (切回 regular 时主屏仍是进入前的旧内容,必须重打整份文档)
+        if let Some(target) = state.tui_mode_switch.take() {
+            app.set_fullscreen(target).map_err(|e| e.to_string())?;
+            state.fullscreen = target;
+            state.needs_full_redraw = true;
+        }
 
         // ctrl+o / 主题 / /new / 尺寸变化后的全文重绘:按当前展开态重组
         // 启动区与转录,整屏重打;挂起的瞬态行(如 theme → … 确认)并入
@@ -203,8 +266,27 @@ async fn event_loop(
         tokio::select! {
             key = key_rx.recv() => {
                 let Some(key) = key else { break };
-                if handlers::handle_key(ctx, state, key).await {
-                    break;
+                // 鼠标选区手势与复制请求:纯屏幕层操作,直接交 TuiApp,
+                // 不经编辑器/命令状态机(highlight 变化由下一帧差分上屏)
+                match key {
+                    // 鼠标手势:全屏模式下恒可用(拖选/高亮/扩展),
+                    // 自动复制与否由 app 侧 auto_copy_on_select 决定
+                    rpi_tui::Key::Mouse(action) => {
+                        app.on_mouse(action).map_err(|e| e.to_string())?;
+                    }
+                    // 有选区时 Ctrl+X = 复制并清除高亮(/setting 可关;复制
+                    // 成功由右上角 Copied! toast 反馈)。Ctrl 组合键任何终端
+                    // 都转发,避开 cmd 键被终端占用的问题;无选区时 Ctrl+X
+                    // 原样落编辑器(当前无操作),Ctrl+C 保持中断/双击退出
+                    rpi_tui::Key::Ctrl('x') if state.ctrl_x_copy && app.has_selection() => {
+                        app.copy_selection().map_err(|e| e.to_string())?;
+                        app.clear_selection();
+                    }
+                    key => {
+                        if handlers::handle_key(ctx, state, key).await {
+                            break;
+                        }
+                    }
                 }
             }
             event = ui_rx.recv() => {
@@ -222,6 +304,15 @@ async fn event_loop(
             } => {
                 state.spin = state.spin.wrapping_add(1);
             }
+            // 右上角 toast 到期:触发一轮重绘,差分消除提示框
+            _ = async {
+                match toast_deadline {
+                    Some(deadline) => {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
+                    }
+                    None => futures::future::pending::<()>().await,
+                }
+            } => {}
         }
 
         // handlers 置位的挂起动作(如 $EDITOR 编辑 models.json):TUI 挂起

@@ -286,6 +286,10 @@ class RpiApp:
             "ctrl+o": "\x0f",
             "up": "\x1b[A",
             "down": "\x1b[B",
+            "pageup": "\x1b[5~",
+            "pagedown": "\x1b[6~",
+            "home": "\x1b[H",
+            "end": "\x1b[F",
         }
         self.child.send(mapping[name])
 

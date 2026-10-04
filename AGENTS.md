@@ -151,7 +151,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 
 | 文件 | 说明 |
 |---|---|
-| `src/app.rs` | `TuiApp`：全帧差分渲染（pi TuiMainScreen 对应）——定稿行缓存 ANSI 序列化只追加，与活动尾部拼成全帧逐行差分、只重绘变化区间，追加行越过屏幕底自然滚入原生 scrollback；变化落在已滚出区域或尺寸变化时全量重绘兜底，DECAWM 关闭防回绕 |
+| `src/app.rs` | `TuiApp`：全帧差分渲染，双渲染模式——**regular**（pi TuiMainScreen 对应：定稿行缓存 ANSI 序列化只追加，与活动尾部拼成全帧逐行差分、只重绘变化区间，追加行越过屏幕底自然滚入原生 scrollback，变化落在已滚出区域或尺寸变化时全量重绘兜底，DECAWM 关闭防回绕）与 **fullscreen**（pi TuiAltScreen 对应：alternate screen + 屏幕内滚动，历史窗口按视口偏移显示且内容贴底，尾部钉死屏幕底部，整屏逐行差分、绝对定位重写绝不用 `\r\n` 滚动，翻页重叠 4 行、上滚视口冻结、End 恢复 follow，鼠标捕获（滚轮滚动 + 全屏模式恒可用的应用层选区：拖选反色高亮、Shift+点击扩展选区、有选区时 Ctrl+X 复制并清除高亮（/setting 可关，复制成功经 OSC 52 入系统剪贴板并显示右上角 Copied! toast 1.5s）、Alt+点击扩展选区（Shift 多被终端截留）；选区以帧行号锚定内容，滚动后高亮/复制跟随文字，光标永远钉在输入框不随滚动出屏），finish 时转录 dump 回主屏 scrollback）；`set_fullscreen` 运行时切换（共享 committed 缓存零迁移）；滚动 API `scroll_page_up/page_down/top/bottom/lines`；`on_mouse`/`copy_selection` 选区接口；`suspend/resume` 给 `$EDITOR` 让屏（全屏先退/重回 alt screen）；`Drop` 兜底恢复 |
 | `src/editor.rs` | 多行编辑器（缓冲按 `Vec<Vec<char>>` 避免多字节索引问题）：undo、kill-ring、词导航、↑/↓ 历史 |
 | `src/view.rs`（modes/interactive 内） | 尾部帧组装纯函数：实时预览（≤4 行，工具命令卡片全显不设限）→ 状态行（仅 busy，紧贴输出）→ 两行间隔 → 补全弹窗 → 编辑器 → footer；全帧差分下尾部高度逐帧自由变化 |
 | `src/markdown.rs` | Markdown 渲染（标题/列表/围栏代码块 syntect 高亮/GFM 表格/行内样式） |
@@ -159,7 +159,7 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `src/tool_card.rs` | 工具调用卡片：命令本身完整折行（不随 ctrl+o 变化），输出折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，上下各一行同色内边距；成功绿/失败红为压暗低饱和色调，运行中中性） |
 | `src/footer.rs` | 两行状态栏：上=左 cwd+git 分支 + 右 token 段（↑prompt 含缓存明细 U/R 与命中率 / ↓out / ctx% 变色 / $cost）；下=左 agent:main(或当前子 agent)│模式标记（plan 黄、full-access 红）+ 右 model·thinking |
 | `src/theme/` | 语义主题：ratatui-themes 映射 + 逐主题微调（Tokyo Night/Catppuccin/Dracula…），16 色降级 ANSI |
-| `src/highlight.rs` / `text.rs` / `width.rs` / `key.rs` / `loader.rs` / `select_list.rs` / `header.rs` | syntect 高亮单例 / span 感知折行截断 / 零依赖 CJK 宽度表 / 按键语义归一 / spinner / 单选列表 / 启动横幅 |
+| `src/highlight.rs` / `text.rs` / `width.rs` / `key.rs` / `loader.rs` / `select_list.rs` / `header.rs` | syntect 高亮单例 / span 感知折行截断 / 零依赖 CJK 宽度表 / 按键语义归一（含鼠标滚轮/左键手势 `Mouse`（携带 Shift 修饰）、Ctrl+X 复制在事件循环层拦截）/ spinner / 单选列表 / 启动横幅 |
 
 ### crates/rpi-cli — L4 可执行壳（bin: rpi）
 
@@ -168,8 +168,8 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `src/main.rs` | CLI 入口：flag 解析（--mode/--mock/--provider/--model/--theme/--continue|-c|-r [序号]/-l|--list/--session-mode/--plan/--yolo/--sandbox-*/--mcp-mock-server）、模式自动判定（两端 TTY → interactive 否则 print）、装配分支 |
 | `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子 + PI_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.rpi/settings.json` 优先） |
 | `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
-| `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent（无参打开 agent+off 选择器）/session（list/info）/quit；带变体命令裸调用只提示用法，部分输入回车展开变体选择页、方向键选定后回车执行；未识别 `/xxx` 本地警告不发给模型 |
-| `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 /model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单）、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、/model 选择器+添加模型表单）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，rpi 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
+| `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent（无参打开 agent+off 选择器）/session（list/info）/fullscreen（[on\|off] 切换全屏渲染模式）/quit；带变体命令裸调用只提示用法，部分输入回车展开变体选择页、方向键选定后回车执行；未识别 `/xxx` 本地警告不发给模型 |
+| `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记）、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局 ~/.rpi/settings.json）、/model 选择器+添加模型表单）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，rpi 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
 | `src/mcp_mock.rs` | mock MCP 扩展服务端（`rpi --mcp-mock-server`）：订阅 tool_call 拦截危险 bash + 注册 echo 工具 + elicitation 确认，供扩展全链路验收 |
 | `tests/modes.rs` | 四模式集成测试（ScriptedProvider 不联网）：json 剥 partial、rpc 反向通道、PI_* 注入、Plan 只读 bash、JSONL 重建 == 内存 context、ModeChange 持久化等 |
 | `tests/e2e_mcp_extension.rs` | 真实子进程 MCP 扩展端到端验收 |
@@ -190,14 +190,14 @@ rpi-session / rpi-tools / rpi-tui / rpi-web 为可选组件：移除任意一个
 | `harness.py` | 驱动核心 `RpiApp`：隔离临时 HOME + pexpect 真 PTY 启动 rpi + pyte 解析屏幕；API：`wait_ready`/`sendline`/`send_key`/`expect_text`（正则、忽略空白）/`expect_absent`/`visible_text`/`transcript`/`wait_for_requests`/`quit`；`finally` 必须 `close()` |
 | `mock_llm.py` | 本地 mock LLM：伪装 anthropic-messages SSE 端点，按场景 JSON 逐 turn 返回（`{"text":…}` / `{"tool_calls":[…]}` / `{"error":…, "status":500}` 三种 turn），记录请求体供反向断言 |
 | `conftest.py` / `pytest.ini` / `requirements.txt` | sys.path 注入 / DeprecationWarning 过滤 / pexpect+pyte+pytest（装全局环境，不建 venv） |
-| `test_*.py`（25 个场景） | startup 横幅、ask_and_reply 问答、tool_roundtrip 工具闭环、abort/abort_then_continue、ctrl_c 双击退出、steering 注入、continue 恢复、provider_error 重试、session_half_line 崩溃恢复、bash_tool 截断、bash_sanitize 净化对齐、parallel_tools 源序、tool_validation 非法参数、ctrl_o 折叠、write_edit 落盘、compact 空对话回归、new_session、plan_mode 审批流、theme、output_display CJK 回归、slash_commands、shift_enter 多行输入、session_resume（-r/-l//session 切换）、quit |
+| `test_*.py`（26 个场景） | startup 横幅、ask_and_reply 问答、tool_roundtrip 工具闭环、abort/abort_then_continue、ctrl_c 双击退出、steering 注入、continue 恢复、provider_error 重试、session_half_line 崩溃恢复、bash_tool 截断、bash_sanitize 净化对齐、parallel_tools 源序、tool_validation 非法参数、ctrl_o 折叠、write_edit 落盘、compact 空对话回归、new_session、plan_mode 审批流、theme、output_display CJK 回归、slash_commands、shift_enter 多行输入、session_resume（-r/-l//session 切换）、fullscreen（钉底/翻页/视口冻结/模式切换）、quit |
 | `scenarios/*.json` | 21 个 mock 响应脚本（格式见 `scenarios/README.md`） |
 
 ## 配置文件体系
 
 | 文件 | 位置（项目优先，逐字段覆盖全局） | 内容 |
 |---|---|---|
-| settings.json | `.rpi/settings.json` / `~/.rpi/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`searchIgnore`（检索忽略列表：grep/find/ls 过滤 + 系统提示词规则；未配置 = 内置默认表 node_modules/dist/target 等，空数组 = 关闭过滤，配置 = 整体覆盖）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme` |
+| settings.json | `.rpi/settings.json` / `~/.rpi/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`searchIgnore`（检索忽略列表：grep/find/ls 过滤 + 系统提示词规则；未配置 = 内置默认表 node_modules/dist/target 等，空数组 = 关闭过滤，配置 = 整体覆盖）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
 | models.json | `.rpi/models.json` / `~/.rpi/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：RPI_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载 |
 | web-search.json | `.rpi/web-search.json` / `~/.rpi/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
 | skills | `.rpi/skills/<name>/SKILL.md` / `~/.rpi/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |
