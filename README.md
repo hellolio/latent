@@ -215,6 +215,7 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [ ] 无效模型清理
  - [ ] 实现一个扩展用于测试扩展功能（文件搜索加强？）
  - [ ] 实现可配置追加系统提示词（当前仅可替换）
+ - [ ] @符号添加文件到上下文
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 
