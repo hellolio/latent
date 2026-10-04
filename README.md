@@ -1,115 +1,166 @@
-# rpi — pi agent 的 Rust 重写
+# rpi
 
-> 一个终端 AI 编码 agent:流式驱动 LLM、并行执行工具、append-only 会话树、进程外扩展系统、四种运行模式共享同一业务核。
+> 终端里的 AI 编码 agent：在命令行中与 AI 对话，让它读写文件、执行命令、搜索代码，直接帮你完成开发任务。
 
-本仓库是对 [earendil-works/pi](https://github.com/earendil-works/pi) 的 Rust 复刻,架构、逐文件索引与开发规范见 `AGENTS.md`。
-
----
-
-## 核心特性
-
-- **流式优先**:逐 delta 流式渲染回复、思考过程(thinking)与工具调用参数;真实的 SSE 帧级流式重试——失败在内容提交前静默换轮重试,提交后失败按契约编码进事件流,绝不悄悄退化成伪流式。
-- **转录即真相**:系统提示词与工具集声明以"转录中的 system 消息"形态存在,回放转录 = 重建完整请求状态;工具集变更由循环的 `declare_tool_changes` 自动 diff 公告给模型。
-- **结构化循环**:双层 while 主循环 + 显式 `Phase` 状态机 + mpsc 推送式注入(steering/follow-up),配 6 条不变量的 property test(I1–I6:转录单一真相、错误进转录、硬退出语义、并行双保序、length 截断防御、工具声明重放一致性)。
-- **工具完整性**:每个 toolCall 恰好一个 toolResult 由 `Vec<ToolOutcome>` 类型不变量保证(abort/panic/截断路径均不产生配对缺口);完整 JSON Schema 参数校验(`jsonschema` crate),非法参数在执行前拦截。
-- **护栏内建**:max_turns / max_tool_calls / max_total_tokens / deadline 预算护栏与 length 截断防振荡,终止原因可区分(`BudgetExhausted` 不伪装成 error)。
-- **会话可恢复**:JSONL append-only 会话树、分支、自动 compaction(上下文超限时裁剪重放)、overflow 自动恢复。
-- **扩展即进程**:MCP 扩展以独立进程运行,连接失败/运行期错误 = 诊断 + 跳过,绝不击穿宿主;扩展可注册工具、订阅约 40 种事件、经反向通道调用 UI(select/confirm/input/notify)。
-- **crate 级可拆卸**:7 个 crate 四层单向依赖,rpi-session / rpi-tools / rpi-tui 移除任意一个其余 crate 仍零警告编译;可选组件一律经 trait 对象在装配期注入。
+rpi 以流式方式驱动大语言模型，并行执行工具调用，支持会话持久化、自动上下文压缩、MCP 扩展、子代理与技能系统，并提供权限与沙箱护栏。
 
 ---
 
-## 快速开始
+## 功能特性
+
+- **终端交互界面**：全屏 / 滚动两种渲染模式，Markdown 渲染、语法高亮、流式输出回复与思考过程、工具调用实时可见。
+- **内置工具**：`read` / `bash` / `edit` / `write` / `grep` / `find` / `ls` / `powershell` 八个工具，AI 可以直接读代码、跑命令、改文件。
+- **多 Provider 接入**：支持 Anthropic、OpenAI、DeepSeek、Google、Z.ai、Moonshot 等 17 家 provider，统一从环境变量读取 API key，也支持自定义模型接入。
+- **会话管理**：对话自动保存为 JSONL 会话文件，`--continue` 一键续聊；上下文接近模型窗口上限时自动压缩摘要，长任务不中断。
+- **权限模式**：Plan（只读规划）/ Confirm（写操作需确认）/ FullAccess（全自动）三种模式，配合可选的 macOS Seatbelt / Linux bubblewrap / Landlock 沙箱。
+- **扩展系统**：通过 MCP 协议接入外部扩展进程，扩展可以注册新工具、订阅事件、弹出交互 UI。
+- **子代理与技能**：`.rpi/agents/*.md` 定义子代理（独立系统提示词并行干活），`.rpi/skills/*/SKILL.md` 定义可按需加载的技能。
+- **网页搜索与抓取**：内置 `web_search` / `fetch_content` 等四个联网工具，支持 Brave / Exa / Tavily / SearXNG / DuckDuckGo 多引擎路由，配置任一 key 即可用，没 key 也有免费引擎兜底。
+- **四种运行模式**：interactive（TUI）/ print（单次执行）/ json（事件流）/ rpc（编辑器集成），共享同一业务核。
+
+---
+
+## 安装
+
+### 从源码构建（需要 Rust 1.85+）
 
 ```bash
-# 构建
+git clone https://github.com/hellolio/rpi.git
+cd rpi
 cargo build --release -p rpi-cli
-
-# 无需 API key:mock provider 走通全链路
-cargo run -p rpi-cli -- --mock "你好"
-
-# 接真实模型(以 anthropic 为例)
-export ANTHROPIC_API_KEY=sk-ant-…
-rpi --provider anthropic "列出当前目录结构"
+# 产物在 target/release/rpi，可复制到 PATH：
+cp target/release/rpi /usr/local/bin/
 ```
 
-帮助:`rpi --help`。
+> 没有 API key 也能先体验：`cargo run -p rpi-cli -- --mock "你好"` 会用内置 mock provider 走通全链路。
 
 ---
 
-## 四种运行模式
-
-四种模式只是同一业务核(`AgentSession`)的不同 I/O 壳;不指定 `--mode` 时自动判定——交互终端进 TUI,否则进 print。
-
-### print(单次执行)
+## 快速上手
 
 ```bash
-rpi "修复这个 bug"                     # 非交互 shell 中默认进入
-cat prompt.txt | rpi                   # prompt 可经 stdin 管道输入
+# 1. 设置 API key（以 Anthropic 为例）
+export ANTHROPIC_API_KEY=sk-ant-…
+
+# 2. 直接提问（在交互终端会自动进入 TUI）
+rpi "列出当前目录结构"
+
+# 3. 指定 provider 和模型
+rpi --provider anthropic --model claude-sonnet-4-5 "修复这个 bug"
+
+# 4. 交互模式
+rpi
+
+# 5. 续聊上次会话
+rpi --continue
 ```
 
-流式输出回复到 stdout,工具调用打印一行状态,结束后输出终止原因;重试事件(`[retry #N in Xms]`)打 stderr。
+也可以在项目根目录的 `.rpi/settings.json` 里配置默认 provider/model，之后无需每次传参：
 
-### interactive(TUI 聊天)
-
-```bash
-rpi --mode interactive                 # 需要终端
+```json
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-5"
+}
 ```
 
-- 差分渲染 TUI,双渲染模式(对齐 pi):**fullscreen**(默认,alternate screen)输入区钉死在底部、历史内容在屏幕内滚动(`PageUp`/`PageDown`/`Home`/`End` + 鼠标滚轮,上滚不被新内容拉走,光标永远钉在输入框),退出时转录 dump 回主屏 scrollback。`/setting` 打开设置:全屏模式开关、复制快捷键固定为 Ctrl+X(有选区时复制到系统剪贴板并右上角短暂显示 Copied!;Ctrl+X 复制可在 /setting 开关,Ctrl+C 保持中断/退出语义)、选中后自动复制开关(默认关;拖选反色高亮、快捷键复制与 Alt+点击扩展选区(Shift+点击被多数终端截留为原生选择)在全屏模式下恒可用,选区锚定内容——滚动后高亮仍跟随文字),设置写入 ~/.rpi/settings.json);**regular** 滚入终端原生 scrollback。`--tui-mode fullscreen|regular`、settings.json `tuiMode` 或运行时 `/fullscreen [on|off]` 切换;footer 状态栏(当前模型 · thinking 级别 · context% · 会话累计用量;context 超 70%/90% 变色);
-- **流式可见思考过程与工具参数逐块增长**(delta 为主 + partial 快照读口);
-- 每回合结束显示用量行(输入/输出/缓存读/缓存写 token + 费用);错误/中止回合红字上屏(`Error: …` / `Operation aborted`),自动重试最终失败同样可见;
-- 启动/续聊时回放当前转录:user 反色块、assistant 正文、工具调用与结果、压缩摘要(`--continue` 恢复历史可见);
-- 斜杠命令:`/help` `/model [provider/model]` `/thinking [level]` `/compact` `/session` `/setting` `/quit`;未识别的 `/xxx` 本地警告(不发给模型);
-- `Enter` 发送;`Shift+Enter`/`Ctrl+J` 换行(kitty keyboard protocol 终端开箱即用;macOS 本地会话对不支持的终端自动兜底,详见下文终端兼容性);run 进行中输入自动转为 **steering**(当前 turn 结束后注入);`Ctrl+C` 中断当前 run(空闲时 500ms 内双击退出),`Ctrl+D` 退出。
+帮助：`rpi --help`。
 
-#### Shift+Enter 与终端兼容性
+---
 
-rpi 启动时推送 kitty keyboard protocol(flags 1\|2\|4,对齐上游 pi),支持该协议的终端把修饰键原样上报;不支持的终端由 macOS 本地兜底接管:
+## 使用方式
 
-| 终端 | 说明 |
+### 命令行参数
+
+| 参数 | 说明 |
 |---|---|
-| kitty / Ghostty / iTerm2 ≥3.5 / VSCode ≥1.109.5 | 开箱即用 |
-| WezTerm | 建议配置 `config.enable_kitty_keyboard = true`;未配置时 macOS 本地兜底也能生效 |
-| macOS Terminal.app | 不支持协议,macOS 本地兜底生效 |
-| tmux | 需 3.4+ 且 `set -s extended-keys on` |
-| 远程 SSH / Linux 非协议终端 | 无本地兜底,用 `Ctrl+J` 或 `Alt+Enter`(终端把 Option 映射为 Meta 时)换行 |
+| `"prompt"` | 位置参数，直接给出任务；非交互环境下自动进入 print 模式 |
+| `--provider <id>` | 指定 provider（如 `anthropic`、`openai`、`deepseek`） |
+| `--model <id>` | 指定模型；也可写 `provider/model` 形式省略 `--provider` |
+| `--mode <m>` | `interactive` / `print` / `json` / `rpc`（不指定时自动判定） |
+| `--tui-mode <m>` | `fullscreen`（默认，alternate screen）/ `regular`（滚入终端 scrollback） |
+| `--continue` / `-c` / `-r [序号]` | 续聊当前项目最近的会话（序号对应 `-l` 列表） |
+| `--list` / `-l` | 列出当前项目的历史会话 |
+| `--session-mode <m>` | `plan` / `confirm` / `full-access` |
+| `--plan` | 等价于 `--session-mode plan`（只读规划模式） |
+| `--yolo` | 等价于 `--session-mode full-access`（全自动，慎用） |
+| `--theme <t>` | 指定主题（Tokyo Night / Catppuccin / Dracula 等） |
+| `--sandbox-write <dir>` | 附加沙箱可写目录 |
+| `--sandbox-network` | 允许沙箱内联网 |
+| `--mock` | 使用内置 mock provider（无需 API key，测试用） |
 
-macOS 本地兜底:rpi 检测物理 Shift 键按下时把裸 `Enter` 归一为 `Shift+Enter`,覆盖所有不支持协议的本地终端(WezTerm 默认配置、Terminal.app、iTerm2 旧版等);SSH 会话(检测 `SSH_CONNECTION`/`SSH_TTY`)自动禁用。
+### 四种运行模式
 
-### json(事件 JSONL)
+- **interactive**：终端 TUI 聊天（默认，两端都是 TTY 时自动进入）。流式渲染回复与思考过程、工具卡片实时显示、footer 状态栏展示模型 / context 占用 / 花费。
+- **print**：单次执行，流式输出到 stdout 后退出。适合脚本与管道：`cat prompt.txt | rpi`。
+- **json**：事件逐行 JSONL 输出，适合被程序消费：`rpi --mode json "…" > events.jsonl`。
+- **rpc**：stdio JSONL 协议，prompt/steer/abort/getState/setModel 等命令集，适合编辑器/IDE 集成。
 
-```bash
-rpi --mode json "…" > events.jsonl
-```
+### 交互模式常用操作
 
-AgentSession 事件逐行序列化到 stdout(delta、toolcall_start 附 id/toolName、turn_end 携带 usage、extension_notify 等),适合被程序消费;UI 交互类调用返回默认值(headless)。
-
-### rpc(stdio JSONL 协议)
-
-```bash
-rpi --mode rpc
-```
-
-每行 stdin 一个命令(serde tagged JSON,`type` 字段 camelCase),stdout 返回 `{"type":"response","id":N,"ok":…}`。命令集:
-
-| 命令 | 说明 |
+| 按键 / 命令 | 说明 |
 |---|---|
-| `prompt` / `steer` / `followUp` | 发起 run / 中途注入 / 停止点注入(prompt 是长命令,流式中入队返回 `"stopReason":"enqueued"`) |
-| `abort` | 中断当前 run |
-| `getState` | 模型、thinking 级别、消息数、pending 工具、队列深度、错误等快照 |
-| `setModel` / `setThinkingLevel` | 运行期切换模型 / 思考级别 |
-| `getMessages` / `getEntries` / `getTree` | 消息转录 / 会话 entries / 会话树查询 |
-| `getCommands` / `bash` | 命令查询 / 裸 shell 执行 |
-| `extensionUiResponse` | 扩展 UI 反向通道应答(select/confirm/input 的用户选择) |
+| `Enter` | 发送；`Shift+Enter` / `Ctrl+J` 换行 |
+| `Ctrl+C` | 中断当前任务；空闲时 500ms 内双击退出 |
+| `Ctrl+D` | 退出 |
+| `Shift+Tab` | 循环切换权限模式（plan → confirm → full-access） |
+| `!命令` | 直接执行 shell 命令（不经过模型） |
+| `/help` | 查看帮助 |
+| `/model` | 切换模型 / 添加自定义模型 |
+| `/thinking [level]` | 调整思考级别 |
+| `/compact` | 手动压缩上下文 |
+| `/session` | 查看 / 切换会话 |
+| `/fullscreen [on\|off]` | 切换全屏渲染模式 |
+| `/setting` | 打开设置（主题、全屏、复制行为等，写回 settings.json） |
+| `/subagent` | 打开子代理选择器 |
+| `/quit` | 退出 |
 
-prompt 等长命令异步执行,abort 等控制命令在 run 期间仍可送达。
+全屏模式下 `PageUp` / `PageDown` / `Home` / `End` / 鼠标滚轮翻阅历史；鼠标拖选文字后 `Ctrl+X` 复制到系统剪贴板。
+
+### 权限模式
+
+| 模式 | 行为 |
+|---|---|
+| **Plan**（默认） | AI 只能读，不能写文件 / 执行有副作用的命令，适合先让它出方案 |
+| **Confirm** | 写操作逐条弹窗确认，可对单个命令选「本会话不再询问」 |
+| **FullAccess** | 全自动执行，不再确认（`--yolo`） |
+
+---
+
+## 配置
+
+配置目录按「项目 `.rpi/` 优先，逐字段覆盖全局 `~/.rpi/`」合并：
+
+| 文件 | 作用 |
+|---|---|
+| `.rpi/settings.json` | 默认模型、权限模式、bash 超时、MCP 扩展声明（`mcpServers`）、主题等 |
+| `.rpi/models.json` | 自定义 provider / model（baseUrl、定价、兼容开关） |
+| `.rpi/skills/<name>/SKILL.md` | 技能定义，AI 通过 `load_skill` 工具按需加载 |
+| `.rpi/agents/<name>.md` | 子代理定义（frontmatter 声明 name/model/tools，正文即系统提示词） |
+| `.rpi/system-prompt.md` | 自定义系统提示词 |
+
+MCP 扩展示例（`.rpi/settings.json`）：
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "my-ext",
+      "command": "node",
+      "args": ["ext.js"],
+      "env": { "FOO": "bar" }
+    }
+  ]
+}
+```
+
+扩展以独立进程运行，崩溃或出错只会被跳过并打印诊断，不影响 rpi 本体。
 
 ---
 
 ## Provider 支持
 
-`--provider <id> [--model <id>]`,API key 从环境变量读取,`--model` 缺省时用各 provider 的默认模型。当前接入两个通用适配器(OpenAI 风格 completions + Anthropic messages),覆盖以下 provider(其余 8 个 provider 适配器为**记录在案的推迟项**,通用适配器已覆盖主流):
+API key 从环境变量读取，`--model` 缺省时使用各 provider 默认模型：
 
 | provider | 环境变量 |
 |---|---|
@@ -121,108 +172,54 @@ prompt 等长命令异步执行,abort 等控制命令在 run 期间仍可送达�
 | `openrouter` | `OPENROUTER_API_KEY` |
 | `zai` / `zai-coding-cn` | `ZAI_API_KEY` |
 | `moonshotai` / `kimi-coding` | `MOONSHOT_API_KEY` |
-| `xai`、`mistral`、`together`、`fireworks`、`cerebras`、`azure-openai-responses`、`minimax`、`xiaomi`、`radius` | 各自 `_API_KEY` |
+| `xai`、`mistral`、`together`、`fireworks`、`cerebras`、`azure-openai-responses`、`minimax`、`xiaomi` 等 | 各自 `_API_KEY` |
 
-可靠性(经重试装饰器,默认装配):可重试错误(429/5xx/断连)指数退避自动重试,配额类错误不重试;重试调度/结束以 `AutoRetryStart/End` 事件上报。
+网络错误（429 / 5xx / 断连）会指数退避自动重试；配额类错误不重试。
 
 ---
 
 ## 内置工具
 
-8 个工具走统一的 ToolDefinition 五合一(schema + 执行 + 系统提示词贡献 + 渲染 + 约束采样);输出统一双限截断(**保留末尾** 2000 行 / 50KB,先到为准,截断时完整输出落临时文件并在结果里给出 `[Full output: <path>]` 提示);错误一律抛给循环转错误 tool result。
-
-| 工具 | 默认集 | 说明 |
+| 工具 | 默认启用 | 说明 |
 |---|---|---|
-| `read` | ✅ | 读文件,1 起始 offset/limit 切片,截断时附续读提示;单行超 50KB 提示改用 bash |
-| `bash` | ✅ | shell 执行,流式输出(onUpdate 实时可见),非零 exit 报"输出 + Command exited with code N",abort/超时杀整棵进程树 |
-| `edit` | ✅ | 多点精确替换(每个 oldText 必须在原文件中唯一),BOM/行尾保持,diff + unified patch 进 details |
-| `write` | ✅ | 整文件写入(新建或完整重写) |
-| `grep` | — | 内容搜索(glob 过滤、ignoreCase/literal、context 行数,limit 默认 100),尊重 .gitignore,原生实现无外部 rg 依赖 |
-| `find` | — | glob 文件查找(limit 默认 1000),尊重 .gitignore |
-| `ls` | — | 目录列表(目录加 `/` 后缀,含 dotfiles,limit 默认 500) |
-| `powershell` | — | bash 的 Windows 等价物,共用同一工厂 |
+| `read` | ✅ | 读文件（支持 offset/limit 切片） |
+| `bash` | ✅ | 执行 shell 命令，流式输出，超时自动清理整棵进程树 |
+| `edit` | ✅ | 多点精确文本替换 |
+| `write` | ✅ | 写入整个文件（自动创建父目录） |
+| `grep` | — | 内容搜索，尊重 .gitignore |
+| `find` | — | glob 文件查找 |
+| `ls` | — | 目录列表 |
+| `powershell` | — | Windows 下的 bash 等价物 |
 
-默认激活 read/bash/edit/write;参数经完整 JSON Schema 校验(类型/required/enum/数值范围/数组元素/嵌套对象),schema 本身非法时 fail-closed 拒绝执行。
-
-### bash 工具高级配置
-
-- **PI_\* 会话环境注入**:bash 执行时自动注入 `PI_SESSION_ID`、`PI_SESSION_FILE`、`PI_PROVIDER`、`PI_MODEL`、`PI_REASONING_LEVEL`(取自会话运行时快照);用户进程环境已有同名变量则**不覆盖**。
-- **commandPrefix**:settings 里配置统一命令前缀(见下),以换行前置,可含多条 shell 语句;hook 先改写、prefix 最后前置。
-- **spawnHook**:spawn 前的命令改写钩子(`trait ShellSpawnHook`),可检查/改写命令;返回 Err = 拒绝执行且**不 spawn**,错误信息进工具结果。
-- **进程组杀灭**:Unix 下子进程自成进程组(`process_group(0)`),超时/中断时 `kill(-pgid)` 清理整棵进程树(含孙进程);非 Unix 保持 kill_on_drop 兜底。
-
----
-
-## 会话持久化与压缩
-
-- **JSONL append-only 会话树**:每条 entry(消息/模型切换/压缩/标签…)是一个树节点,只追加不改写历史;`--mode rpc` 的 `getTree`/`getEntries`/`fork` 可查询/分支。
-- **投影**:活动分支投影成模型上下文;重启续聊。
-- **自动 compaction**:上下文接近窗口上限时自动裁剪 + 摘要(切点选择、向前吞并相邻元数据 entry、usage 估算失真回退全量估算);每次 run 的 overflow 恢复只尝试一次。
-- **overflow 自动恢复**:context overflow → 丢被中断 turn 的错误 assistant → 裁最老上下文 → continue 重放,以 `AutoRetryStart/End` 事件上报。
-
----
-
-## 扩展系统(MCP)
-
-在项目根 `.rpi/settings.json` 或全局 `~/.rpi/settings.json` 声明(项目优先):
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "my-ext",
-      "command": "node",
-      "args": ["ext.js"],
-      "env": { "FOO": "bar" }
-    }
-  ],
-  "commandPrefix": "timeout 300"
-}
-```
-
-- 扩展是**独立进程**,通讯复用 MCP(rmcp,pin `=3.4.1`);`name` 缺省取 command 文件名,同时用作扩展注册工具的名字前缀(如 `my-ext_tool`)。
-- 扩展可以:**注册工具**(进全量候选集)、**订阅事件**(tool_call/tool_result 事件支持改参/拦截:返回 `block=true` 拦截、`args` 改参后循环重新过 schema 校验再执行)。
-- **错误语义**:init 失败 = 跳过该扩展 + 收集诊断(打 stderr),一个坏扩展拖不死整体;运行期失败/超时/断连 = 诊断 + 跳过该次分发,绝不击穿宿主。
-- **UI 反向通道**:扩展可调用 select/confirm/input/notify——TUI 模式弹真组件,json 模式落 `extension_notify` 事件,rpc 模式经 `extensionUiResponse` 上行等待宿主应答。
-- `rpi --mcp-mock-server`:扩展开发用的自检 mock 服务端。
-
----
-
-## 架构
-
-7 个 crate、四层严格单向依赖(依赖图见 `AGENTS.md`):
-
-```
-L4  rpi-cli (bin)  ──── rpi-tui ┐
-L3  rpi-core ───────────────────┤  依赖下方全部
-L2  rpi-agent ─── rpi-session ─┤  session/tools 只依赖 agent 的类型/trait
-L1  rpi-ai ─────────────────────┘  零内部依赖
-```
-
-| crate | 职责 | 可拆卸性 |
-|---|---|---|
-| `rpi-ai` | Provider trait、适配器、事件流协议、流式重试、overflow 检测 | 基座 |
-| `rpi-agent` | 主循环 + `Agent` + 消息/事件类型 + `LoopHooks`/`Tool` trait + 护栏 | 基座 |
-| `rpi-session` | JSONL 会话树、投影、compaction | 可选组件 |
-| `rpi-tools` | 内置 8 工具 | 可选组件 |
-| `rpi-core` | `AgentSession`、系统提示词 sections、扩展 registry、模型解析 | 业务核 |
-| `rpi-tui` | 差分渲染终端 UI | 可选组件 |
-| `rpi-cli` | main + 四种模式 + 装配 | 可执行壳 |
-
-六个稳定接缝:循环↔provider(`trait Provider`)、宿主↔循环(`trait LoopHooks`)、循环↔工具(`trait Tool`)、core↔扩展(`ExtensionActions`/`ExtensionUi`)、core↔mode(事件订阅)、事件汇(`Vec<Arc<dyn Subscriber>>` 串行 await 保序)。每个 crate 对外只暴露**工厂、trait、类型**三样;实现类型不 `pub`;依赖严格单向;无可变全局状态;trait 方法不 panic。
+默认启用 `read` / `bash` / `edit` / `write`；可在 settings.json 的 `tools` 字段调整激活集合。
 
 ---
 
 ## 开发
 
 ```bash
-cargo test --workspace                  # 27 个测试二进制全绿(含 property test)
-cargo clippy --workspace --all-targets  # 零警告
+cargo clean && cargo build --release -p rpi-cli && cp target/release/rpi ~/.local/bin/
+cargo build --release -p rpi-cli         # 构建
+cargo test --workspace                   # 运行全部测试
+cargo clippy --workspace --all-targets   # lint（要求零警告）
 ```
 
-- **改代码前必读**:`AGENTS.md` 的目录索引、不变量清单与开发规范。
-- **外部依赖一律 pin 精确版本**(如 `rmcp =3.4.1`、`jsonschema =0.58.0`、`nix =0.31.3`、`proptest =1.9.0`)。
+### todo list
+ - [ ] .rpiignore文件独立
+ - [ ] 子agent调用和显示优化
+ - [ ] harness适配微信qq，如何保证长时间工作不中断，定时任务
+ - [ ] jev决策小模型引入
+ - [ ] 文件检索如何过滤噪音（启用小模型摘要？或者引入第三方库实现？阿里rg？）
+ - [ ] mac沙箱好像不生效
+ - [ ] 环境变量清理，部分和pi重合
+ - [ ] 无效模型清理
+ - [ ] 实现一个扩展用于测试扩展功能（文件搜索加强？）
+ - [ ] 实现可配置追加系统提示词（当前仅可替换）
 
-### 明确不做(2026-09-26 决策记录)
+架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 
-OAuth 登录、其余 8 个 provider 适配器、模型目录 models-store;OpenAI 侧冷门细节(tool result 图片转发、grammar/custom 工具、reasoning_details 回放);read 读图、fork 跨文件复制历史、TUI 双屏/图片、RPC 剩余约 18 个命令、实验性 CBOR 栈;时间戳用毫秒整数、压缩单请求(不追求与 pi 会话文件逐字节兼容)。
+---
+
+## License
+
+MIT
