@@ -201,17 +201,33 @@ fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
     spans
 }
 
-/// 单回合用量行(转录定稿后落盘):图标与配色与 footer 右侧 token 段一致,
-/// 额外带 reasoning 段(footer 不显示)。
-pub fn turn_usage_line(
-    input: u64,
-    output: u64,
-    cache_read: u64,
-    cache_write: u64,
-    reasoning: Option<u64>,
-    cost_total: f64,
-    theme: &Theme,
-) -> Line<'static> {
+/// 单回合用量行参数(转录定稿后落盘):图标与配色与 footer 右侧 token 段
+/// 一致,额外带 reasoning 段(footer 不显示);`speed` 为本回合的输出速度
+/// 与首 token 延迟(Some 时置於行首,`> TPS 12.8 tok/s · TTFT 6.0s`,
+/// TPS 与 ↓ 同色、TTFT 与 ↑ 同色)。
+pub struct TurnUsageLine<'a> {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub reasoning: Option<u64>,
+    pub cost_total: f64,
+    /// (输出速度 tok/s, 首 token 延迟 s);None = 不显示速度段
+    pub speed: Option<(f64, f64)>,
+    pub theme: &'a Theme,
+}
+
+pub fn turn_usage_line(params: TurnUsageLine<'_>) -> Line<'static> {
+    let TurnUsageLine {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        reasoning,
+        cost_total,
+        speed,
+        theme,
+    } = params;
     let dim = Style::new().fg(theme.dim);
     let data = FooterData {
         input_tokens: input,
@@ -221,7 +237,24 @@ pub fn turn_usage_line(
         cost_total,
         ..FooterData::default()
     };
-    let mut spans = usage_segments(&data, theme);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if let Some((tps, ttft)) = speed {
+        // 速度段双色且与 token 段语义成对:TPS(输出速度)与 ↓ 同色,
+        // TTFT(prefill 延迟)与 ↑ 同色
+        spans.push(Span::styled(
+            format!("> TPS {tps:.1} tok/s"),
+            Style::new().fg(theme.usage_output),
+        ));
+        spans.push(Span::styled(
+            format!(" · TTFT {ttft:.1}s"),
+            Style::new().fg(theme.usage_input),
+        ));
+    }
+    let segments = usage_segments(&data, theme);
+    if !spans.is_empty() && !segments.is_empty() {
+        spans.push(Span::styled(" │ ".to_string(), dim));
+    }
+    spans.extend(segments);
     if let Some(reasoning) = reasoning.filter(|r| *r > 0) {
         if !spans.is_empty() {
             spans.push(Span::styled(" │ ".to_string(), dim));

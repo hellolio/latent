@@ -53,7 +53,11 @@ def _row_is_blank(app, y: int) -> bool:
 
 
 def test_two_blank_lines_between_output_and_editor():
-    """回合结束后,最近的模型输出(用量行)与输入框之间恰有两行空行。"""
+    """回合结束后,最近的模型输出(用量行)与输入框之间有间隔空行。
+
+    用量行上下各带一行间隔(避免与其他内容挤在一起),加上输出→输入框
+    的固定两行空行,用量行下方共 3 行纯空行。
+    """
     app = RpiApp(turns=load_scenario("ask_and_reply"))
     try:
         app.wait_ready()
@@ -64,12 +68,13 @@ def test_two_blank_lines_between_output_and_editor():
         time.sleep(0.5)
         rows = _screen_rows(app)
         editor = max(i for i, row in enumerate(rows) if "Ask rpi to do anything" in row)
-        # 占位文本行上方是编辑器背景内边距行,再往上恰有两行纯空行,
-        # 空行之上就是最近的输出(用量行)
+        # 占位文本行上方是编辑器背景内边距行,再往上是固定两行空行 + 用量行
+        # 自带的下方间隔空行(共 3 行纯空行),空行之上就是用量行
         assert _row_has_bg(app, editor - 1), "占位文本上方应是编辑器内边距行"
         assert _row_is_blank(app, editor - 2), "间隔第 1 行应为纯空行"
         assert _row_is_blank(app, editor - 3), "间隔第 2 行应为纯空行"
-        assert not _row_is_blank(app, editor - 4), "间隔之上应紧贴输出内容"
+        assert _row_is_blank(app, editor - 4), "用量行下方间隔应为纯空行"
+        assert not _row_is_blank(app, editor - 5), "间隔之上应紧贴用量行"
     finally:
         app.close()
 

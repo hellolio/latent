@@ -214,6 +214,13 @@ pub struct InteractiveState {
     /// 流式中的 thinking 累积(预览尾部;首个文本 delta 时提交进转录)
     pub pending_thinking: Option<String>,
     pub usage: UsageTracker,
+    /// 当前回合流式计时(MessageStart 起点与首个 delta 时刻):TurnEnd 时
+    /// 换算 TTFT 与 TPS。无 tokio 依赖,全部本地 Instant。
+    pub stream_started: Option<Instant>,
+    pub first_delta_at: Option<Instant>,
+    /// 最近一回合输出速度(tok/s)与首 token 延迟(秒),用量行展示
+    pub last_tps: Option<f64>,
+    pub last_ttft: Option<f64>,
     /// 活动选择列表;None = 无交互请求
     pub select: Option<SelectRequest>,
     /// 并发 UI 请求排队(先到先渲染)
@@ -281,6 +288,10 @@ impl InteractiveState {
             stream_text: String::new(),
             pending_thinking: None,
             usage: UsageTracker::default(),
+            stream_started: None,
+            first_delta_at: None,
+            last_tps: None,
+            last_ttft: None,
             select: None,
             select_queue: VecDeque::new(),
             model_label: "—".into(),
@@ -366,6 +377,10 @@ impl InteractiveState {
         self.pending_tool_output = None;
         self.last_tool_error = false;
         self.usage = UsageTracker::default();
+        self.stream_started = None;
+        self.first_delta_at = None;
+        self.last_tps = None;
+        self.last_ttft = None;
         self.context_tokens = 0;
         self.status = Status::Idle;
         self.needs_full_redraw = true;

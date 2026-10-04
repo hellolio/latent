@@ -28,16 +28,22 @@ impl UsageTracker {
 
 /// 单回合用量行(定稿后随转录落盘,裸行无外框):样式与 footer 右侧
 /// token 段一致(同图标同配色,见 rpi_tui::footer::turn_usage_line)。
-pub fn usage_line(usage: &rpi_ai::Usage, theme: &rpi_tui::Theme) -> Line<'static> {
-    rpi_tui::footer::turn_usage_line(
-        usage.input,
-        usage.output,
-        usage.cache_read,
-        usage.cache_write,
-        usage.reasoning,
-        usage.cost.total,
+/// `speed` = 本回合 (输出速度 tok/s, 首 token 延迟 s),置於行首。
+pub fn usage_line(
+    usage: &rpi_ai::Usage,
+    speed: Option<(f64, f64)>,
+    theme: &rpi_tui::Theme,
+) -> Line<'static> {
+    rpi_tui::footer::turn_usage_line(rpi_tui::footer::TurnUsageLine {
+        input: usage.input,
+        output: usage.output,
+        cache_read: usage.cache_read,
+        cache_write: usage.cache_write,
+        reasoning: usage.reasoning,
+        cost_total: usage.cost.total,
+        speed,
         theme,
-    )
+    })
 }
 
 /// 最后一次请求的完整上下文规模(footer ctx% 的分母侧估计):pi footer 同源
@@ -110,7 +116,7 @@ mod tests {
     #[test]
     fn usage_line_contains_fields() {
         let theme = rpi_tui::Theme::dark_ansi();
-        let line = usage_line(&usage(), &theme);
+        let line = usage_line(&usage(), None, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         // 与 footer token 段同格式:↑ 完整 prompt + 缓存明细 U/R 与命中率 +
         // $cost + reasoning
@@ -123,9 +129,27 @@ mod tests {
     }
 
     #[test]
+    fn usage_line_speed_prefix() {
+        let theme = rpi_tui::Theme::dark_ansi();
+        // 有计时数据:行首为速度段,与后续 token 段以 │ 分隔
+        let line = usage_line(&usage(), Some((12.84, 6.03)), &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s"), "{text}");
+        assert!(text.contains(" │ ↑ 115"), "{text}");
+        // 速度段双色:TPS 与 ↓ 段同色(usage_output),TTFT 与 ↑ 段同色
+        // (usage_input),不再是全灰
+        let tps = line.spans.first().unwrap();
+        assert_eq!(tps.content, "> TPS 12.8 tok/s");
+        assert_eq!(tps.style.fg, Some(theme.usage_output));
+        let ttft = line.spans.iter().nth(1).unwrap();
+        assert_eq!(ttft.content, " · TTFT 6.0s");
+        assert_eq!(ttft.style.fg, Some(theme.usage_input));
+    }
+
+    #[test]
     fn usage_line_spans_share_footer_colors() {
         let theme = rpi_tui::Theme::dark_ansi();
-        let line = usage_line(&usage(), &theme);
+        let line = usage_line(&usage(), None, &theme);
         let input = line
             .spans
             .iter()

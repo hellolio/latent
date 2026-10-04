@@ -1380,7 +1380,12 @@ async fn handle_session_event(
     event: AgentSessionEvent,
 ) {
     match event {
-            AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageDelta { delta }) => match delta {
+            AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageDelta { delta }) => {
+                // 首 token 时刻(任一增量类型;TTFT = 首 delta − MessageStart)
+                if state.first_delta_at.is_none() {
+                    state.first_delta_at = Some(Instant::now());
+                }
+                match delta {
                 rpi_agent::MessageDeltaPayload::Text { delta } => {
                     // thinking → text 的交接点:thinking 块先于正文提交进转录
                     commit_pending_thinking(state);
@@ -1401,6 +1406,7 @@ async fn handle_session_event(
                         .map(|(_, name, _)| Status::Tool(name.clone()))
                         .unwrap_or(Status::Thinking);
                 }
+                }
             },
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageStart { message, .. }) => {
             // 新 assistant 消息:重置流式缓冲与 thinking 累积,并作为消息组
@@ -1408,13 +1414,17 @@ async fn handle_session_event(
             if matches!(message.as_ref(), rpi_agent::AgentMessage::Assistant(_)) {
                 state.stream_text.clear();
                 state.pending_thinking = None;
+                // 流式计时起点:首个 delta 时记 TTFT,TurnEnd 时换算 TPS/TTFT
+                state.stream_started = Some(Instant::now());
+                state.first_delta_at = None;
                 state.commit_blank();
             }
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::MessageEnd { message }) => {
             match message.as_ref() {
                 // assistant 定稿:thinking 块 + 正文(markdown)落盘;不追加
-                // 空行(用量行紧贴正文,pi 风格)。正文裸渲染无外框。
+                // 空行(用量行自身的上下间隔由 usage_item_of 负责)。正文裸
+                // 渲染无外框。
                 rpi_agent::AgentMessage::Assistant(_) => {
                     commit_pending_thinking(state);
                     flush_stream(state);
@@ -1503,6 +1513,7 @@ async fn handle_session_event(
             state.status = Status::Thinking;
         }
         AgentSessionEvent::Agent(rpi_agent::AgentEvent::TurnEnd { message, .. }) => {
+            record_turn_speed(state, &message.usage);
             // 注意此处保持 busy(Idle 在 AgentSettled):tokens 块必须在视口
             // 收缩**前**按 busy 高度落盘,与上文(assistant 正文/工具背景块)
             // 紧贴;随后收缩释放的 1 行预留空带全部落在 tokens 下方(输入框
@@ -1522,7 +1533,7 @@ async fn handle_session_event(
                 }
                 StopReason::Length => {
                     state.usage.push(&message.usage);
-                    for item in usage_item_of(&message.usage, &state.theme) {
+                    for item in usage_item_of(state, &message.usage) {
                         state.commit(item);
                     }
                     state.commit_ephemeral(view::error_line(
@@ -1533,7 +1544,7 @@ async fn handle_session_event(
                 }
                 _ => {
                     state.usage.push(&message.usage);
-                    for item in usage_item_of(&message.usage, &state.theme) {
+                    for item in usage_item_of(state, &message.usage) {
                         state.commit(item);
                     }
                     state.context_tokens = context_tokens_of(&message.usage);
@@ -1597,6 +1608,23 @@ async fn handle_session_event(
     }
 }
 
+/// 回合结束换算最近一回合的输出速度与首 token 延迟(footer 展示):
+/// TTFT = 首 delta − MessageStart(prefill);TPS = 输出 token ÷ 生成时长
+/// (首 delta → TurnEnd;TurnEnd 在工具执行前发出,时长即纯流式生成)。
+/// 计时缺失或输出为 0 不更新,保留上一回合数值。
+fn record_turn_speed(state: &mut InteractiveState, usage: &rpi_ai::Usage) {
+    let (started, first) = match (state.stream_started.take(), state.first_delta_at.take()) {
+        (Some(started), Some(first)) => (started, first),
+        _ => return,
+    };
+    let generation = (Instant::now() - first).as_secs_f64();
+    if usage.output == 0 || generation <= 0.0 {
+        return;
+    }
+    state.last_tps = Some(usage.output as f64 / generation);
+    state.last_ttft = Some((first - started).as_secs_f64());
+}
+
 /// 流式累积 → assistant 定稿(markdown)转录条目(裸渲染,无外框)。
 fn flush_stream(state: &mut InteractiveState) {
     if !state.stream_text.trim().is_empty() {
@@ -1622,8 +1650,13 @@ fn commit_pending_thinking(state: &mut InteractiveState) {
     }
 }
 
-fn usage_item_of(usage: &rpi_ai::Usage, theme: &Theme) -> Vec<TranscriptItem> {
-    vec![TranscriptItem::Line(rpi_tui::UiLine::from(usage_line(
-        usage, theme,
-    )))]
+/// 单回合用量行上下各加一行空行(与正文/后续内容拉开间距,避免挤在一起);
+/// 行首带本回合速度段(TPS · TTFT,record_turn_speed 已在 TurnEnd 换算)。
+fn usage_item_of(state: &InteractiveState, usage: &rpi_ai::Usage) -> Vec<TranscriptItem> {
+    let speed = state.last_tps.zip(state.last_ttft);
+    vec![
+        TranscriptItem::Blank,
+        TranscriptItem::Line(rpi_tui::UiLine::from(usage_line(usage, speed, &state.theme))),
+        TranscriptItem::Blank,
+    ]
 }
