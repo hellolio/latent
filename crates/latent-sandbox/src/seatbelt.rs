@@ -177,6 +177,33 @@ mod tests {
         assert!(wrapped.contains("'echo '\\''hi'\\'''"), "{wrapped}");
     }
 
+    /// 真沙箱行为(开发机验收,13 文档 §15.7):wrap 产物必须**真实可执行**。
+    /// 探测 profile 与真实 profile 脱节曾导致"探测通过但沙箱内命令全挂"
+    /// 的回归通道 —— 本测试直接执行 build_profile 的完整产物封死该通道。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wrapped_command_actually_executes_on_this_machine() {
+        if !Path::new(SEATBELT_EXEC).exists() {
+            return;
+        }
+        let wrapped = sandbox(SandboxPolicy::ReadOnly {
+            network_access: false,
+        })
+        .wrap_command("echo sandbox-ok", Path::new("/tmp"))
+        .unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&wrapped)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "sandbox-exec 内执行失败,stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("sandbox-ok"));
+    }
+
     #[test]
     fn git_dir_gets_explicit_deny() {
         let cwd = std::env::temp_dir().join("latent_seatbelt_git_test");

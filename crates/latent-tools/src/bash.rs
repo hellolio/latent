@@ -638,12 +638,17 @@ impl Tool for ShellTool {
             timeout_secs,
         } = parse_args(self.config.name, &call.args)?;
 
-        // T10:hook 先改写(检查的是用户命令),prefix 最后前置;
-        // hook 返回 Err = 拒绝执行,直接产出错误结果、不 spawn(07 §8.5)
-        let mut effective = command.clone();
+        // T10:prefix 先并入命令,hook 检查/包装的是**最终执行体** ——
+        // prefix 一并进沙箱、一并被扩展钩子审计(07 §8.5);hook 返回
+        // Err = 拒绝执行,直接产出错误结果、不 spawn
+        let mut effective = match effective_prefix(&self.spawn.command_prefix) {
+            // 换行拼接(pi bash.ts:prefix 用于 shell setup commands,可含多条语句)
+            Some(prefix) => format!("{prefix}\n{command}"),
+            None => command,
+        };
         let mut sandboxed = false;
         if let Some(hook) = &self.spawn.spawn_hook {
-            match hook.rewrite(command.clone()).await {
+            match hook.rewrite(effective).await {
                 Ok(rewritten) => {
                     sandboxed = is_sandbox_wrapper(&rewritten);
                     effective = rewritten;
@@ -655,10 +660,6 @@ impl Tool for ShellTool {
                     });
                 }
             }
-        }
-        if let Some(prefix) = effective_prefix(&self.spawn.command_prefix) {
-            // 换行拼接(pi bash.ts:prefix 用于 shell setup commands,可含多条语句)
-            effective = format!("{prefix}\n{effective}");
         }
 
         updater.update(format!("$ {effective}")).await;
@@ -707,8 +708,7 @@ impl Tool for ShellTool {
     }
 }
 
-const SANDBOX_DENIAL_NOTICE: &str = "\n[latent] sandbox notice: this command ran sandboxed \
-(plan mode:read-only, no network); the failure above is likely caused by the sandbox, not the command.";
+const SANDBOX_DENIAL_NOTICE: &str = "\n[latent] sandbox notice: this failure may be from the Plan mode sandbox (read-only), not the command. Writes are always denied here — don't retry, continue with the plan; read-only failures may be ordinary file permissions — check first.";
 
 /// 改写后的命令是否被沙箱后端包装(seatbelt/bwrap/landlock helper)。
 fn is_sandbox_wrapper(rewritten: &str) -> bool {
@@ -1044,8 +1044,8 @@ mod tests {
     #[async_trait]
     impl ShellSpawnHook for RewritingHook {
         async fn rewrite(&self, command: String) -> Result<String, String> {
-            // 记录收到的原始命令,验证 hook 检查的是用户命令而非 prefix 拼接结果
-            assert_eq!(command, "echo secret");
+            // 记录收到的命令,验证 hook 检查/包装的是 prefix 拼接后的最终执行体
+            assert_eq!(command, "echo wrapped;\necho secret");
             Ok("echo rewritten".into())
         }
     }
@@ -1075,13 +1075,43 @@ mod tests {
         )
         .await
         .unwrap();
+        // hook 的改写结果是最终执行体(prefix 已并入 hook 输入,不再额外前置)
         assert!(output.output.contains("rewritten"), "{}", output.output);
-        assert!(
-            output.output.contains("wrapped"),
-            "prefix 在 hook 之后前置: {}",
-            output.output
-        );
         assert!(!output.output.contains("secret"), "{}", output.output);
+        assert!(!output.output.contains("wrapped"), "{}", output.output);
+    }
+
+    struct WrappingHook;
+    #[async_trait]
+    impl ShellSpawnHook for WrappingHook {
+        async fn rewrite(&self, command: String) -> Result<String, String> {
+            // 模拟沙箱后端:收到的最终执行体整体包进标记
+            Ok(format!("echo WRAPPED-START; {command}; echo WRAPPED-END"))
+        }
+    }
+
+    #[tokio::test]
+    async fn command_prefix_is_included_in_what_hook_wraps() {
+        // prefix 与命令体在同一个被包装执行体内 —— prefix 也进沙箱、
+        // 也被扩展钩子审计(13 文档 §7.6)
+        let tool = bash_with(
+            &std::env::temp_dir(),
+            ShellSpawnOptions {
+                spawn_hook: Some(Arc::new(WrappingHook)),
+                command_prefix: Some("echo prefix-ran".into()),
+                ..Default::default()
+            },
+        );
+        let output = exec(
+            &tool,
+            serde_json::json!({"command": "echo body"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(output.output.contains("WRAPPED-START"), "{}", output.output);
+        assert!(output.output.contains("prefix-ran"), "{}", output.output);
+        assert!(output.output.contains("body"), "{}", output.output);
     }
 
     #[tokio::test]

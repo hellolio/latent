@@ -24,11 +24,14 @@ impl LandlockSandbox {
     }
 }
 
-/// 内核 Landlock 支持(无 unsafe 探测:/sys/kernel/security/lsm 含 landlock)。
+/// 内核 Landlock 支持:landlock crate 真实 ABI 探测(landlock_create_ruleset
+/// 系统调用,安全 crate 封装无 unsafe;与 helper 的 [`restrict_filesystem`]
+/// 用同一 API,探测结论与 helper 能力一致)。旧的 /sys/kernel/security/lsm
+/// 文件探测在 securityfs 未挂载的环境(容器)会漏报,弃用。
+#[cfg(target_os = "linux")]
 pub fn kernel_support_detected() -> bool {
-    std::fs::read_to_string("/sys/kernel/security/lsm")
-        .map(|lsm| lsm.contains("landlock"))
-        .unwrap_or(false)
+    use landlock::ABI;
+    ABI::new_enforceable().is_ok()
 }
 
 impl Sandbox for LandlockSandbox {

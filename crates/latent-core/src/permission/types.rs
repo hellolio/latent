@@ -237,17 +237,22 @@ pub enum SandboxPolicy {
     DangerFullAccess,
 }
 
-/// 三模式的基线激活集(13 文档 §5)。无沙箱平台 Plan 的 bash 仍在激活集:
-/// 没有 OS 层兜底时,只读判定就是最后保证 —— 判定通过即执行,不通过拒绝
-/// (降级矩阵 §7.5)。
+/// 三模式的基线激活集(13 文档 §5)。无沙箱平台 Plan 的 shell 仍在激活集:
+/// 没有 OS 层兜底时,三态判定就是最后保证 —— 判定通过即执行,不通过拒绝
+/// (降级矩阵 §7.5)。shell 工具按平台取:unix 的 sh 恒存在用 bash;
+/// Windows 原生没有 sh,bash 工具不可执行,基线给 powershell。
 pub fn mode_baseline_tools(mode: SessionMode, _sandbox_available: bool) -> Vec<String> {
+    #[cfg(not(target_os = "windows"))]
+    let platform_shell = "bash";
+    #[cfg(target_os = "windows")]
+    let platform_shell = "powershell";
     match mode {
         SessionMode::Plan => vec![
             "read".into(),
             "grep".into(),
             "find".into(),
             "ls".into(),
-            "bash".into(),
+            platform_shell.into(),
         ],
         SessionMode::Confirm | SessionMode::FullAccess => vec![
             "read".into(),
@@ -316,13 +321,21 @@ mod tests {
 
     #[test]
     fn baseline_tools_drop_write_tools_in_plan() {
+        #[cfg(not(target_os = "windows"))]
+        let platform_shell = "bash";
+        #[cfg(target_os = "windows")]
+        let platform_shell = "powershell";
         let plan = mode_baseline_tools(SessionMode::Plan, true);
-        assert!(plan.contains(&"bash".to_string()));
+        assert!(plan.contains(&platform_shell.to_string()));
         assert!(!plan.contains(&"edit".to_string()));
+        // Plan 基线只含本平台 shell(Windows 无 sh,不激活 bash)
+        #[cfg(not(target_os = "windows"))]
         assert!(!plan.contains(&"powershell".to_string()));
-        // 无沙箱平台:bash 仍在基线,由只读判定兜底(降级矩阵 §7.5)
+        #[cfg(target_os = "windows")]
+        assert!(!plan.contains(&"bash".to_string()));
+        // 无沙箱平台:shell 仍在基线,由三态判定兜底(降级矩阵 §7.5)
         let degraded = mode_baseline_tools(SessionMode::Plan, false);
-        assert!(degraded.contains(&"bash".to_string()));
+        assert!(degraded.contains(&platform_shell.to_string()));
         let confirm = mode_baseline_tools(SessionMode::Confirm, true);
         assert!(confirm.contains(&"powershell".to_string()));
         assert!(confirm.contains(&"edit".to_string()));

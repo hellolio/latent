@@ -54,9 +54,12 @@ pub enum SandboxAvailability {
     None,
 }
 
-/// 平台探测(13 文档 §7.1):macOS 对 sandbox-exec 做**真实执行探测**(该
-/// 二进制在部分 macOS 版本上存在但运行即 EPERM,存在性检查会假阳性);
-/// Linux 先 bwrap 后 Landlock(lsm 列表探测,无 unsafe)。
+/// 平台探测(13 文档 §7.1):macOS 与 bwrap 都做**真实执行探测** ——
+/// 存在性检查会假阳性(sandbox-exec 存在但被系统策略禁运行;bwrap 存在
+/// 但内核禁用非特权 user namespace 且未 setuid),假阳性的代价是每条命令
+/// 运行期失败;Linux 先 bwrap 后 Landlock(landlock ABI 系统调用探测,
+/// 无 unsafe)。装配期调用一次,结果同时喂给判定引擎降级矩阵与
+/// [`create_sandbox`]。
 pub fn detect_availability() -> SandboxAvailability {
     #[cfg(target_os = "macos")]
     {
@@ -68,7 +71,7 @@ pub fn detect_availability() -> SandboxAvailability {
     }
     #[cfg(target_os = "linux")]
     {
-        if bwrap::bwrap_in_path() {
+        if bwrap::bwrap_probe_executes() {
             return SandboxAvailability::LinuxBwrap;
         }
         if landlock::kernel_support_detected() {
@@ -79,13 +82,17 @@ pub fn detect_availability() -> SandboxAvailability {
     SandboxAvailability::None
 }
 
-/// seatbelt 真实执行探测:最小 profile 跑 /bin/true。
-/// 只在装配期调用一次,失败 = 本机 sandbox-exec 不可用(如被系统策略禁用)。
+/// seatbelt 真实执行探测:最小 profile 跑 `/bin/sh -c true`。profile 与
+/// 真实 profile 的基础放行集对齐 —— `deny default` 下 dyld 需要 file-read*
+/// 才能加载共享缓存(缺了 SIGABRT);目标不能用 /bin/true(新版 macOS 已
+/// 移除该二进制)。只在装配期调用一次,失败 = 本机 sandbox-exec 不可用
+/// (如被系统策略禁运行)。
 #[cfg(target_os = "macos")]
 fn seatbelt_probe_executes() -> bool {
+    let profile = r#"(version 1)(deny default)(allow file-read*)(allow process-exec* (subpath "/bin"))(allow process-fork)(allow sysctl-read)(allow mach-lookup)"#;
     std::process::Command::new(seatbelt::SEATBELT_EXEC)
-        .args(["-p", "(version 1)(deny default)(allow process-exec* (subpath \"/bin\"))"])
-        .arg("/bin/true")
+        .args(["-p", profile])
+        .args(["/bin/sh", "-c", "true"])
         .output()
         .is_ok_and(|output| output.status.success())
 }
@@ -98,16 +105,19 @@ pub trait Sandbox: Send + Sync {
 }
 
 /// 沙箱工厂:`None` = DangerFullAccess(无需沙箱);`Err` = 策略要求沙箱但
-/// 平台不可用(装配层降级为审批,绝不静默裸跑)。`helper_exe` 是 Landlock
-/// helper 使用的本可执行文件路径(仅 LinuxLandlock 后端需要)。
+/// 该平台不可用 —— 调用方必须拒绝执行,**绝不静默裸跑**。`availability`
+/// 是装配期 [`detect_availability`] 的探测结果(单一事实来源:判定引擎的
+/// 降级矩阵与本工厂消费同一结论,本函数不再重复探测)。`helper_exe` 是
+/// Landlock helper 使用的本可执行文件路径(仅 LinuxLandlock 后端需要)。
 pub fn create_sandbox(
+    availability: SandboxAvailability,
     policy: &SandboxPolicy,
     helper_exe: Option<&Path>,
 ) -> Result<Option<Arc<dyn Sandbox>>, String> {
     if matches!(policy, SandboxPolicy::DangerFullAccess) {
         return Ok(None);
     }
-    match detect_availability() {
+    match availability {
         SandboxAvailability::MacosSeatbelt => {
             Ok(Some(Arc::new(seatbelt::SeatbeltSandbox::new(policy.clone()))))
         }
@@ -155,18 +165,20 @@ pub fn writable_roots_for(policy: &SandboxPolicy, cwd: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// 系统临时目录(macOS 每用户 TMPDIR 优先,/tmp 兜底,取存在者)。
+/// 系统临时目录:`std::env::temp_dir()` 跨平台解析(macOS 每用户 TMPDIR、
+/// Windows %TEMP%/TMP、unix TMPDIR);unix 追加 /tmp 兜底,取存在者。
 fn system_tmp_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(tmp) = std::env::var_os("TMPDIR") {
-        let path = PathBuf::from(tmp);
-        if path.is_dir() {
-            dirs.push(path);
-        }
+    let temp = std::env::temp_dir();
+    if temp.is_dir() {
+        dirs.push(temp);
     }
-    let fallback = PathBuf::from("/tmp");
-    if fallback.is_dir() {
-        dirs.push(fallback);
+    #[cfg(unix)]
+    {
+        let fallback = PathBuf::from("/tmp");
+        if fallback.is_dir() && !dirs.contains(&fallback) {
+            dirs.push(fallback);
+        }
     }
     dirs
 }
@@ -189,6 +201,26 @@ pub(crate) fn shell_quote(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归:探测曾因 /bin/true 在新版 macOS 被移除 + profile 缺 file-read*
+    /// (dyld 无法加载,SIGABRT)而在所有 macOS 上恒失败 → 沙箱整体静默
+    /// 失效、命令裸跑。sandbox-exec 二进制存在的机器(开发机常态)必须
+    /// 探测成功。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_detects_seatbelt_via_real_exec() {
+        if !Path::new(seatbelt::SEATBELT_EXEC).exists() {
+            return;
+        }
+        assert_eq!(detect_availability(), SandboxAvailability::MacosSeatbelt);
+    }
+
+    #[test]
+    fn system_tmp_dirs_includes_env_temp_dir() {
+        let dirs = system_tmp_dirs();
+        assert!(!dirs.is_empty());
+        assert!(dirs.iter().any(|dir| *dir == std::env::temp_dir()));
+    }
 
     #[test]
     fn policy_serde_roundtrip_kebab_case() {

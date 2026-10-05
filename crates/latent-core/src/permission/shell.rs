@@ -124,6 +124,15 @@ const READONLY_PREFIXES: &[&[&str]] = &[
 /// `$()`/`-exec` 嵌套递归上限(防御病态嵌套)。
 const MAX_SUBSTITUTION_DEPTH: usize = 4;
 
+/// shell 方言。词法层共用同一 mini lexer(对 PowerShell 的反引号续行、
+/// `&` 调用操作符等 bash 无有的构造保守失败 → Unknown,fail-closed);
+/// 段级判定按方言分表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dialect {
+    Bash,
+    PowerShell,
+}
+
 /// shell 命令安全判定结果(比只读二值判定更细,供 Plan 模式放行策略用)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellSafety {
@@ -243,9 +252,243 @@ const NETWORK_QUERY_PREFIXES: &[&[&str]] = &[
     &["tracepath"],
 ];
 
-/// 三态判定一条 shell 命令(Plan 模式放行策略的依据)。
+/// PowerShell 只读 cmdlet/别名前缀表(大小写不敏感,保守最小集)。只收
+/// **无 scriptblock 参数且无落盘形态**的命令 —— Where-Object /
+/// ForEach-Object / Measure-Command / Invoke-* 的 scriptblock 可执行任意
+/// 代码,一律不进只读表(归 Unknown 交沙箱/审批裁决)。
+const PS_READONLY_PREFIXES: &[&[&str]] = &[
+    // 文件/目录与项读取
+    &["Get-Content"],
+    &["Get-ChildItem"],
+    &["Get-Item"],
+    &["Get-ItemProperty"],
+    &["Get-Location"],
+    &["Get-PSDrive"],
+    &["Get-PSProvider"],
+    &["Test-Path"],
+    &["Get-FileHash"],
+    &["Get-AuthenticodeSignature"],
+    &["Get-Acl"],
+    // 系统/进程/服务/时间查询
+    &["Get-Process"],
+    &["Get-Service"],
+    &["Get-ComputerInfo"],
+    &["Get-Date"],
+    &["Get-Host"],
+    &["Get-Random"],
+    &["Get-Culture"],
+    &["Get-UICulture"],
+    // 帮助与发现
+    &["Get-Help"],
+    &["Get-Command"],
+    &["Get-Member"],
+    &["Get-Variable"],
+    &["Get-Alias"],
+    &["Get-History"],
+    &["Get-Module"],
+    // 管道整形(纯数据变换,无执行语义)
+    &["Select-String"],
+    &["Select-Object"],
+    &["Select-Xml"],
+    &["Sort-Object"],
+    &["Measure-Object"],
+    &["Compare-Object"],
+    &["Group-Object"],
+    &["Format-Table"],
+    &["Format-List"],
+    &["Format-Wide"],
+    &["Format-Custom"],
+    &["Out-String"],
+    &["Out-Host"],
+    &["Out-Null"],
+    &["Out-Default"],
+    &["ConvertTo-Json"],
+    &["ConvertTo-Csv"],
+    &["ConvertTo-Html"],
+    &["ConvertTo-Xml"],
+    &["ConvertFrom-Json"],
+    &["ConvertFrom-Csv"],
+    &["Import-Csv"],
+    &["Import-Clixml"],
+    &["Import-PowerShellDataFile"],
+    // 位置切换(无文件副作用)与零副作用输出
+    &["Set-Location"],
+    &["Push-Location"],
+    &["Pop-Location"],
+    &["Write-Output"],
+    &["Write-Host"],
+    &["Write-Verbose"],
+    &["Write-Debug"],
+    &["Write-Warning"],
+    &["Write-Progress"],
+    &["Write-Information"],
+    &["Clear-Host"],
+    // 常用别名(PowerShell 命令名/别名均不区分大小写,匹配见表查询函数)
+    &["ls"],
+    &["dir"],
+    &["cat"],
+    &["type"],
+    &["gc"],
+    &["gci"],
+    &["gi"],
+    &["gp"],
+    &["pwd"],
+    &["cd"],
+    &["sl"],
+    &["ps"],
+    &["gps"],
+    &["date"],
+    &["echo"],
+    &["write"],
+    &["select"],
+    &["sls"],
+    &["sort"],
+    &["measure"],
+    &["compare"],
+    &["diff"],
+    &["group"],
+    &["gm"],
+    &["gcm"],
+    &["gdr"],
+    &["gv"],
+    &["gal"],
+    &["ghy"],
+    &["h"],
+    &["help"],
+    &["man"],
+    &["gmo"],
+    &["ft"],
+    &["fl"],
+    &["fw"],
+    &["fc"],
+    &["oh"],
+    &["cls"],
+    &["clear"],
+];
+
+/// PowerShell 明确写前缀表(大小写不敏感):命中即 Plan 模式即使有沙箱
+/// 也不放行。Import-Module 执行模块代码(任意代码),与包管理写同责。
+const PS_WRITE_PREFIXES: &[&[&str]] = &[
+    // 文件系统变更
+    &["Set-Content"],
+    &["Add-Content"],
+    &["Clear-Content"],
+    &["Out-File"],
+    &["New-Item"],
+    &["New-ItemProperty"],
+    &["Set-Item"],
+    &["Set-ItemProperty"],
+    &["Clear-Item"],
+    &["Clear-ItemProperty"],
+    &["Remove-Item"],
+    &["Copy-Item"],
+    &["Move-Item"],
+    &["Rename-Item"],
+    &["New-PSDrive"],
+    &["Remove-PSDrive"],
+    // 变量/别名/模块(Import-Module 执行模块代码)
+    &["New-Variable"],
+    &["Set-Variable"],
+    &["Remove-Variable"],
+    &["Clear-Variable"],
+    &["New-Alias"],
+    &["Set-Alias"],
+    &["Import-Module"],
+    &["Remove-Module"],
+    // 落盘/导出
+    &["Export-Csv"],
+    &["Export-Clixml"],
+    &["Export-FormatData"],
+    &["Tee-Object"],
+    // 进程/服务/系统控制
+    &["Start-Process"],
+    &["Stop-Process"],
+    &["Start-Service"],
+    &["Stop-Service"],
+    &["Restart-Service"],
+    &["Set-Service"],
+    &["New-Service"],
+    &["Restart-Computer"],
+    &["Stop-Computer"],
+    &["Set-ExecutionPolicy"],
+    &["Send-MailMessage"],
+    // 常用别名
+    &["rm"],
+    &["del"],
+    &["erase"],
+    &["ri"],
+    &["rd"],
+    &["rmdir"],
+    &["mkdir"],
+    &["cp"],
+    &["copy"],
+    &["cpi"],
+    &["mv"],
+    &["move"],
+    &["mi"],
+    &["rni"],
+    &["ni"],
+    &["si"],
+    &["sp"],
+    &["ac"],
+    &["clc"],
+    &["cli"],
+    &["tee"],
+    &["sal"],
+    &["set"],
+    &["sv"],
+    &["nv"],
+    &["rv"],
+    &["saps"],
+    &["spps"],
+    &["sasv"],
+    &["spsv"],
+    &["set-clipboard"],
+];
+
+/// PowerShell 联网查询前缀表(大小写不敏感)。iwr/irm 的 `-OutFile`
+/// 落盘形态与 curl/wget 的 `-o`/`-O` 等形态是明确写,判定时排除。
+const PS_NETWORK_QUERY_PREFIXES: &[&[&str]] = &[
+    &["Invoke-WebRequest"],
+    &["Invoke-RestMethod"],
+    &["Resolve-DnsName"],
+    &["Test-NetConnection"],
+    &["Test-Connection"],
+    &["ping"],
+    &["nslookup"],
+    &["tracert"],
+    &["curl"],
+    &["wget"],
+];
+
+/// 三态判定一条 bash 命令(Plan 模式放行策略的依据)。
 pub fn classify_shell_command(command: &str, allow: &[String], deny: &[String]) -> ShellSafety {
-    check_command_class(command, allow, deny, 0)
+    check_command_class(command, allow, deny, 0, Dialect::Bash)
+}
+
+/// 三态判定一条 PowerShell 命令(powershell 工具专用;段级走 PS 表,
+/// 大小写不敏感)。
+pub fn classify_powershell_command(
+    command: &str,
+    allow: &[String],
+    deny: &[String],
+) -> ShellSafety {
+    check_command_class(command, allow, deny, 0, Dialect::PowerShell)
+}
+
+/// 按工具名分派三态判定:bash → bash 表,powershell → PowerShell 表,
+/// 其余工具按 bash 处理。
+pub fn classify_shell_command_for_tool(
+    tool: &str,
+    command: &str,
+    allow: &[String],
+    deny: &[String],
+) -> ShellSafety {
+    if tool.eq_ignore_ascii_case("powershell") {
+        classify_powershell_command(command, allow, deny)
+    } else {
+        classify_shell_command(command, allow, deny)
+    }
 }
 
 /// 判定一条 shell 命令是否只读(可安全免审)。
@@ -269,18 +512,37 @@ pub fn is_readonly_command_with_rules(
     )
 }
 
+/// 按工具名分派的只读判定(Confirm 模式免审用)。
+pub fn is_readonly_command_for_tool(
+    tool: &str,
+    command: &str,
+    allow: &[String],
+    deny: &[String],
+) -> bool {
+    matches!(
+        classify_shell_command_for_tool(tool, command, allow, deny),
+        ShellSafety::ReadOnly
+    )
+}
+
 /// 无规则便捷形态(测试与内置使用)。
 pub fn is_readonly_command(command: &str) -> bool {
     is_readonly_command_with_rules(command, &[], &[])
 }
 
 /// 词法失败时区分"明确写"(输出重定向落盘)与"无法判定"。
-fn check_command_class(command: &str, allow: &[String], deny: &[String], depth: usize) -> ShellSafety {
+fn check_command_class(
+    command: &str,
+    allow: &[String],
+    deny: &[String],
+    depth: usize,
+    dialect: Dialect,
+) -> ShellSafety {
     if depth > MAX_SUBSTITUTION_DEPTH {
         return ShellSafety::Unknown;
     }
     let mut redirect_write = false;
-    let Some(tokens) = tokenize(command, allow, deny, depth, &mut redirect_write) else {
+    let Some(tokens) = tokenize(command, allow, deny, depth, dialect, &mut redirect_write) else {
         return if redirect_write {
             ShellSafety::Write
         } else {
@@ -293,18 +555,18 @@ fn check_command_class(command: &str, allow: &[String], deny: &[String], depth: 
         match token {
             Tok::Word(word) => segment.push(word),
             Tok::Seq | Tok::Pipe | Tok::Or | Tok::And => {
-                merged = merge_safety(merged, segment_class(&segment, allow, deny, depth));
+                merged = merge_safety(merged, segment_class(&segment, allow, deny, depth, dialect));
                 segment.clear();
             }
         }
     }
-    merge_safety(merged, segment_class(&segment, allow, deny, depth))
+    merge_safety(merged, segment_class(&segment, allow, deny, depth, dialect))
 }
 
 /// 布尔形态便捷包装(命令替换内层递归校验用:内层非只读 = 外层无法放行)。
-fn check_command(command: &str, allow: &[String], deny: &[String], depth: usize) -> bool {
+fn check_command(command: &str, allow: &[String], deny: &[String], depth: usize, dialect: Dialect) -> bool {
     matches!(
-        check_command_class(command, allow, deny, depth),
+        check_command_class(command, allow, deny, depth, dialect),
         ShellSafety::ReadOnly
     )
 }
@@ -354,6 +616,7 @@ fn tokenize(
     allow: &[String],
     deny: &[String],
     depth: usize,
+    dialect: Dialect,
     redirect_write: &mut bool,
 ) -> Option<Vec<Tok>> {
     let mut tokens = Vec::new();
@@ -400,12 +663,13 @@ fn tokenize(
                         },
                         // 双引号内 ` 与 $( 仍会展开,按替换验证
                         Some('$') => {
-                            if !take_substitution(&mut chars, &mut word, allow, deny, depth) {
+                            if !take_substitution(&mut chars, &mut word, allow, deny, depth, dialect)
+                            {
                                 return None;
                             }
                         }
                         Some('`') => {
-                            if !take_backtick(&mut chars, &mut word, allow, deny, depth) {
+                            if !take_backtick(&mut chars, &mut word, allow, deny, depth, dialect) {
                                 return None;
                             }
                         }
@@ -421,13 +685,13 @@ fn tokenize(
             }
             '$' => {
                 in_word = true;
-                if !take_substitution(&mut chars, &mut word, allow, deny, depth) {
+                if !take_substitution(&mut chars, &mut word, allow, deny, depth, dialect) {
                     return None;
                 }
             }
             '`' => {
                 in_word = true;
-                if !take_backtick(&mut chars, &mut word, allow, deny, depth) {
+                if !take_backtick(&mut chars, &mut word, allow, deny, depth, dialect) {
                     return None;
                 }
             }
@@ -502,6 +766,7 @@ fn take_substitution(
     allow: &[String],
     deny: &[String],
     depth: usize,
+    dialect: Dialect,
 ) -> bool {
     if chars.peek() != Some(&'(') {
         word.has_expansion = true;
@@ -518,7 +783,7 @@ fn take_substitution(
     let Some(inner) = take_balanced_substitution_body(chars) else {
         return false;
     };
-    if check_command(&inner, allow, deny, depth + 1) {
+    if check_command(&inner, allow, deny, depth + 1, dialect) {
         word.text.push('X');
         true
     } else {
@@ -533,6 +798,7 @@ fn take_backtick(
     allow: &[String],
     deny: &[String],
     depth: usize,
+    dialect: Dialect,
 ) -> bool {
     let mut inner = String::new();
     loop {
@@ -549,7 +815,7 @@ fn take_backtick(
     if inner.trim().is_empty() {
         return false;
     }
-    if check_command(&inner, allow, deny, depth + 1) {
+    if check_command(&inner, allow, deny, depth + 1, dialect) {
         word.text.push('X');
         true
     } else {
@@ -665,14 +931,19 @@ fn take_output_redirect(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
 
 /// 单段命令的三态判定:deny 否定优先 → allow 规则 → 包装剥离 + 内置表/
 /// 专用解析器 → 写前缀表 → 联网查询表,落不进任何一类的归 Unknown。
+/// PowerShell 方言走独立表(`powershell_segment_class`)。
 fn segment_class(
     words: &[ShellWord],
     allow: &[String],
     deny: &[String],
     depth: usize,
+    dialect: Dialect,
 ) -> ShellSafety {
     if words.is_empty() {
         return ShellSafety::Unknown;
+    }
+    if dialect == Dialect::PowerShell {
+        return powershell_segment_class(words, allow, deny);
     }
     let normalized = words
         .iter()
@@ -789,9 +1060,88 @@ fn segment_is_readonly(
     depth: usize,
 ) -> bool {
     matches!(
-        segment_class(words, allow, deny, depth),
+        segment_class(words, allow, deny, depth, Dialect::Bash),
         ShellSafety::ReadOnly
     )
+}
+
+// ---- PowerShell 方言段级判定 ----
+
+/// PowerShell 单段三态判定:deny 否定优先 → allow 规则 → 只读表 → 写表 →
+/// 联网查询表(-OutFile 落盘形态除外),其余归 Unknown。命令名/别名不分
+/// 大小写;无 bash 的 env/sudo 包装语义(`$env:X=y` 首词含展开 → Unknown,
+/// 保守正确)。
+fn powershell_segment_class(
+    words: &[ShellWord],
+    allow: &[String],
+    deny: &[String],
+) -> ShellSafety {
+    // allow/deny 规则按小写比较(PowerShell 命令不区分大小写)
+    let normalized = words
+        .iter()
+        .map(|word| word.text.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    // 否定优先于白名单;命中 deny 规则按明确写处理(判定层面即拒绝)
+    if deny
+        .iter()
+        .any(|rule| prefix_matches(&normalized, &normalize_command(rule).to_ascii_lowercase()))
+    {
+        return ShellSafety::Write;
+    }
+    if words[0].has_expansion {
+        // 命令名来自展开,值运行期才确定
+        return ShellSafety::Unknown;
+    }
+    if allow
+        .iter()
+        .any(|rule| prefix_matches(&normalized, &normalize_command(rule).to_ascii_lowercase()))
+    {
+        return ShellSafety::ReadOnly;
+    }
+    let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+    if ps_prefix_matches(&texts, PS_READONLY_PREFIXES) {
+        return ShellSafety::ReadOnly;
+    }
+    if ps_prefix_matches(&texts, PS_WRITE_PREFIXES) {
+        return ShellSafety::Write;
+    }
+    if ps_prefix_matches(&texts, PS_NETWORK_QUERY_PREFIXES) {
+        return if ps_web_write_form(&texts) {
+            ShellSafety::Write
+        } else {
+            ShellSafety::NetworkQuery
+        };
+    }
+    ShellSafety::Unknown
+}
+
+/// PowerShell 表查询:token 逐一比较,大小写不敏感(命令名/别名均不区分)。
+fn ps_prefix_matches(tokens: &[&str], table: &[&[&str]]) -> bool {
+    table
+        .iter()
+        .any(|prefix| ps_token_prefix_matches(tokens, prefix))
+}
+
+fn ps_token_prefix_matches(tokens: &[&str], prefix: &[&str]) -> bool {
+    tokens.len() >= prefix.len()
+        && tokens[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(token, expected)| token.eq_ignore_ascii_case(expected))
+}
+
+/// PowerShell 联网查询的落盘形态:iwr/irm 的 `-OutFile`(大小写不敏感);
+/// curl/wget(PS5 是 Invoke-WebRequest 别名、PS7 是真 curl.exe)沿用
+/// bash curl 守卫的 `-o`/`-O`/`--output` 等形态。
+fn ps_web_write_form(tokens: &[&str]) -> bool {
+    let head = tokens[0].to_ascii_lowercase();
+    if head == "invoke-webrequest" || head == "invoke-restmethod" {
+        return tokens[1..]
+            .iter()
+            .any(|arg| arg.to_ascii_lowercase().starts_with("-outfile"));
+    }
+    curl_has_write_form(tokens)
 }
 
 /// 表内命令自带的写文件 flag(`sort -o`)或写内核态(`sysctl -w`)使该段非只读;
@@ -1761,5 +2111,202 @@ mod tests {
         assert!(!is_readonly_command("arch -x86_64 rm -rf x"));
         assert!(!is_readonly_command("arch -arch x86_64 curl example.com"));
         assert!(!is_readonly_command("arch -x86_64 python3 -c 'print(1)'"));
+    }
+
+    // ---- PowerShell 方言(Windows powershell 工具;大小写不敏感) ----
+
+    #[test]
+    fn powershell_readonly_cmdlets_pass() {
+        use ShellSafety::ReadOnly;
+        assert_eq!(classify_powershell_command("Get-Content foo.txt", &[], &[]), ReadOnly);
+        assert_eq!(
+            classify_powershell_command("Get-ChildItem -Recurse -Filter *.rs", &[], &[]),
+            ReadOnly
+        );
+        assert_eq!(classify_powershell_command("Test-Path C:\\Windows", &[], &[]), ReadOnly);
+        assert_eq!(classify_powershell_command("Get-Process | Sort-Object cpu", &[], &[]), ReadOnly);
+        assert_eq!(
+            classify_powershell_command("Get-Content app.log -Tail 50 | Select-String error", &[], &[]),
+            ReadOnly
+        );
+        assert_eq!(classify_powershell_command("Get-Help Get-Content", &[], &[]), ReadOnly);
+        // 管道整形组合
+        assert_eq!(
+            classify_powershell_command("Get-ChildItem | Measure-Object", &[], &[]),
+            ReadOnly
+        );
+    }
+
+    #[test]
+    fn powershell_aliases_and_lowercase_pass() {
+        use ShellSafety::ReadOnly;
+        // 别名与大小写不敏感
+        assert_eq!(classify_powershell_command("ls", &[], &[]), ReadOnly);
+        assert_eq!(classify_powershell_command("get-content foo", &[], &[]), ReadOnly);
+        assert_eq!(classify_powershell_command("GCI -Recurse", &[], &[]), ReadOnly);
+        assert_eq!(classify_powershell_command("cat app.log", &[], &[]), ReadOnly);
+        assert_eq!(classify_powershell_command("pwd", &[], &[]), ReadOnly);
+        assert_eq!(classify_powershell_command("cd C:\\tmp; ls", &[], &[]), ReadOnly);
+        assert_eq!(classify_powershell_command("echo hello", &[], &[]), ReadOnly);
+        assert_eq!(classify_powershell_command("ps | ft", &[], &[]), ReadOnly);
+    }
+
+    #[test]
+    fn powershell_write_cmdlets_are_write() {
+        use ShellSafety::Write;
+        assert_eq!(
+            classify_powershell_command("Set-Content -Path x.txt -Value hi", &[], &[]),
+            Write
+        );
+        assert_eq!(classify_powershell_command("Remove-Item foo.txt", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("New-Item out.txt", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("Copy-Item a b", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("Start-Process notepad", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("Import-Module evil", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("Tee-Object -FilePath x", &[], &[]), Write);
+        // 别名:rm/del/cp/mv/mkdir/ni/ac/sal/tee
+        assert_eq!(classify_powershell_command("rm foo.txt", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("del foo.txt", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("cp a b", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("mv a b", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("mkdir sub", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("ni x.txt", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("sal g gg", &[], &[]), Write);
+        // 大小写不敏感的写形态
+        assert_eq!(classify_powershell_command("remove-item x", &[], &[]), Write);
+        // 落盘重定向是明确写(词法层识别)
+        assert_eq!(classify_powershell_command("Get-Date > out.txt", &[], &[]), Write);
+        assert_eq!(classify_powershell_command("Get-Date >> out.txt", &[], &[]), Write);
+    }
+
+    #[test]
+    fn powershell_network_queries_and_write_forms() {
+        use ShellSafety::{NetworkQuery, Write};
+        assert_eq!(
+            classify_powershell_command("Invoke-WebRequest https://example.com", &[], &[]),
+            NetworkQuery
+        );
+        assert_eq!(
+            classify_powershell_command("Invoke-RestMethod https://example.com", &[], &[]),
+            NetworkQuery
+        );
+        assert_eq!(
+            classify_powershell_command("Resolve-DnsName example.com", &[], &[]),
+            NetworkQuery
+        );
+        assert_eq!(classify_powershell_command("ping example.com", &[], &[]), NetworkQuery);
+        assert_eq!(classify_powershell_command("curl https://example.com", &[], &[]), NetworkQuery);
+        // 落盘形态是明确写
+        assert_eq!(
+            classify_powershell_command(
+                "Invoke-WebRequest https://example.com -OutFile page.html",
+                &[],
+                &[]
+            ),
+            Write
+        );
+        assert_eq!(
+            classify_powershell_command(
+                "invoke-webrequest https://example.com -outfile page.html",
+                &[],
+                &[]
+            ),
+            Write
+        );
+        assert_eq!(
+            classify_powershell_command("curl -o out.bin https://example.com", &[], &[]),
+            Write
+        );
+    }
+
+    #[test]
+    fn powershell_scriptblocks_and_unknowns_stay_unknown() {
+        use ShellSafety::Unknown;
+        // Where-Object/ForEach-Object/Measure-Command 的 scriptblock 可执行
+        // 任意代码,不进只读表
+        assert_eq!(
+            classify_powershell_command("Get-Process | Where-Object {$_.cpu -gt 10}", &[], &[]),
+            Unknown
+        );
+        assert_eq!(
+            classify_powershell_command("Measure-Command { Remove-Item x }", &[], &[]),
+            Unknown
+        );
+        assert_eq!(
+            classify_powershell_command("Invoke-Expression $code", &[], &[]),
+            Unknown
+        );
+        // 命令名来自展开
+        assert_eq!(classify_powershell_command("$cmd x", &[], &[]), Unknown);
+        // 未知命令
+        assert_eq!(classify_powershell_command("some-weird-thing", &[], &[]), Unknown);
+        // 反引号是 PowerShell 转义符,lexer 按未闭合反引号保守拒绝
+        assert_eq!(classify_powershell_command("Write-Host `t hi", &[], &[]), Unknown);
+    }
+
+    #[test]
+    fn powershell_rules_override_tables() {
+        // allow 规则按只读放行(规则匹配小写化,大小写不敏感)
+        let allow = vec!["build.ps1".to_string()];
+        assert_eq!(
+            classify_powershell_command("Build.ps1", &allow, &[]),
+            ShellSafety::ReadOnly
+        );
+        let deny = vec!["Get-Content".to_string()];
+        assert_eq!(
+            classify_powershell_command("Get-Content secret.txt", &[], &deny),
+            ShellSafety::Write
+        );
+        // deny 大小写不敏感
+        let deny2 = vec!["get-content".to_string()];
+        assert_eq!(
+            classify_powershell_command("Get-Content secret.txt", &[], &deny2),
+            ShellSafety::Write
+        );
+    }
+
+    #[test]
+    fn powershell_mixed_segments_merge_conservatively() {
+        use ShellSafety::{NetworkQuery, Write};
+        // 只读 + 联网查询混合:整条按联网查询
+        assert_eq!(
+            classify_powershell_command("Get-Content a | Invoke-WebRequest https://x", &[], &[]),
+            NetworkQuery
+        );
+        // 任一段明确写 = 整条明确写
+        assert_eq!(
+            classify_powershell_command("Get-Date; Remove-Item x", &[], &[]),
+            Write
+        );
+        // 一段合法一段落盘重定向 → 拒绝
+        assert_eq!(
+            classify_powershell_command("Get-Date && Get-Content x > y", &[], &[]),
+            Write
+        );
+    }
+
+    #[test]
+    fn tool_dispatch_routes_powershell_by_name() {
+        // bash 工具:PowerShell cmdlet 不在 bash 表,归 Unknown
+        assert_eq!(
+            classify_shell_command_for_tool("bash", "Get-Content x", &[], &[]),
+            ShellSafety::Unknown
+        );
+        // powershell 工具:同一命令按 PS 表判只读
+        assert_eq!(
+            classify_shell_command_for_tool("powershell", "Get-Content x", &[], &[]),
+            ShellSafety::ReadOnly
+        );
+        // 工具名大小写不敏感
+        assert_eq!(
+            classify_shell_command_for_tool("PowerShell", "Get-Date", &[], &[]),
+            ShellSafety::ReadOnly
+        );
+        // 未知工具名回退 bash 表
+        assert_eq!(
+            classify_shell_command_for_tool("shell", "ls", &[], &[]),
+            ShellSafety::ReadOnly
+        );
+        assert!(is_readonly_command_for_tool("powershell", "Get-Date", &[], &[]));
     }
 }

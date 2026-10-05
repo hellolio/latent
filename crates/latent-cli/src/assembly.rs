@@ -756,38 +756,52 @@ fn map_policy(policy: &CoreSandboxPolicy) -> latent_sandbox::SandboxPolicy {
     }
 }
 
+/// 沙箱工厂接缝(测试注入失败/假后端用;生产 = `create_sandbox` 绑定
+/// 装配期探测结果)。入参是映射后的 latent-sandbox 策略(映射在钩子内完成)。
+type SandboxFactory = Arc<
+    dyn Fn(
+            &latent_sandbox::SandboxPolicy,
+            Option<&Path>,
+        ) -> Result<Option<Arc<dyn latent_sandbox::Sandbox>>, String>
+        + Send
+        + Sync,
+>;
+
 /// 沙箱包装钩子(13 文档 §7.6):按当前模式取 SandboxPolicy 包装 shell 命令。
 /// 只做纯包装,不拒绝 —— 拒绝是权限引擎的事;平台无沙箱时原样返回
-/// (Confirm 已升级为逐命令审批,Plan 由只读判定兜底 —— 判定通过即执行,
+/// (Confirm 已升级为逐命令审批,Plan 由三态判定兜底 —— 判定通过即执行,
 /// 降级矩阵 §7.5)。
 struct SandboxSpawnHook {
     engine: Arc<PermissionEngine>,
     cwd: std::path::PathBuf,
     sandbox_cache: Mutex<HashMap<SessionMode, Option<Arc<dyn latent_sandbox::Sandbox>>>>,
+    factory: SandboxFactory,
 }
 
 impl SandboxSpawnHook {
-    fn sandbox_for_current_mode(&self) -> Option<Arc<dyn latent_sandbox::Sandbox>> {
+    /// 当前模式的沙箱实例。`Ok(None)` = 该模式无需包装(无沙箱平台降级 /
+    /// FullAccess);`Err` = 策略要求沙箱但构造失败 —— 调用方**拒绝执行,
+    /// 绝不静默裸跑**,失败结果不缓存(下条命令重试构造)。
+    fn sandbox_for_current_mode(
+        &self,
+    ) -> Result<Option<Arc<dyn latent_sandbox::Sandbox>>, String> {
         let mode = self.engine.mode();
         if !self.engine.sandbox_available() {
-            return None;
+            return Ok(None);
         }
-        let cached = self.sandbox_cache.lock().unwrap().get(&mode).cloned();
-        if let Some(cached) = cached {
-            return cached;
+        if let Some(cached) = self.sandbox_cache.lock().unwrap().get(&mode).cloned() {
+            return Ok(cached);
         }
         let policy = self.engine.policy();
         if matches!(policy, CoreSandboxPolicy::DangerFullAccess) {
             self.sandbox_cache.lock().unwrap().insert(mode, None);
-            return None;
+            return Ok(None);
         }
         let helper_exe = std::env::current_exe().ok();
-        let created = latent_sandbox::create_sandbox(&map_policy(&policy), helper_exe.as_deref())
-            .map_err(|error| format!("沙箱构造失败: {error}"))
-            .ok()
-            .flatten();
+        let created = (self.factory)(&map_policy(&policy), helper_exe.as_deref())
+            .map_err(|error| format!("沙箱构造失败: {error}"))?;
         self.sandbox_cache.lock().unwrap().insert(mode, created.clone());
-        created
+        Ok(created)
     }
 }
 
@@ -795,8 +809,9 @@ impl SandboxSpawnHook {
 impl latent_tools::ShellSpawnHook for SandboxSpawnHook {
     async fn rewrite(&self, command: String) -> Result<String, String> {
         match self.sandbox_for_current_mode() {
-            None => Ok(command),
-            Some(sandbox) => sandbox.wrap_command(&command, &self.cwd),
+            Ok(None) => Ok(command),
+            Ok(Some(sandbox)) => sandbox.wrap_command(&command, &self.cwd),
+            Err(error) => Err(error),
         }
     }
 }
@@ -898,7 +913,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     latent_core::spawn_diagnostics_printer(diagnostics.clone());
 
     // 权限系统(13 文档):平台沙箱探测 → 引擎 → 审批钩子(洋葱最外层)。
-    // 降级矩阵 §7.5:无沙箱平台 Plan 剔除 bash,Confirm 逐命令审批,绝不静默裸跑
+    // 降级矩阵 §7.5:无沙箱平台 Plan 的 shell 由三态判定兜底(只读/联网查询
+    // 放行、写拒绝、未知拒绝),Confirm 逐命令审批,绝不静默裸跑
     let availability = latent_sandbox::detect_availability();
     let sandbox_available = !matches!(availability, latent_sandbox::SandboxAvailability::None);
     let engine = Arc::new(PermissionEngine::new(
@@ -1007,10 +1023,16 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // agent 弱引在会话建好后回填)
     let session_cell: Arc<Mutex<Weak<AgentSession>>> = Arc::new(Mutex::new(Weak::new()));
     let shell_bg_cell: Arc<Mutex<Weak<latent_agent::Agent>>> = Arc::new(Mutex::new(Weak::new()));
+    // 沙箱工厂绑定装配期探测结果(单一事实来源,create_sandbox 不再重复探测;
+    // 构造失败经钩子转拒绝执行,fail-closed)
+    let sandbox_factory: SandboxFactory = Arc::new(move |policy, helper_exe| {
+        latent_sandbox::create_sandbox(availability, policy, helper_exe)
+    });
     let sandbox_hook: Arc<dyn latent_tools::ShellSpawnHook> = Arc::new(SandboxSpawnHook {
         engine: engine.clone(),
         cwd: cwd.clone(),
         sandbox_cache: Mutex::new(HashMap::new()),
+        factory: sandbox_factory,
     });
     let spawn_hook: Arc<dyn latent_tools::ShellSpawnHook> = match external_spawn_hook {
         Some(external) => Arc::new(ChainedSpawnHook {
@@ -2214,5 +2236,109 @@ mod tests {
             } => assert_eq!(text, "conversation body\n\nsummarize it"),
             other => panic!("第二条应为承载对话+指令的 user 消息: {other:?}"),
         }
+    }
+
+    // ---- 沙箱包装钩子:fail-closed 与包装行为(13 文档 §7.6)----
+
+    struct FakeSandbox;
+    impl latent_sandbox::Sandbox for FakeSandbox {
+        fn wrap_command(&self, command: &str, _cwd: &Path) -> Result<String, String> {
+            Ok(format!("WRAPPED[{command}]"))
+        }
+        fn policy(&self) -> &latent_sandbox::SandboxPolicy {
+            static READ_ONLY: latent_sandbox::SandboxPolicy =
+                latent_sandbox::SandboxPolicy::ReadOnly { network_access: true };
+            &READ_ONLY
+        }
+    }
+
+    fn sandbox_hook(mode: SessionMode, factory: SandboxFactory) -> SandboxSpawnHook {
+        SandboxSpawnHook {
+            engine: Arc::new(PermissionEngine::new(
+                mode,
+                SandboxConfig::default(),
+                ApprovalRules::default(),
+                std::env::temp_dir(),
+                true,
+            )),
+            cwd: std::env::temp_dir(),
+            sandbox_cache: Mutex::new(HashMap::new()),
+            factory,
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_hook_wraps_command_with_mode_policy() {
+        let hook = sandbox_hook(
+            SessionMode::Plan,
+            Arc::new(|_policy, _helper| {
+                Ok(Some(Arc::new(FakeSandbox) as Arc<dyn latent_sandbox::Sandbox>))
+            }),
+        );
+        let rewritten = latent_tools::ShellSpawnHook::rewrite(&hook, "ls -la".into())
+            .await
+            .unwrap();
+        assert_eq!(rewritten, "WRAPPED[ls -la]");
+    }
+
+    #[tokio::test]
+    async fn sandbox_hook_construction_failure_refuses_execution() {
+        // create_sandbox Err 不再被吞成裸跑:转拒绝执行(fail-closed),
+        // 与 latent-sandbox"绝不静默裸跑"的文档承诺一致
+        let hook = sandbox_hook(
+            SessionMode::Plan,
+            Arc::new(|_policy, _helper| {
+                Err("No sandbox available on this platform".to_string())
+            }),
+        );
+        let error = latent_tools::ShellSpawnHook::rewrite(&hook, "ls".into())
+            .await
+            .unwrap_err();
+        assert!(error.contains("沙箱构造失败"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn sandbox_hook_skips_wrapping_in_full_access() {
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = called.clone();
+        let hook = sandbox_hook(
+            SessionMode::FullAccess,
+            Arc::new(move |_policy, _helper| {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(Arc::new(FakeSandbox) as Arc<dyn latent_sandbox::Sandbox>))
+            }),
+        );
+        let rewritten = latent_tools::ShellSpawnHook::rewrite(&hook, "ls".into())
+            .await
+            .unwrap();
+        assert_eq!(rewritten, "ls", "FullAccess 不包装");
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "工厂不应被调用"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandbox_hook_real_seatbelt_wraps_with_sandbox_exec() {
+        // 回归:seatbelt 探测修复后,Plan 模式放行命令必须被 sandbox-exec
+        // 包装(此前探测恒失败,所有命令裸跑)
+        if !Path::new("/usr/bin/sandbox-exec").exists() {
+            return;
+        }
+        let hook = sandbox_hook(
+            SessionMode::Plan,
+            Arc::new(|policy, helper| {
+                latent_sandbox::create_sandbox(
+                    latent_sandbox::SandboxAvailability::MacosSeatbelt,
+                    policy,
+                    helper,
+                )
+            }),
+        );
+        let rewritten = latent_tools::ShellSpawnHook::rewrite(&hook, "ls".into())
+            .await
+            .unwrap();
+        assert!(rewritten.contains("sandbox-exec"), "{rewritten}");
     }
 }

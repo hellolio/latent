@@ -8,7 +8,7 @@ use std::sync::{Mutex, RwLock};
 
 use latent_agent::ToolCallCtx;
 
-use crate::permission::shell::{classify_shell_command, is_readonly_command_with_rules, ShellSafety};
+use crate::permission::shell::{classify_shell_command_for_tool, is_readonly_command_for_tool, ShellSafety};
 use crate::permission::shell_detail;
 use crate::permission::types::{
     policy_for_mode, ApprovalKey, ApprovalReason, ApprovalRequest, SandboxConfig, SandboxPolicy,
@@ -157,7 +157,9 @@ impl PermissionEngine {
                         // ReadOnly 沙箱兜底);明确写(写前缀/落盘重定向)
                         // 即使有沙箱也不放行;未知命令在沙箱可用时放行、由
                         // 沙箱裁决 —— 无沙箱平台没有 OS 层兜底,保守拒绝。
-                        match classify_shell_command(
+                        // bash/powershell 按工具名分派方言表。
+                        match classify_shell_command_for_tool(
+                            &ctx.name,
                             command,
                             &self.rules.allow_commands,
                             &self.rules.deny_commands,
@@ -175,7 +177,8 @@ impl PermissionEngine {
                         }
                     }
                     SessionMode::Confirm => {
-                        if is_readonly_command_with_rules(
+                        if is_readonly_command_for_tool(
+                            &ctx.name,
                             command,
                             &self.rules.allow_commands,
                             &self.rules.deny_commands,
