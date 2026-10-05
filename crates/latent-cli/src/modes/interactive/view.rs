@@ -19,6 +19,9 @@ pub const MAX_EDITOR_ROWS: usize = 6;
 /// 行数(状态行 1 + 间隔 2 + 编辑器区含上下内边距 8 + footer 2);
 /// build_frame 据此从屏高推算预览预算。
 pub const LIVE_PREVIEW_RESERVED: usize = 13;
+/// 工具实时输出并入滚动视口的全量行数兜底(上游 partial 已是滚动尾窗
+/// 快照,此处仅防御极端尺寸)。
+const TOOL_OUTPUT_FULL_ROWS: usize = 1000;
 
 /// 转录条目 → 行(含样式;折行由 `TuiApp::commit_lines` 按终端宽度做)。
 pub fn render_item(
@@ -176,6 +179,14 @@ pub fn welcome_lines(version: &str, expanded: bool, theme: &Theme, width: usize)
 /// 编辑器区(带背景色,无边框)+ footer(Codex CLI 布局)。
 pub struct ViewportFrame {
     pub lines: Vec<UiLine>,
+    /// `lines` 头部属于预览尾窗的行数(未折行计数;0 = 无可滚预览或模态
+    /// UI)。全屏非 follow 布局据此把预览从钉底尾部剔除,并入滚动视口。
+    pub preview_window: usize,
+    /// 预览全量折行行数(≥ preview_window;follow 帧滚动数学的依据)。
+    pub preview_full_len: usize,
+    /// 预览全量行(内容顺序;仅非 follow 帧构建供滚动视口渲染,follow
+    /// 帧为空省 O(n) 重建)。
+    pub scroll_extra: Vec<UiLine>,
     /// 光标相对视口左上角的 (列, 行);None = 隐藏
     pub cursor: Option<(u16, u16)>,
     pub height: u16,
@@ -239,48 +250,49 @@ pub fn viewport(
 
     // 1. 预览区:选择列表 > 正文流式 > thinking > 工具命令卡片 + 实时
     //    输出。流式内容全量滚动(超 preview_cap 取尾窗,cap 由 build_frame
-    //    按屏高给出,不受 ctrl+o 影响);命令卡片全显。
+    //    按屏高给出,不受 ctrl+o 影响);命令卡片全显。预览同时是全屏滚动
+    //    视口的"活动内容":非 follow 帧把全量行带给 TuiApp(scroll_extra,
+    //    随滚动并入视口),follow 帧省构建只报行数。
     let mut preview: Vec<UiLine> = Vec::new();
+    let mut scroll_extra: Vec<UiLine> = Vec::new();
+    let mut preview_window = 0usize;
+    let mut preview_full_len = 0usize;
     if let Some(select) = &state.select {
         preview.push(Line::from(Span::styled(
             select.prompt.clone(),
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         )));
         preview.extend(latent_tui::SelectList::render(&select.list, width, theme));
-    } else if preview_cap > 0 && !state.stream_text.is_empty() {
-        // 只对尾部窗口折行:末尾 preview_cap 行的折行结果由尾部有限字符决定,
-        // 长回复时避免每个 delta/spinner 帧对全量文本 O(n) 重算。
-        // 窗口多取约 2 屏余量,首个可见行与全量折行的差异仅出现在
-        // 单个不可断行 token 跨越 2 屏以上的极端场景
-        let tail_chars = preview_cap.saturating_mul(width).saturating_mul(3) + 512;
-        let mut start = state.stream_text.len().saturating_sub(tail_chars);
-        while start > 0 && !state.stream_text.is_char_boundary(start) {
-            start -= 1;
+    } else if !state.stream_text.is_empty() {
+        // 全量折行读自增量缓存(append-only 时仅重折最后一个未完成源行,
+        // 长回复不再逐帧 O(n) 重算)。尾窗 = 全量行尾切 preview_cap,预览
+        // 恒为固定尾部窗口(不随 ctrl+o 展开态变化:展开态只作用于定稿转录)
+        let text_style = Style::new().fg(theme.assistant_text);
+        {
+            let mut cache = state.stream_wrap.borrow_mut();
+            let full = cache.update(&state.stream_text, width);
+            preview_full_len = full.len();
+            if !state.following {
+                scroll_extra.extend(
+                    full.iter().map(|row| Line::from(Span::styled(row.clone(), text_style))),
+                );
+            }
+            let skip = full.len().saturating_sub(preview_cap);
+            for row in full.iter().skip(skip) {
+                preview.push(Line::from(Span::styled(row.clone(), text_style)));
+            }
         }
-        let wrapped = latent_tui::wrap_to_width(&state.stream_text[start..], width);
-        // 预览恒为固定尾部窗口(不随 ctrl+o 展开态变化):展开态只作用于
-        // 定稿转录
-        let skip = wrapped.len().saturating_sub(preview_cap);
-        for row in wrapped.into_iter().skip(skip) {
-            preview.push(Line::from(Span::styled(
-                row,
-                Style::new().fg(theme.assistant_text),
-            )));
-        }
-    } else if preview_cap > 0
-        && state
-            .pending_thinking
-            .as_ref()
-            .is_some_and(|t| !t.trim().is_empty())
+        preview_window = preview.len();
+    } else if state
+        .pending_thinking
+        .as_ref()
+        .is_some_and(|t| !t.trim().is_empty())
     {
         if let Some(text) = state.pending_thinking.as_ref() {
-            // 流式中全量滚动显示:≤ preview_cap 行全显,超出取尾部窗口
-            // (preview_cap 由 build_frame 按屏幕高度给出,不受 ctrl+o 影响);
+            // 流式中全量滚动显示:≤ preview_cap 行全显,超出取尾部窗口;
             // 完成定稿后由 thinking_block 折叠为 4 行 + 余量提示
-            let rows: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-            let start = rows.len().saturating_sub(preview_cap);
-            for row in &rows[start..] {
-                preview.push(Line::from(vec![
+            let think_row = |row: &str| {
+                Line::from(vec![
                     Span::styled(
                         format!("  {} ", loader::THINKING_MARK),
                         Style::new().fg(theme.thinking),
@@ -289,12 +301,33 @@ pub fn viewport(
                         truncate_plain(row, width.saturating_sub(4)),
                         Style::new().fg(theme.thinking),
                     ),
-                ]));
+                ])
+            };
+            let rows: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            preview_full_len = rows.len();
+            if !state.following {
+                scroll_extra.extend(rows.iter().map(|row| think_row(row)));
             }
+            let start = rows.len().saturating_sub(preview_cap);
+            for row in rows[start..].iter() {
+                preview.push(think_row(row));
+            }
+            preview_window = preview.len();
         }
-    } else if preview_cap > 0 {
+    } else {
         // 工具命令卡片 + 实时输出:命令全显,输出尾窗 ≤ preview_cap
-        preview.extend(tool_preview_cards(state, partial, preview_cap, width));
+        let (win, extra, full_len) =
+            tool_preview_parts(state, partial, preview_cap, state.following, width);
+        preview.extend(win);
+        preview_window = preview.len();
+        scroll_extra = extra;
+        preview_full_len = full_len;
+    }
+    // 「添加模型」表单激活时预览保持钉底(模态 UI 不并入滚动视口)
+    if state.model_form.is_some() {
+        preview_window = 0;
+        scroll_extra = Vec::new();
+        preview_full_len = 0;
     }
     lines.extend(preview);
 
@@ -380,6 +413,9 @@ pub fn viewport(
     let height = lines.len() as u16;
     ViewportFrame {
         lines,
+        preview_window,
+        preview_full_len,
+        scroll_extra,
         cursor,
         height,
     }
@@ -456,16 +492,19 @@ fn truncate_plain(text: &str, width: usize) -> String {
     latent_tui::truncate_to_width(text, width.max(1)).0
 }
 
-/// 工具命令实时预览卡片:参数流式增长时取自 partial 快照,执行中取自
-/// pending_tools(按 ToolExecutionStart 记录)。命令本身始终完整折行
-/// 显示,不受预览行数上限约束;执行中工具的实时输出(pending_tool_output)
-/// 全量滚动,超 preview_cap 取尾部窗口(结果到达后由 ToolResult 折叠)。
-fn tool_preview_cards(
+/// 工具命令实时预览部件:`(尾部窗口行, 全量行, 全量行数)`。命令卡片
+/// 始终完整折行显示,不受预览行数上限约束;执行中工具的实时输出
+/// (pending_tool_output)全量滚动,窗口超 preview_cap 取尾部窗口
+/// (结果到达后由 ToolResult 折叠)。全量行仅非 follow 帧构建(随滚动
+/// 并入视口),行数受 TOOL_OUTPUT_FULL_ROWS 兜底 —— 上游 partial 本身
+/// 是滚动尾窗快照,此处仅防御极端尺寸。
+fn tool_preview_parts(
     state: &InteractiveState,
     partial: Option<&latent_ai::AssistantMessage>,
     preview_cap: usize,
+    following: bool,
     width: usize,
-) -> Vec<UiLine> {
+) -> (Vec<UiLine>, Vec<UiLine>, usize) {
     let mut cards: Vec<UiLine> = Vec::new();
     if let Some(partial) = partial {
         for block in &partial.content {
@@ -494,34 +533,44 @@ fn tool_preview_cards(
             ));
         }
     }
-    if preview_cap > 0 {
-        if let Some((_, tail)) = &state.pending_tool_output {
-            // 只对尾部窗口取行:与 stream_text 预览同款的有界重算优化
-            let tail_chars = preview_cap.saturating_mul(width).saturating_mul(3) + 512;
-            let mut start = tail.len().saturating_sub(tail_chars);
-            while start > 0 && !tail.is_char_boundary(start) {
-                start -= 1;
-            }
-            let rows: Vec<&str> = tail[start..]
-                .lines()
-                .filter(|row| !row.trim().is_empty())
-                .collect();
-            let skip = rows.len().saturating_sub(preview_cap);
-            for row in &rows[skip..] {
-                cards.push(Line::from(Span::styled(
-                    format!("  {}", truncate_plain(row, width.saturating_sub(2))),
-                    Style::new().fg(state.theme.dim),
-                )));
-            }
-        }
+    let output_rows: Vec<String> = match &state.pending_tool_output {
+        Some((_, tail)) => tail
+            .lines()
+            .filter(|row| !row.trim().is_empty())
+            .map(|row| format!("  {}", truncate_plain(row, width.saturating_sub(2))))
+            .collect(),
+        None => Vec::new(),
+    };
+    let full_len = cards.len() + output_rows.len().min(TOOL_OUTPUT_FULL_ROWS);
+    let mut extra: Vec<UiLine> = Vec::new();
+    if following {
+        // follow 帧:全量行不构建,行数已随 full_len 上报
+        return (cards, extra, full_len);
     }
-    cards
+    extra.extend(cards.iter().cloned());
+    let skip = output_rows.len().saturating_sub(TOOL_OUTPUT_FULL_ROWS);
+    extra.extend(output_rows[skip..].iter().map(|row| {
+        Line::from(Span::styled(row.clone(), Style::new().fg(state.theme.dim)))
+    }));
+    // 尾窗:卡片 + 输出尾部 ≤ preview_cap(与卡片数无关,维持既有窗口
+    // 语义;cap 为 0 时窗口为空,全量行仍随 extra 上报供滚动视口使用)
+    let mut window: Vec<UiLine> = Vec::new();
+    if preview_cap > 0 {
+        let start = output_rows.len().saturating_sub(preview_cap);
+        window.extend(cards.iter().cloned());
+        window.extend(output_rows[start..].iter().map(|row| {
+            Line::from(Span::styled(row.clone(), Style::new().fg(state.theme.dim)))
+        }));
+    }
+    (window, extra, full_len)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modes::interactive::state::{InteractiveState, ToolStatus, TranscriptItem};
+    use crate::modes::interactive::state::{
+        InteractiveState, ModelForm, SelectKind, SelectRequest, ToolStatus, TranscriptItem,
+    };
     use latent_tui::text::line_text;
 
     fn theme() -> Theme {
@@ -713,6 +762,60 @@ mod tests {
         let frame = viewport(&st, None, 10, 6, 8);
         let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
         assert!(!texts.iter().any(|t| t.contains("out")), "{texts:?}");
+    }
+
+    #[test]
+    fn viewport_stream_scroll_context_window_vs_full() {
+        let mut st = state();
+        st.status = Status::Thinking;
+        st.stream_text = (1..=9)
+            .map(|i| format!("stream{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // follow 帧:尾窗 3 行,全量行不构建(只报行数,滚动数学用)
+        st.following = true;
+        let frame = viewport(&st, None, 3, 6, 8);
+        assert_eq!(frame.preview_window, 3);
+        assert_eq!(frame.preview_full_len, 9);
+        assert!(frame.scroll_extra.is_empty());
+        // 非 follow 帧:全量行随帧携带(上滚后并入滚动视口)
+        st.following = false;
+        let frame = viewport(&st, None, 3, 6, 8);
+        assert_eq!(frame.preview_window, 3);
+        assert_eq!(frame.preview_full_len, 9);
+        assert_eq!(frame.scroll_extra.len(), 9);
+        let extra: Vec<String> = frame.scroll_extra.iter().map(line_text).collect();
+        assert!(extra[0].contains("stream1"), "{extra:?}");
+        assert!(extra[8].contains("stream9"), "{extra:?}");
+        // 尾窗 = 全量行尾 3 行(follow 与非 follow 显示一致)
+        let window: Vec<String> = frame.lines[..frame.preview_window]
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(window[0].contains("stream7"), "{window:?}");
+        assert!(window[2].contains("stream9"), "{window:?}");
+    }
+
+    #[test]
+    fn viewport_modal_ui_keeps_preview_pinned() {
+        // 「添加模型」表单激活:流式预览保持钉底,不并入滚动视口
+        let mut st = state();
+        st.stream_text = "streaming".into();
+        st.model_form = Some(ModelForm::new());
+        let frame = viewport(&st, None, 4, 6, 8);
+        assert_eq!(frame.preview_window, 0);
+        assert_eq!(frame.preview_full_len, 0);
+        assert!(frame.scroll_extra.is_empty());
+        // 选择列表激活(替换预览区):同样无可滚预览
+        let mut st = state();
+        st.select = Some(SelectRequest {
+            prompt: "pick".into(),
+            list: latent_tui::SelectList::new(vec!["a".into(), "b".into()]),
+            kind: SelectKind::Thinking,
+        });
+        let frame = viewport(&st, None, 4, 6, 8);
+        assert_eq!(frame.preview_window, 0);
+        assert!(frame.scroll_extra.is_empty());
     }
 
     #[test]

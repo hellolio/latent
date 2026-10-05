@@ -424,7 +424,17 @@ fn render_tick(
         let pending = std::mem::take(&mut state.pending);
         app.append_committed(&pending);
     }
+    // follow 态在滚动请求消费后可能已翻转,渲染前重新同步(view 据此
+    // 决定是否构建预览全量行)
+    state.following = app.is_following();
     let frame = build_frame(state, app, partial);
+    // 预览滚动上下文随帧注入:全屏非 follow 布局据此把流式预览并入
+    // 滚动视口(滚动数学用全量行数,渲染用全量行)
+    app.set_scroll_tail(
+        frame.preview_window,
+        frame.preview_full_len,
+        &frame.scroll_extra,
+    );
     app.render(&frame.lines, frame.cursor)
 }
 

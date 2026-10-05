@@ -4,10 +4,12 @@
 //!   追加行越过屏幕底部时打印 `\r\n` 让终端自然滚动,顶部行就此进入
 //!   scrollback,此后永不再碰;
 //! - **fullscreen**(pi TuiAltScreen 对应物):alternate screen(`\x1b[?1049h`)
-//!   加屏幕内滚动。历史行在「历史窗口」(屏高 − 尾部高)内按视口偏移显示,
-//!   尾部(预览/编辑器/footer)钉死在屏幕底部;追加内容只在上滚(follow
-//!   关闭)时移动视口,follow 时视口始终贴住最新内容。退出时把定稿文档
-//!   dump 回主屏,转录内容得以进入终端 scrollback。
+//!   加屏幕内滚动。follow(贴底)时内容在「历史窗口」(屏高 − 尾部高)内
+//!   显示,尾部(预览尾窗/状态行/编辑器/footer)钉死在屏幕底部;上滚
+//!   (follow 关闭)后视口锚定在「组合内容」(committed + 流式预览全量行)
+//!   上不再移动,预览全量内容随之并入滚动视口、尾部只剩 chrome 钉底,
+//!   正在流式输出的内容因此随滚动一起移动,触底时恢复 follow。退出时
+//!   把定稿文档 dump 回主屏,转录内容得以进入终端 scrollback。
 //!
 //! 两种模式共享同一套「已定稿行」(`committed`,只追加、ANSI 序列化缓存),
 //! 切换模式零数据迁移。
@@ -113,11 +115,22 @@ pub struct TuiApp<W: Write = Stdout> {
     /// fullscreen:视口是否贴住最新内容(true = 历史窗口底边随 committed
     /// 末端滚动;false = 停在 `scroll_offset` 不动,新内容只在下方堆积)
     follow: bool,
-    /// fullscreen:follow 关闭时屏幕顶行对应的逻辑行号(绝对锚定,新内容
-    /// 到达不移动)
+    /// fullscreen:follow 关闭时屏幕顶行对应的组合内容行号(committed +
+    /// 流式预览全量行;绝对锚定,新内容到达不移动)
     scroll_offset: usize,
     /// fullscreen:上一帧尾部行数(滚动 API 计算历史窗口高用)
     last_tail_len: usize,
+    /// 尾部预览滚动上下文(`set_scroll_tail` 每帧注入):尾部头部预览
+    /// 尾窗行数(未折行)、预览全量折行行数(follow 帧滚动数学依据)、
+    /// 预览全量行(仅非 follow 帧携带,供滚动视口渲染)
+    scroll_window: usize,
+    scroll_full_len: usize,
+    scroll_extra: Vec<UiLine>,
+    /// fullscreen:上一帧的预览尾窗折行行数与预览全量行数
+    /// (render_fullscreen 写,滚动 API 与 frame_point 读;与
+    /// `last_tail_len` 同一帧间模式)
+    last_preview_win: usize,
+    last_extra_len: usize,
     /// fullscreen:上一帧整屏内容(逐屏行差分;None = 空行/未写过)
     prev_screen: Vec<Option<String>>,
     finished: bool,
@@ -164,6 +177,11 @@ impl TuiApp<Stdout> {
             follow: true,
             scroll_offset: 0,
             last_tail_len: 0,
+            scroll_window: 0,
+            scroll_full_len: 0,
+            scroll_extra: Vec::new(),
+            last_preview_win: 0,
+            last_extra_len: 0,
             prev_screen: vec![None; rows as usize],
             finished: false,
             needs_reshape: false,
@@ -255,6 +273,11 @@ impl<W: Write> TuiApp<W> {
             follow: true,
             scroll_offset: 0,
             last_tail_len: 0,
+            scroll_window: 0,
+            scroll_full_len: 0,
+            scroll_extra: Vec::new(),
+            last_preview_win: 0,
+            last_extra_len: 0,
             prev_screen: vec![None; rows as usize],
             finished: false,
             needs_reshape: false,
@@ -315,6 +338,25 @@ impl<W: Write> TuiApp<W> {
     /// 当前是否 fullscreen(alternate screen)模式。
     pub fn is_fullscreen(&self) -> bool {
         self.fullscreen
+    }
+
+    /// fullscreen 视口是否贴住最新内容(follow;false = 已上滚冻结)。
+    pub fn is_following(&self) -> bool {
+        self.follow
+    }
+
+    /// 注入尾部预览滚动上下文(每帧渲染前由调用方同步):
+    /// `window` = 尾部头部预览尾窗行数(未折行;0 = 无可滚预览或模态);
+    /// `full_len` = 预览全量折行行数(follow 帧滚动数学的依据);
+    /// `full` = 预览全量行(非 follow 帧提供,随滚动并入视口;follow 帧
+    /// 可为空,滚动数学退回 `full_len`)。
+    pub fn set_scroll_tail(&mut self, window: usize, full_len: usize, full: &[UiLine]) {
+        self.scroll_window = window;
+        self.scroll_full_len = full_len;
+        self.scroll_extra.clear();
+        if !full.is_empty() {
+            self.scroll_extra.extend_from_slice(full);
+        }
     }
 
     /// regular 模式渲染:`tail` 与 `committed` 拼成全帧做行级差分后输出。
@@ -395,44 +437,83 @@ impl<W: Write> TuiApp<W> {
             .collect();
         let tail_s: Vec<String> = tail_cells.iter().map(|line| serialize_line(line)).collect();
         let rows = self.rows as usize;
+        // 预览滚动上下文折行:尾窗折行行数(钉底 chrome 的分界)与全量行
+        // (非 follow 帧由 set_scroll_tail 注入,随滚动并入视口)
+        let preview_win: usize = tail
+            .iter()
+            .take(self.scroll_window)
+            .flat_map(|line| wrap_line(line, width))
+            .count();
+        let extra_cells: Vec<UiLine> = self
+            .scroll_extra
+            .iter()
+            .flat_map(|line| wrap_line(line, width))
+            .collect();
+        let extra_s: Vec<String> = extra_cells.iter().map(|line| serialize_line(line)).collect();
         self.last_tail_len = tail_s.len();
-        let (hist_h, top) = self.viewport();
+        self.last_preview_win = preview_win;
+        self.last_extra_len = if extra_s.is_empty() {
+            self.scroll_full_len
+        } else {
+            extra_s.len()
+        };
+        let (vh, top) = self.fs_layout();
         let sel = self.selection.filter(|_| self.fullscreen);
 
-        // 组装新帧整屏内容(历史窗口 + 尾部钉底;未覆盖的行 = 空白)。
-        // 有选区的行走重序列化(反色叠加),其余用序列化缓存。选区以
-        // 帧行号锚定内容:屏幕行先换算回帧行号再求列区间,滚动后高亮
-        // 跟随文字而非停留在屏幕原位
+        // 组装新帧整屏内容。follow:历史窗口(committed)+ 尾部钉底(预览
+        // 尾窗 + chrome);非 follow:滚动视口(committed + 预览全量行)+
+        // chrome 钉底(预览尾窗行被剔除,其全量内容已在视口内),正在输出
+        // 的内容因此随滚动移动。未覆盖的行 = 空白。有选区的行走重序列化
+        // (反色叠加),其余用序列化缓存。选区以帧行号锚定内容:屏幕行先
+        // 换算回帧行号再求列区间,滚动后高亮跟随文字而非停留在屏幕原位
         let committed_len = self.committed.len();
+        let following = self.follow;
+        let chrome = preview_win.min(tail_cells.len());
+        let (mid_cells, mid_s, shown_cells, shown_s): (&[UiLine], &[String], &[UiLine], &[String]) =
+            if following {
+                (&[], &[], &tail_cells, &tail_s)
+            } else {
+                (&extra_cells, &extra_s, &tail_cells[chrome..], &tail_s[chrome..])
+            };
         let mut new_screen: Vec<Option<String>> = vec![None; rows];
         for (sr, slot) in new_screen.iter_mut().enumerate() {
-            let frame_row: Option<usize> = if sr < hist_h {
+            let frame_row: Option<usize> = if sr < vh {
                 let li = top + sr as isize;
                 (li >= 0).then_some(li as usize)
             } else {
-                Some(committed_len + (sr - hist_h))
+                Some(committed_len + mid_s.len() + (sr - vh))
             };
             let range = sel.and_then(|(anchor, end)| {
                 frame_row.and_then(|fr| row_range(anchor, end, fr, width as u16))
             });
-            if sr < hist_h {
+            if sr < vh {
                 let li = top + sr as isize;
-                if li >= 0 && (li as usize) < committed_len {
+                if li >= 0 {
                     let i = li as usize;
-                    *slot = Some(match range {
-                        Some(r) => serialize_line_selected(&self.committed_cells[i], Some(r)),
-                        None => self.committed[i].clone(),
-                    });
+                    if i < committed_len {
+                        *slot = Some(match range {
+                            Some(r) => serialize_line_selected(&self.committed_cells[i], Some(r)),
+                            None => self.committed[i].clone(),
+                        });
+                    } else if let Some(k) = i
+                        .checked_sub(committed_len)
+                        .filter(|k| *k < mid_cells.len())
+                    {
+                        *slot = Some(match range {
+                            Some(r) => serialize_line_selected(&mid_cells[k], Some(r)),
+                            None => mid_s[k].clone(),
+                        });
+                    }
                 }
             } else {
-                // 尾部行从 hist_h 起铺(防御性截断:尾部超出屏高时保留
+                // 尾部(chrome)行从 vh 起铺(防御性截断:超出屏高时保留
                 // 末尾可见行)
-                let skip = tail_s.len().saturating_sub(rows - hist_h);
-                let ti = sr - hist_h + skip;
-                if let Some(line) = tail_cells.get(ti) {
+                let skip = shown_s.len().saturating_sub(rows - vh);
+                let ti = sr - vh + skip;
+                if let Some(line) = shown_cells.get(ti) {
                     *slot = Some(match range {
                         Some(r) => serialize_line_selected(line, Some(r)),
-                        None => tail_s[ti].clone(),
+                        None => shown_s[ti].clone(),
                     });
                 }
             }
@@ -444,11 +525,11 @@ impl<W: Write> TuiApp<W> {
         if let Some(toast_text) = toast {
             let label = format!(" {toast_text} ");
             let label_w = crate::width::display_width(&label).min(width);
-            let source = if hist_h > 0 {
+            let source = if vh > 0 {
                 let li = top;
                 if li >= 0 && (li as usize) < self.committed_cells.len() {
                     Some(line_plain(&self.committed_cells[li as usize]))
-                } else if hist_h < rows {
+                } else if vh < rows {
                     self.last_tail_cells.first().map(line_plain)
                 } else {
                     None
@@ -494,11 +575,16 @@ impl<W: Write> TuiApp<W> {
         }
         out.push_str(SYNC_END);
         if let Some((col, rel_row)) = cursor {
-            // 光标永远钉在尾部(输入框)内:尾部恒定钉在屏幕底部,屏幕行 =
-            // 历史窗口高 + 尾部内相对行。不随视口滚动换算 —— 上滚查看
+            // 光标永远钉在尾部(输入框)内:不随视口滚动换算 —— 上滚查看
             // 历史时光标仍停在输入框,绝不会落到屏幕外(应用中唯一可输入
-            // 的位置就是输入框,regular 模式同理)
-            let sr = hist_h + rel_row as usize;
+            // 的位置就是输入框,regular 模式同理)。屏幕行 = 视口高 + 尾部
+            // 内相对行;非 follow 时尾部只剩 chrome,rel_row(相对尾部首行
+            // = 预览尾窗)须扣除尾窗行数
+            let sr = if following {
+                vh + rel_row as usize
+            } else {
+                vh + (rel_row as usize).saturating_sub(self.scroll_window)
+            };
             if sr < rows {
                 out.push_str(&move_to(col, sr as u16));
                 out.push_str(SHOW_CURSOR);
@@ -508,37 +594,70 @@ impl<W: Write> TuiApp<W> {
         self.out.write_all(out.as_bytes())?;
         self.out.flush()?;
         self.prev_screen = new_screen;
-        self.last_tail_cells = tail_cells;
+        // 复制取文本的内容序:follow = 尾部(尾窗 + chrome);非 follow =
+        // 预览全量行 + chrome(fr ≥ committed_len 恒索引 last_tail_cells)
+        self.last_tail_cells = if following {
+            tail_cells
+        } else {
+            mid_cells
+                .iter()
+                .chain(tail_cells[chrome..].iter())
+                .cloned()
+                .collect()
+        };
         Ok(())
     }
 
-    /// 当前视口布局:(历史窗口行数, 屏幕顶行对应的逻辑行号)。顶行可为负
-    /// (follow 且内容不足一屏时内容贴住窗口底边,上方留白);非 follow 时
-    /// 停在冻结偏移(clamp 防内容收缩后越界,写回保证滚动 API 一致)。
-    fn viewport(&mut self) -> (usize, isize) {
+    /// 当前视口布局(基于上一帧缓存):`(视口行数, 屏幕顶行对应的组合
+    /// 内容行号)`。组合内容 = committed + 流式预览全量行。follow 时视口
+    /// 仅含 committed 且贴住底边(顶行可为负:内容不足一屏上方留白);
+    /// 非 follow 时停在冻结偏移(clamp 防内容收缩后越界、短内容贴底,
+    /// 写回保证滚动 API 一致)。
+    fn fs_layout(&mut self) -> (usize, isize) {
         let rows = self.rows as usize;
-        let hist_h = rows.saturating_sub(self.last_tail_len);
-        let max_top = self.committed.len().saturating_sub(hist_h);
-        let top = if self.follow {
-            self.committed.len() as isize - hist_h as isize
+        if self.follow {
+            let vh = rows.saturating_sub(self.last_tail_len);
+            let top = self.committed.len() as isize - vh as isize;
+            (vh, top)
         } else {
-            let t = self.scroll_offset.min(max_top);
-            self.scroll_offset = t;
-            t as isize
-        };
-        (hist_h, top)
+            let vh = rows.saturating_sub(self.scroll_chrome_len());
+            let combined = self.committed.len() + self.last_extra_len;
+            let max_top = combined.saturating_sub(vh);
+            // 上界防内容收缩越界;下界仅在内容不足一屏时为负(贴底留白),
+            // 其余情况视口可顶到组合内容第 0 行
+            let top = (self.scroll_offset as isize)
+                .min(max_top as isize)
+                .max((combined as isize - vh as isize).min(0));
+            self.scroll_offset = top.max(0) as usize;
+            (vh, top)
+        }
     }
 
-    /// 屏幕单元格 → 选区坐标(帧行号 + 列)。历史行换算为 committed 逻辑
-    /// 行号(视口上方留白 clamp 到 0),尾部行换算为 committed.len() +
-    /// 尾部偏移 —— 选区从此锚定内容,滚动后仍指向原文字。
+    /// 尾部 chrome 行数(钉底部分 = 尾部 − 预览尾窗)。
+    fn scroll_chrome_len(&self) -> usize {
+        self.last_tail_len.saturating_sub(self.last_preview_win)
+    }
+
+    /// 滚动上限顶行(组合内容坐标):committed + 预览全量行 − 视口高;
+    /// 视口高 = 屏高 − 尾部 chrome。无可滚预览时退化为 committed 坐标。
+    fn scroll_max_top(&self) -> usize {
+        let vh = (self.rows as usize).saturating_sub(self.scroll_chrome_len());
+        (self.committed.len() + self.last_extra_len).saturating_sub(vh)
+    }
+
+    /// 屏幕单元格 → 选区坐标(帧行号 + 列)。视口行换算为组合内容行号
+    /// (视口上方留白 clamp 到 0),尾部行换算为 committed 之后的偏移:
+    /// follow = 尾窗 + chrome(直接接 committed);非 follow = 预览全量行
+    /// + chrome —— 选区从此锚定内容,滚动后仍指向原文字。
     fn frame_point(&mut self, col: u16, row: u16) -> SelPoint {
-        let (hist_h, top) = self.viewport();
+        let (vh, top) = self.fs_layout();
         let sr = row as usize;
-        let fr = if sr < hist_h {
+        let fr = if sr < vh {
             (top + sr as isize).max(0) as usize
+        } else if self.follow {
+            self.committed.len() + (sr - vh)
         } else {
-            self.committed.len() + (sr - hist_h)
+            self.committed.len() + self.last_extra_len + (sr - vh)
         };
         (fr, col)
     }
@@ -699,15 +818,14 @@ impl<W: Write> TuiApp<W> {
     }
 
     /// 有向滚动 n 行:正数向下、负数向上(键盘翻页与鼠标滚轮共用)。上滚
-    /// 关闭 follow;下滚触底自动恢复 follow。regular 模式无操作(终端
+    /// 关闭 follow(后续新内容不再拉动视口,流式预览全量内容随滚动并入
+    /// 视口);下滚触底自动恢复 follow。regular 模式无操作(终端
     /// scrollback 自管)。
     pub fn scroll_lines(&mut self, n: isize) {
         if !self.fullscreen || n == 0 {
             return;
         }
-        let rows = self.rows as usize;
-        let hist_h = rows.saturating_sub(self.last_tail_len);
-        let max_top = self.committed.len().saturating_sub(hist_h);
+        let max_top = self.scroll_max_top();
         let current = if self.follow {
             max_top
         } else {
@@ -1563,6 +1681,143 @@ mod tests {
         let texts = sim.texts();
         assert_eq!(texts[6].trim_end(), "line24", "{texts:?}");
         assert_eq!(texts[7].trim_end(), "tail", "{texts:?}");
+    }
+
+    /// 流式滚动场景基座:committed old1..old5,预览全量 12 行(new1..new12),
+    /// 尾窗 3 行 + chrome 2 行(status/editor)。rows=10 时 follow 布局为
+    /// old1..old5 + new10..new12 + chrome。helper 内已渲染首帧(输出留在
+    /// sink,测试首次 `sim.feed(&sink.take())` 即可建立屏幕)。
+    fn stream_app() -> (
+        TuiApp<SharedBuf>,
+        SharedBuf,
+        SharedSize,
+        Vec<UiLine>,
+        Vec<UiLine>,
+    ) {
+        let (mut app, sink, size) = app_fullscreen(40, 10);
+        let old: Vec<UiLine> = (1..=5).map(|i| line(&format!("old{i}"))).collect();
+        app.append_committed(&old);
+        let full: Vec<UiLine> = (1..=12).map(|i| line(&format!("new{i}"))).collect();
+        app.set_scroll_tail(3, 12, &full);
+        let tail = vec![
+            line("new10"),
+            line("new11"),
+            line("new12"),
+            line("status"),
+            line("editor"),
+        ];
+        app.render(&tail, None).unwrap();
+        (app, sink, size, tail, full)
+    }
+
+    #[test]
+    fn fullscreen_scroll_up_during_stream_includes_preview() {
+        let (mut app, sink, _size, tail, _full) = stream_app();
+        let mut sim = ScreenSim::new(40, 10);
+        // follow:历史窗 old1..old5 + 尾窗 new10..new12 + chrome 钉底
+        sim.feed(&sink.take());
+        let texts = sim.texts();
+        assert_eq!(texts[0].trim_end(), "old1", "{texts:?}");
+        assert_eq!(texts[5].trim_end(), "new10", "{texts:?}");
+        assert_eq!(texts[8].trim_end(), "status", "{texts:?}");
+        // 上滚 3 行:预览全量并入视口,更早的 new 行可见、历史行让位,
+        // chrome 钉底,尾窗不再重复渲染
+        app.scroll_lines(-3);
+        app.render(&tail, None).unwrap();
+        sim.feed(&sink.take());
+        let texts = sim.texts();
+        // chrome = 尾部 5 − 尾窗 3 = 2 → 视口 8 行;max_top = 5+12−8 = 9 → 顶 6
+        assert_eq!(texts[0].trim_end(), "new2", "{texts:?}");
+        assert_eq!(texts[7].trim_end(), "new9", "{texts:?}");
+        assert_eq!(texts[8].trim_end(), "status", "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("old1")), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("new12")), "{texts:?}");
+    }
+
+    #[test]
+    fn fullscreen_scroll_freezes_on_stream_growth() {
+        let (mut app, sink, _size, tail, _full) = stream_app();
+        let mut sim = ScreenSim::new(40, 10);
+        sim.feed(&sink.take());
+        app.scroll_lines(-3);
+        app.render(&tail, None).unwrap();
+        sim.feed(&sink.take());
+        // 流式内容增长(12 → 15 行):视口绝对锚定不动,新内容只在下方堆积
+        let full15: Vec<UiLine> = (1..=15).map(|i| line(&format!("new{i}"))).collect();
+        app.set_scroll_tail(3, 15, &full15);
+        app.render(&tail, None).unwrap();
+        sim.feed(&sink.take());
+        let texts = sim.texts();
+        assert_eq!(texts[0].trim_end(), "new2", "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("new13")), "{texts:?}");
+        assert_eq!(texts[8].trim_end(), "status", "{texts:?}");
+    }
+
+    #[test]
+    fn fullscreen_stream_scroll_bottom_restores_follow() {
+        let (mut app, sink, _size, _tail, _full) = stream_app();
+        let mut sim = ScreenSim::new(40, 10);
+        sim.feed(&sink.take());
+        app.scroll_lines(-3);
+        // 流式增长后 End:恢复 follow,尾窗显示最新 3 行
+        let full15: Vec<UiLine> = (1..=15).map(|i| line(&format!("new{i}"))).collect();
+        app.set_scroll_tail(3, 15, &full15);
+        let tail15 = vec![
+            line("new13"),
+            line("new14"),
+            line("new15"),
+            line("status"),
+            line("editor"),
+        ];
+        app.scroll_bottom();
+        app.render(&tail15, None).unwrap();
+        sim.feed(&sink.take());
+        let texts = sim.texts();
+        assert_eq!(texts[0].trim_end(), "old1", "{texts:?}");
+        assert_eq!(texts[5].trim_end(), "new13", "{texts:?}");
+        assert_eq!(texts[7].trim_end(), "new15", "{texts:?}");
+        assert_eq!(texts[8].trim_end(), "status", "{texts:?}");
+    }
+
+    #[test]
+    fn fullscreen_stream_scroll_roundtrip_returns_to_follow() {
+        let (mut app, sink, _size, tail, _full) = stream_app();
+        let mut sim = ScreenSim::new(40, 10);
+        sim.feed(&sink.take());
+        app.scroll_lines(-3);
+        app.render(&tail, None).unwrap();
+        sim.feed(&sink.take());
+        // 下滚回到底部:恢复 follow,布局与初始帧一致
+        app.scroll_lines(3);
+        app.render(&tail, None).unwrap();
+        sim.feed(&sink.take());
+        let texts = sim.texts();
+        assert_eq!(texts[0].trim_end(), "old1", "{texts:?}");
+        assert_eq!(texts[5].trim_end(), "new10", "{texts:?}");
+        assert_eq!(texts[8].trim_end(), "status", "{texts:?}");
+    }
+
+    #[test]
+    fn fullscreen_selection_copies_preview_rows_while_scrolled() {
+        let (mut app, sink, _size, tail, _full) = stream_app();
+        app.set_auto_copy_on_select(true);
+        app.scroll_lines(-3);
+        app.render(&tail, None).unwrap();
+        sink.take();
+        let mut sim = ScreenSim::new(40, 10);
+        // 滚动视口第 0 行 = new2(组合内容行 6):拖选前 4 列,松开自动复制
+        app.on_mouse(MouseAction::Down { col: 0, row: 0, extend: false }).unwrap();
+        app.on_mouse(MouseAction::Drag { col: 3, row: 0 }).unwrap();
+        app.on_mouse(MouseAction::Up { col: 3, row: 0 }).unwrap();
+        let up_frame = sink.take();
+        assert!(
+            up_frame.contains("\x1b]52;c;bmV3Mg==\x07"),
+            "松开应复制 new2: {up_frame:?}"
+        );
+        sim.feed(&up_frame);
+        // 高亮跟随文字:重渲染后选中段带 REVERSED
+        app.render(&tail, None).unwrap();
+        sim.feed(&sink.take());
     }
 
     #[test]

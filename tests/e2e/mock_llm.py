@@ -8,6 +8,7 @@
 
     [
         {"text": "你好,这是固定回复", "delay_ms": 0},
+        {"text": "长回复", "chunk_delay_ms": 120},  # delta 间逐块延迟,模拟慢速流式
         {"tool_calls": [{"name": "read", "arguments": {"path": "a.txt"}}]},
         {"error": "模拟的 provider 错误", "status": 500},
     ]
@@ -135,7 +136,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(500, json.dumps({"error": {"type": "invalid_request", "message": f"未知 turn: {turn}"}}))
             return
 
-        self._respond_sse(sse_body(events))
+        chunk_delay_ms = turn.get("chunk_delay_ms", 0)
+        if chunk_delay_ms:
+            self._respond_sse_paced(events, chunk_delay_ms)
+        else:
+            self._respond_sse(sse_body(events))
 
     def _respond(self, status: int, payload: str) -> None:
         data = payload.encode("utf-8")
@@ -151,6 +156,24 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _respond_sse_paced(self, events: list[dict], delay_ms: int) -> None:
+        """逐事件写出 SSE,delta 事件之间 sleep `delay_ms`(模拟慢速流式)。
+
+        Content-Length 仍是完整 body 长度,客户端按流读取;wfile 无缓冲,
+        每个 write 即时到达,latent 的流式 UI 全程保持活跃。
+        """
+        import time
+
+        body = sse_body(events)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        for event in events:
+            self.wfile.write(sse_body([event]))
+            if event["type"] == "content_block_delta":
+                time.sleep(delay_ms / 1000.0)
 
 
 class MockLLM:

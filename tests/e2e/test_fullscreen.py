@@ -37,18 +37,17 @@ def test_fullscreen_scroll_and_pinned_editor():
         visible = app.visible_text()
         assert "scroll-line-40" in visible, f"End 应回到最新:\n{visible[-800:]}"
 
-        # 上滚后新回复到达:视口冻结,不回跳底部
+        # 上滚后新回复到达:视口冻结,不回跳底部。流式预览已并入滚动视口
+        # (不再钉在输入框上方),新回复在视口下方堆积、暂不渲染到屏幕
         app.send_key("pageup")
         app.expect_visible("scroll-line-05")
         app.sendline("第二条")
-        app.expect_text("second-marker")
-        time.sleep(1.0)
+        time.sleep(2.0)
         visible = app.visible_text()
         assert "scroll-line-05" in visible, "上滚位置应保持,不被新内容拉走"
-        # 新回复已产生(累计转录),只是不在当前视口
-        assert "second-marker" in app.transcript()
+        assert "second-marker" not in visible, "新回复不应拉走视口(应在视口下方堆积)"
 
-        # 回到底部:最新回复可见
+        # 回到底部:新回复随 follow 恢复回到视口
         app.send_key("end")
         app.expect_visible("second-marker")
     finally:

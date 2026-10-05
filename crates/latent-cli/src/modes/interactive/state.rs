@@ -209,6 +209,66 @@ pub enum ScrollRequest {
     Lines(isize),
 }
 
+/// 流式文本增量折行缓存(全屏滚动视口的预览全量行数据源)。正文流式
+/// 期间文本 append-only,而 `wrap_to_width` 对各源行独立折行,故追加时
+/// 只需重折最后一个未完成源行;宽度变化或文本收缩(flush/新回合)时
+/// 全量重建。空文本 = 空行集(区别于 `wrap_to_width` 的单行空串)。
+#[derive(Default)]
+pub struct StreamWrapCache {
+    /// 已折完的源字节偏移(其后是待续的最后一个源行;恒位于行边界)
+    done: usize,
+    width: usize,
+    lines: Vec<String>,
+    /// `lines` 末尾属于待续行的行数(待续行可折成多行,追加时整体截断重折)
+    pending_lines: usize,
+}
+
+impl StreamWrapCache {
+    /// 按当前文本与宽度刷新缓存,返回全量折行(每行 ≤ width 显示宽)。
+    pub fn update(&mut self, src: &str, width: usize) -> &[String] {
+        let width = width.max(1);
+        if self.width != width || src.len() < self.done {
+            self.done = 0;
+            self.lines.clear();
+            self.pending_lines = 0;
+            self.width = width;
+        }
+        if src.is_empty() {
+            self.done = 0;
+            self.lines.clear();
+            self.pending_lines = 0;
+            return &self.lines;
+        }
+        if src.len() > self.done {
+            // 追加:从上一轮的待续行起点重折。先截断待续行的旧折行(可能
+            // 多行),逐个折出已完成源行(以 '\n' 结尾),最后重折当前待续
+            // 行(空也算一行,与 wrap_to_width 的全量折行逐行一致)
+            let tail = &src[self.done..];
+            let keep = self.lines.len().saturating_sub(self.pending_lines);
+            self.lines.truncate(keep);
+            let mut consumed = 0usize;
+            for piece in tail.split_inclusive('\n') {
+                match piece.strip_suffix('\n') {
+                    Some(raw) => {
+                        for row in latent_tui::wrap_to_width(raw, width) {
+                            self.lines.push(row);
+                        }
+                        consumed += piece.len();
+                    }
+                    None => break,
+                }
+            }
+            self.done += consumed;
+            self.pending_lines = 0;
+            for row in latent_tui::wrap_to_width(&tail[consumed..], width) {
+                self.lines.push(row);
+                self.pending_lines += 1;
+            }
+        }
+        &self.lines
+    }
+}
+
 pub struct InteractiveState {
     pub theme: Theme,
     /// 当前主题名(kebab-case;ANSI 兜底时为 None,`/theme` 列表定位用)
@@ -231,6 +291,10 @@ pub struct InteractiveState {
     pub spin: usize,
     /// 流式中的 assistant 文本(预览区尾部展示,定稿时整体转 Assistant)
     pub stream_text: String,
+    /// 流式文本的全量折行缓存(`StreamWrapCache`,RefCell 让 `view::viewport`
+    /// 保持 `&state` 签名自刷新;UI 单线程)。文本收缩(flush/新回合)时
+    /// 缓存经 len < done 判据自动重建,无需手动清理
+    pub stream_wrap: std::cell::RefCell<StreamWrapCache>,
     /// 流式中的 thinking 累积(预览尾部;首个文本 delta 时提交进转录)
     pub pending_thinking: Option<String>,
     pub usage: UsageTracker,
@@ -295,6 +359,9 @@ pub struct InteractiveState {
     /// 当前是否全屏渲染模式(事件循环每轮从 TuiApp 同步;滚动按键与
     /// /fullscreen 的判据)
     pub fullscreen: bool,
+    /// 全屏视口是否贴住最新内容(事件循环每轮从 TuiApp 同步;view 据此
+    /// 决定是否构建预览全量行 —— follow 帧钉底布局用不到,省 O(n) 重建)
+    pub following: bool,
     /// 待事件循环转交 TuiApp 的滚动请求(全屏模式)
     pub scroll_request: Option<ScrollRequest>,
     /// 待事件循环执行的渲染模式切换目标(true = 全屏;Some 时由事件循环
@@ -321,6 +388,7 @@ impl InteractiveState {
             active_agent: None,
             subagent_active: 0,
             stream_text: String::new(),
+            stream_wrap: std::cell::RefCell::new(StreamWrapCache::default()),
             pending_thinking: None,
             usage: UsageTracker::default(),
             stream_started: None,
@@ -351,6 +419,7 @@ impl InteractiveState {
             ctrl_x_copy: true,
             suspend_action: None,
             fullscreen: false,
+            following: false,
             scroll_request: None,
             tui_mode_switch: None,
             cwd: std::env::current_dir().unwrap_or_default(),
@@ -482,5 +551,51 @@ impl InteractiveState {
             self.mention_loaded = true;
         }
         self.mention_popup.sync(token.as_deref());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_wrap_cache_incremental_matches_one_shot() {
+        let mut cache = StreamWrapCache::default();
+        let full = "first line here\nsecond\n\n fourth with  several words to wrap ok\n";
+        // 逐块追加,与一次性全量折行逐行一致
+        let mut src = String::new();
+        for chunk in full.as_bytes().chunks(3) {
+            src.push_str(std::str::from_utf8(chunk).unwrap());
+            let lines = cache.update(&src, 12).to_vec();
+            assert_eq!(lines, latent_tui::wrap_to_width(&src, 12), "src={src:?}");
+        }
+    }
+
+    #[test]
+    fn stream_wrap_cache_empty_is_empty() {
+        let mut cache = StreamWrapCache::default();
+        assert!(cache.update("", 40).is_empty());
+        // 空文本 ≠ 单行空串(区别于 wrap_to_width)
+        cache.update("x", 40);
+        assert_eq!(cache.update("", 40).len(), 0);
+    }
+
+    #[test]
+    fn stream_wrap_cache_rebuilds_on_width_change_and_shrink() {
+        let mut cache = StreamWrapCache::default();
+        let src = "some reasonably long line to be wrapped at narrow width";
+        cache.update(src, 80);
+        let wide: Vec<String> = cache.update(src, 80).to_vec();
+        let narrow = cache.update(src, 20).to_vec();
+        assert_eq!(narrow, latent_tui::wrap_to_width(src, 20));
+        assert_ne!(narrow, wide);
+        // 收缩(flush take)→ 空
+        cache.update("tail text", 20);
+        assert_eq!(cache.update("", 20).len(), 0);
+        // 重新追加正常工作
+        assert_eq!(
+            cache.update("tail text", 20),
+            latent_tui::wrap_to_width("tail text", 20)
+        );
     }
 }
