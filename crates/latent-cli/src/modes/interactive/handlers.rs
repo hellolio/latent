@@ -117,6 +117,9 @@ pub async fn handle_key(
 
     // 斜杠补全弹窗跟随编辑器内容(直接 set_text 的路径也同步)
     state.sync_slash_popup();
+    // `@` 文件弹窗同理(两者互斥:斜杠要求缓冲以 / 开头,提及要求
+    // 光标 token 以 @ 开头;state 层还做了让位规则)
+    state.sync_mention_popup();
 
     // 弹窗可见时的 Codex 交互:↑/↓ 选择、Tab 补全、Enter 补全并直接执行、
     // Esc 关闭;查询已与命令名完全一致时 Enter 不拦截,落入提交分支直接执行
@@ -167,6 +170,35 @@ pub async fn handle_key(
         }
     }
 
+    // `@` 文件弹窗(非模态):↑/↓ 选择、Tab/Enter 补全选中项、Esc 关闭;
+    // 其余键进编辑器(继续打字即继续过滤)。补全经 token 级替换落进编辑器:
+    // 文件带尾随空格 → token 终结、弹窗退场(再按一次 Enter 提交);
+    // 目录带 `/` 尾缀 → 弹窗保持,继续下钻。
+    if state.mention_popup.visible() {
+        match key {
+            latent_tui::Key::Up => {
+                state.mention_popup.move_up();
+                return false;
+            }
+            latent_tui::Key::Down => {
+                state.mention_popup.move_down();
+                return false;
+            }
+            latent_tui::Key::Tab | latent_tui::Key::Enter => {
+                if let Some((text, _)) = state.mention_popup.complete_text() {
+                    state.editor.replace_token_before_cursor(&text);
+                    state.sync_mention_popup();
+                }
+                return false;
+            }
+            latent_tui::Key::Esc => {
+                state.mention_popup.dismiss();
+                return false;
+            }
+            _ => {}
+        }
+    }
+
     // Shift+Tab 循环 Plan → Confirm → FullAccess → Plan(13 文档 §10.2)
     if key == latent_tui::Key::BackTab {
         state.last_ctrl_c = None;
@@ -182,6 +214,7 @@ pub async fn handle_key(
                 return false;
             };
             state.sync_slash_popup();
+            state.sync_mention_popup();
             // 提交可能请求退出(/quit):必须向上传递,否则 /quit 静默失效
             return submit_input(ctx, state, text).await;
         }
@@ -253,6 +286,7 @@ pub async fn handle_key(
             state.last_ctrl_c = None;
             state.editor_key(&key);
             state.sync_slash_popup();
+            state.sync_mention_popup();
             false
         }
     }

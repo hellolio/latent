@@ -99,6 +99,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/truncate.rs` | 统一双限截断（默认 2000 行 / 50KiB，先到为准，永不返回半行）：`truncate_head`（read 保留头）/ `truncate_tail`（bash 保留尾）；工具自身输出预算 = agent 上限 − 2000 余量 |
 | `src/output_accumulator.rs` | bash 流式聚合：增量 UTF-8 解码、超限完整输出落临时文件（`fullOutputPath`） |
 | `src/search_ignore.rs` | 检索忽略列表（grep/find/ls 共享）：组件段/锚定 glob 双语义匹配、命中目录剪枝不进入遍历；settings `searchIgnore` 配置（未配置 = 内置默认表，空数组 = 关闭） |
+| `src/file_listing.rs` | 文件清单采集（TUI `@` 文件弹窗数据源）：ignore crate 遍历（对齐 pi `--hidden --exclude .git`）+ searchIgnore 剪枝；按深度→目录优先→字母排序后截断（默认 2000 条） |
 | `src/sanitize.rs` | ANSI/控制字符净化——**只用于 `!` 裸命令路径**，模型工具结果不做净化 |
 
 ### crates/latent-core — L3 业务核
@@ -152,10 +153,11 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | 文件 | 说明 |
 |---|---|
 | `src/app.rs` | `TuiApp`：全帧差分渲染，双渲染模式——**regular**（pi TuiMainScreen 对应：定稿行缓存 ANSI 序列化只追加，与活动尾部拼成全帧逐行差分、只重绘变化区间，追加行越过屏幕底自然滚入原生 scrollback，变化落在已滚出区域或尺寸变化时全量重绘兜底，DECAWM 关闭防回绕）与 **fullscreen**（pi TuiAltScreen 对应：alternate screen + 屏幕内滚动，历史窗口按视口偏移显示且内容贴底，尾部钉死屏幕底部，整屏逐行差分、绝对定位重写绝不用 `\r\n` 滚动，翻页重叠 4 行、上滚视口冻结、End 恢复 follow，鼠标捕获（滚轮滚动 + 全屏模式恒可用的应用层选区：拖选反色高亮、Shift+点击扩展选区、有选区时 Ctrl+X 复制并清除高亮（/setting 可关，复制成功经 OSC 52 入系统剪贴板并显示右上角 Copied! toast 1.5s）、Alt+点击扩展选区（Shift 多被终端截留）；选区以帧行号锚定内容，滚动后高亮/复制跟随文字，光标永远钉在输入框不随滚动出屏），finish 时转录 dump 回主屏 scrollback）；`set_fullscreen` 运行时切换（共享 committed 缓存零迁移）；滚动 API `scroll_page_up/page_down/top/bottom/lines`；`on_mouse`/`copy_selection` 选区接口；`suspend/resume` 给 `$EDITOR` 让屏（全屏先退/重回 alt screen）；`Drop` 兜底恢复 |
-| `src/editor.rs` | 多行编辑器（缓冲按 `Vec<Vec<char>>` 避免多字节索引问题）：undo、kill-ring、词导航、↑/↓ 历史 |
+| `src/editor.rs` | 多行编辑器（缓冲按 `Vec<Vec<char>>` 避免多字节索引问题）：undo、kill-ring、词导航、↑/↓ 历史；`token_before_cursor`/`replace_token_before_cursor` 供 `@` 弹窗做光标 token 检测与替换 |
 | `src/view.rs`（modes/interactive 内） | 尾部帧组装纯函数：实时预览（≤4 行，工具命令卡片全显不设限）→ 状态行（仅 busy，紧贴输出）→ 两行间隔 → 补全弹窗 → 编辑器 → footer；全帧差分下尾部高度逐帧自由变化 |
 | `src/markdown.rs` | Markdown 渲染（标题/列表/围栏代码块 syntect 高亮/GFM 表格/行内样式） |
 | `src/command_popup.rs` | 斜杠命令补全弹窗（前缀>子串>模糊打分；`/mode` 展开变体子项） |
+| `src/file_popup.rs` | `@` 文件选择弹窗（pi @ autocomplete 对应）：光标 token 触发、目录 `/` 下钻直接子项、文件名前缀>子串>路径子串>模糊打分；文件补全带尾随空格退场、目录保持下钻；`base`（工作目录）注入后**选中补全绝对全路径**（手输原样，过滤前自动剥离 base 前缀）；候选集由上层注入（不感知文件系统） |
 | `src/tool_card.rs` | 工具调用卡片：命令本身完整折行（不随 ctrl+o 变化），输出折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，上下各一行同色内边距；成功绿/失败红为压暗低饱和色调，运行中中性） |
 | `src/footer.rs` | 两行状态栏：上=左 cwd+git 分支 + 右 token 段（↑prompt 含缓存明细 U/R 与命中率 / ↓out / ctx% 变色 / $cost）；下=左 agent:main(或当前子 agent)│模式标记（plan 黄、full-access 红）+ 右 model·thinking |
 | `src/theme/` | 语义主题：ratatui-themes 映射 + 逐主题微调（Tokyo Night/Catppuccin/Dracula…），16 色降级 ANSI |
@@ -169,7 +171,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子 + LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.latent/settings.json` 优先） |
 | `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
 | `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent（无参打开 agent+off 选择器）/session（list/info）/fullscreen（[on\|off] 切换全屏渲染模式）/quit；带变体命令裸调用只提示用法，部分输入回车展开变体选择页、方向键选定后回车执行；未识别 `/xxx` 本地警告不发给模型 |
-| `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记）、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局 ~/.latent/settings.json）、/model 选择器+添加模型表单）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，latent 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
+| `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记、`sync_mention_popup` @ 文件弹窗同步（cwd 采集候选 + 检索忽略剪枝 + 注入补全根（选中补全全路径）+ `/`/`!` 让位））、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、`@` 文件弹窗 ↑/↓/Tab/Enter/Esc 补全经编辑器 token 替换落文本、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局 ~/.latent/settings.json）、/model 选择器+添加模型表单）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，latent 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
 | `src/mcp_mock.rs` | mock MCP 扩展服务端（`latent --mcp-mock-server`）：订阅 tool_call 拦截危险 bash + 注册 echo 工具 + elicitation 确认，供扩展全链路验收 |
 | `tests/modes.rs` | 四模式集成测试（ScriptedProvider 不联网）：json 剥 partial、rpc 反向通道、LATENT_* 注入、Plan 只读 bash、JSONL 重建 == 内存 context、ModeChange 持久化等 |
 | `tests/e2e_mcp_extension.rs` | 真实子进程 MCP 扩展端到端验收 |
@@ -190,7 +192,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `harness.py` | 驱动核心 `LatentApp`：隔离临时 HOME + pexpect 真 PTY 启动 latent + pyte 解析屏幕；API：`wait_ready`/`sendline`/`send_key`/`expect_text`（正则、忽略空白）/`expect_absent`/`visible_text`/`transcript`/`wait_for_requests`/`quit`；`finally` 必须 `close()` |
 | `mock_llm.py` | 本地 mock LLM：伪装 anthropic-messages SSE 端点，按场景 JSON 逐 turn 返回（`{"text":…}` / `{"tool_calls":[…]}` / `{"error":…, "status":500}` 三种 turn），记录请求体供反向断言 |
 | `conftest.py` / `pytest.ini` / `requirements.txt` | sys.path 注入 / DeprecationWarning 过滤 / pexpect+pyte+pytest（装全局环境，不建 venv） |
-| `test_*.py`（26 个场景） | startup 横幅、ask_and_reply 问答、tool_roundtrip 工具闭环、abort/abort_then_continue、ctrl_c 双击退出、steering 注入、continue 恢复、provider_error 重试、session_half_line 崩溃恢复、bash_tool 截断、bash_sanitize 净化对齐、parallel_tools 源序、tool_validation 非法参数、ctrl_o 折叠、write_edit 落盘、compact 空对话回归、new_session、plan_mode 审批流、theme、output_display CJK 回归、slash_commands、shift_enter 多行输入、session_resume（-r/-l//session 切换）、fullscreen（钉底/翻页/视口冻结/模式切换）、quit |
+| `test_*.py`（27 个场景） | startup 横幅、ask_and_reply 问答、tool_roundtrip 工具闭环、abort/abort_then_continue、ctrl_c 双击退出、steering 注入、continue 恢复、provider_error 重试、session_half_line 崩溃恢复、bash_tool 截断、bash_sanitize 净化对齐、parallel_tools 源序、tool_validation 非法参数、ctrl_o 折叠、write_edit 落盘、compact 空对话回归、new_session、plan_mode 审批流、theme、output_display CJK 回归、slash_commands、shift_enter 多行输入、session_resume（-r/-l//session 切换）、fullscreen（钉底/翻页/视口冻结/模式切换）、file_mention（@ 文件弹窗与纯文本提交）、quit |
 | `scenarios/*.json` | 21 个 mock 响应脚本（格式见 `scenarios/README.md`） |
 
 ## 配置文件体系

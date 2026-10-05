@@ -101,6 +101,7 @@ latent --continue
 | 按键 / 命令 | 说明 |
 |---|---|
 | `Enter` | 发送；`Shift+Enter` / `Ctrl+J` 换行 |
+| `@文件名` | 文件引用：输入 `@` 弹出文件/目录候选，选中补全为文件**全路径**（手输的路径则原样发出）；`@路径` 随消息发给模型，内容由模型按需读取 |
 | `Ctrl+C` | 中断当前任务；空闲时 500ms 内双击退出 |
 | `Ctrl+D` | 退出 |
 | `Shift+Tab` | 循环切换权限模式（plan → confirm → full-access） |
@@ -198,7 +199,7 @@ API key 从环境变量读取，`--model` 缺省时使用各 provider 默认模�
 ## 开发
 
 ```bash
-cargo clean && cargo build --release -p latent-cli && cp target/release/latent ~/.local/bin/
+cargo clean && cargo build --release -p latent && cp target/release/latent ~/.local/bin/
 cargo build --release -p latent-cli         # 构建
 cargo test --workspace                   # 运行全部测试
 cargo clippy --workspace --all-targets   # lint（要求零警告）
@@ -215,7 +216,8 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [ ] 无效模型清理
  - [ ] 实现一个扩展用于测试扩展功能（文件搜索加强？）
  - [ ] 实现可配置追加系统提示词（当前仅可替换）
- - [ ] @符号添加文件到上下文
+ - [x] @符号添加文件到上下文
+ - [ ] 当前全屏模式下，如果模型正在输出，我滚动屏幕，正在输出的部分不会跟着滚动，但是我需要输入框以上的部分全部跟随滚动
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 

@@ -185,6 +185,10 @@ pub async fn run_interactive_mode(
         home.as_deref().and_then(|p| p.to_str()),
     );
     state.git_branch = detect_git_branch(&cwd);
+    // `@` 文件弹窗的候选采集:cwd 与检索忽略列表与工具装配同源(settings
+    // `searchIgnore`;本模块按惯例自行加载,与 theme/tuiMode 一致)
+    state.cwd = cwd;
+    state.mention_ignore = Arc::new(crate::assembly::load_search_ignore());
     refresh_footer_fields(&ctx, &mut state);
 
     // 启动区 + 回放(pi 语义:恢复/续聊时回放当前转录)

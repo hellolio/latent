@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use latent_tui::{CommandPopup, Editor, Key, SelectList, Theme, UiLine};
+use latent_tui::{CommandPopup, Editor, FilePopup, Key, SelectList, Theme, UiLine};
 
 use super::usage::UsageTracker;
 
@@ -219,6 +219,13 @@ pub struct InteractiveState {
     /// 斜杠命令补全弹窗(Codex 风格):输入 `/xxx` 时跟随编辑器内容过滤,
     /// 可见性与选中态由 `sync_slash_popup` 从编辑器文本推导。
     pub slash_popup: CommandPopup,
+    /// `@` 文件选择弹窗(对齐 pi 的 @ autocomplete):光标前 token 以 `@`
+    /// 开头时跟随过滤,可见性由 `sync_mention_popup` 推导;候选集在首次
+    /// 激活时从 `cwd` 采集(mention_loaded 标记),失活即清缓存。
+    pub mention_popup: FilePopup,
+    mention_loaded: bool,
+    /// @ 弹窗候选采集的检索忽略列表(装配层注入,与 grep/find/ls 同源)。
+    pub mention_ignore: std::sync::Arc<latent_tools::SearchIgnore>,
     pub status: Status,
     /// spinner 拍数(busy 时每 120ms 自增)
     pub spin: usize,
@@ -306,6 +313,9 @@ impl InteractiveState {
             width,
             editor: Editor::new(),
             slash_popup: CommandPopup::new(crate::modes::slash::popup_entries()),
+            mention_popup: FilePopup::default(),
+            mention_loaded: false,
+            mention_ignore: std::sync::Arc::new(latent_tools::SearchIgnore::builtin()),
             status: Status::Idle,
             spin: 0,
             active_agent: None,
@@ -437,5 +447,40 @@ impl InteractiveState {
     pub fn sync_slash_popup(&mut self) {
         let text = self.editor.text();
         self.slash_popup.sync(&text);
+    }
+
+    /// 编辑器内容变化后同步 `@` 文件弹窗:光标前 token 以 `@` 开头时激活
+    /// (缓冲以 `/`、`!` 开头时让位——斜杠命令与 bang 透传无提及语义);
+    /// 首次激活从 cwd 采集候选并缓存、注入补全根(选中补全绝对全路径,
+    /// 手输文本原样),失活即清缓存,下次激活重新采集(感知会话期间的
+    /// 文件增删)。
+    pub fn sync_mention_popup(&mut self) {
+        let text = self.editor.text();
+        let token = self.editor.token_before_cursor().map(|(_, token)| token);
+        let active = token.as_deref().is_some_and(|t| t.starts_with('@'))
+            && !text.starts_with('/')
+            && !text.starts_with('!');
+        if !active {
+            self.mention_popup.sync(None);
+            if self.mention_loaded {
+                self.mention_popup.clear_entries();
+                self.mention_loaded = false;
+            }
+            return;
+        }
+        if !self.mention_loaded {
+            // 补全根 = cwd:弹窗选中插入绝对全路径(与手输相区分),
+            // 过滤时组件自动剥离该前缀
+            self.mention_popup.set_base(self.cwd.display().to_string());
+            let entries = latent_tools::collect_entries(&self.cwd, &self.mention_ignore);
+            self.mention_popup.set_entries(
+                entries
+                    .into_iter()
+                    .map(|entry| latent_tui::FileEntry::new(entry.path, entry.is_dir))
+                    .collect(),
+            );
+            self.mention_loaded = true;
+        }
+        self.mention_popup.sync(token.as_deref());
     }
 }

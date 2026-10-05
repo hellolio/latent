@@ -1334,6 +1334,141 @@ async fn arrows_navigate_popup_while_visible() {
     );
 }
 
+// ---- `@` 文件弹窗(pi @ autocomplete) ----
+
+/// @ 弹窗测试夹具:临时工作区(README.md / src/main.rs / node_modules/x.js)。
+fn mention_fixture_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("latent_mention_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+    std::fs::write(dir.join("README.md"), "hello").unwrap();
+    std::fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(dir.join("node_modules/x.js"), "noise").unwrap();
+    dir
+}
+
+/// 共享前奏:内存会话 + 已注入 cwd 的状态(cwd 须在按键前注入,
+/// 首次激活时按需采集候选)。
+async fn mention_state_at(dir: &std::path::Path) -> (crate::assembly::BuiltSession, InteractiveState) {
+    let built = built_memory_session().await;
+    let mut state = test_state();
+    state.cwd = dir.to_path_buf();
+    (built, state)
+}
+
+#[tokio::test]
+async fn typing_at_opens_file_popup_filtered_by_search_ignore() {
+    let dir = mention_fixture_dir("open");
+    let (built, mut state) = mention_state_at(&dir).await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    for c in "@rea".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    assert!(state.mention_popup.visible(), "输入 @rea 应弹出文件弹窗");
+    assert_eq!(
+        state.mention_popup.selected_entry().map(|e| e.path.as_str()),
+        Some("README.md")
+    );
+
+    // 裸 @ 列出全部候选:node_modules 被检索忽略表剪枝,src 目录在列
+    let (built, mut state) = mention_state_at(&dir).await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    handle_key(&ctx, &mut state, Key::Char('@')).await;
+    assert!(state.mention_popup.visible());
+    let paths: Vec<String> = (0..state.mention_popup.match_count())
+        .map(|i| state.mention_popup.matches()[i].path.clone())
+        .collect();
+    assert!(!paths.iter().any(|p| p.contains("node_modules")), "{paths:?}");
+    assert!(paths.contains(&"src".to_string()), "{paths:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn enter_completes_file_with_trailing_space_and_popup_exits() {
+    let dir = mention_fixture_dir("file");
+    let (built, mut state) = mention_state_at(&dir).await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    for c in "@rea".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    // 选中补全 = 绝对全路径 + 尾随空格(手输文本才原样发出)
+    assert_eq!(state.editor.text(), format!("@{}/README.md ", dir.display()));
+    assert!(
+        !state.mention_popup.visible(),
+        "文件补全后 token 以空格终结,弹窗退场"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn enter_on_directory_keeps_popup_for_descent() {
+    let dir = mention_fixture_dir("dir");
+    let (built, mut state) = mention_state_at(&dir).await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    for c in "@sr".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    // 目录补全 = 绝对全路径 + / 尾缀、无空格(下钻 token 也是绝对形式)
+    assert_eq!(state.editor.text(), format!("@{}/src/", dir.display()));
+    assert!(state.mention_popup.visible(), "目录补全后弹窗保持下钻");
+    assert_eq!(
+        state.mention_popup.selected_entry().map(|e| e.path.as_str()),
+        Some("src/main.rs")
+    );
+    // 绝对 token 剥离 base 后继续下钻到文件,补全仍是全路径
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    assert_eq!(
+        state.editor.text(),
+        format!("@{}/src/main.rs ", dir.display())
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn bang_prefix_suppresses_mention_popup() {
+    let dir = mention_fixture_dir("bang");
+    let (built, mut state) = mention_state_at(&dir).await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    for c in "!echo @".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    assert!(
+        !state.mention_popup.visible(),
+        "! 透传无提及语义,弹窗让位"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn esc_dismisses_mention_popup_until_query_changes() {
+    let dir = mention_fixture_dir("esc");
+    let (built, mut state) = mention_state_at(&dir).await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    for c in "@rea".chars() {
+        handle_key(&ctx, &mut state, Key::Char(c)).await;
+    }
+    handle_key(&ctx, &mut state, Key::Esc).await;
+    assert!(!state.mention_popup.visible());
+    handle_key(&ctx, &mut state, Key::Char('d')).await;
+    assert!(state.mention_popup.visible(), "查询变化后重新打开(@read 仍前缀命中)");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // 审批 overlay(13 文档 §10.3)
 // ---------------------------------------------------------------------------

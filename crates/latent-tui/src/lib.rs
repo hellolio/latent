@@ -7,6 +7,7 @@
 //! 1. **工厂**:`TuiApp::open()` 出厂全帧差分终端屏幕;
 //! 2. **语义主题**:`Theme`(角色 → 颜色,真彩色/ANSI16 双调色板);
 //! 3. **组件**:多行 `Editor`、`Markdown`(syntect 高亮)、`SelectList`、
+//!    `CommandPopup`(斜杠补全)、`FilePopup`(`@` 文件选择)、
 //!    `tool_card`/`header`/`footer`、`loader`;
 //! 4. **类型**:`Key`(crossterm 事件归一)、`text`(span 感知折行工具)。
 //!
@@ -21,6 +22,7 @@
 pub mod app;
 pub mod command_popup;
 pub mod editor;
+pub mod file_popup;
 pub mod footer;
 pub mod header;
 pub mod highlight;
@@ -37,6 +39,7 @@ pub mod width;
 pub use app::{SharedBuf, SharedSize, TuiApp};
 pub use command_popup::{CommandEntry, CommandPopup};
 pub use editor::{Editor, EditorView};
+pub use file_popup::{FileEntry, FilePopup};
 pub use footer::{ctx_segment, FooterData};
 pub use header as header_view;
 pub use highlight::Highlighter;

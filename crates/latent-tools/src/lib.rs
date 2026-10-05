@@ -8,6 +8,7 @@
 
 mod bash;
 mod edit;
+mod file_listing;
 mod find;
 mod grep;
 mod ls;
@@ -27,6 +28,7 @@ pub use bash::{
     ShellSpawnOptions, ShellTimeoutPolicy,
 };
 pub use read::create_read_tool_with_limits;
+pub use file_listing::{collect_entries, collect_entries_capped, ListingEntry, DEFAULT_MAX_ENTRIES};
 pub use find::{create_find_tool, create_find_tool_with_limits};
 pub use grep::{create_grep_tool, create_grep_tool_with_limits};
 pub use ls::{create_ls_tool, create_ls_tool_with_limits};

@@ -80,6 +80,37 @@ impl Editor {
         self.cursor
     }
 
+    /// 光标前的非空白 token(当前行内):`(token 起始字符列, token 文本)`。
+    /// 光标停在空白处或行首(没有紧邻光标的 token)时返回 None——语义是
+    /// "token 必须以光标为终点",供 `@` 文件弹窗做触发检测与替换锚点。
+    pub fn token_before_cursor(&self) -> Option<(usize, String)> {
+        let (line, col) = self.cursor;
+        let chars = &self.lines[line];
+        if col == 0 || chars[col - 1].is_whitespace() {
+            return None;
+        }
+        let mut start = col;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        Some((start, chars[start..col].iter().collect()))
+    }
+
+    /// 把光标前的非空白 token 替换为 `replacement`(单步 undo;光标落在
+    /// replacement 尾部)。光标前没有 token 时等价于在光标处插入。
+    /// `replacement` 不应含换行(补全文本语义)。
+    pub fn replace_token_before_cursor(&mut self, replacement: &str) {
+        let (line, col) = self.cursor;
+        let start = self
+            .token_before_cursor()
+            .map(|(start, _)| start)
+            .unwrap_or(col);
+        self.push_undo();
+        self.lines[line].drain(start..col);
+        self.cursor = (line, start);
+        self.insert_text(replacement);
+    }
+
     pub fn clear(&mut self) {
         self.push_undo();
         self.lines = vec![Vec::new()];
@@ -674,5 +705,64 @@ mod tests {
         assert!(!editor.handle_key(&Key::Enter));
         assert!(!editor.handle_key(&Key::Esc));
         assert!(!editor.handle_key(&Key::Ctrl('c')));
+    }
+
+    // ---- @ 文件弹窗的 token 检测与替换 ----
+
+    #[test]
+    fn token_before_cursor_detects_at_token() {
+        let mut editor = Editor::new();
+        assert!(editor.token_before_cursor().is_none(), "空缓冲无 token");
+        editor.set_text("hello @d");
+        assert_eq!(editor.token_before_cursor(), Some((6, "@d".to_string())));
+        // token 必须以光标为终点:光标停在空白处 = None
+        editor.set_text("hello @ ");
+        assert_eq!(editor.token_before_cursor(), None);
+        // 光标紧邻 @:空查询 token
+        editor.set_text("hello @");
+        assert_eq!(editor.token_before_cursor(), Some((6, "@".to_string())));
+        // 非空白分隔的 @ 不算提及 token
+        editor.set_text("user@host");
+        assert_eq!(editor.token_before_cursor(), Some((0, "user@host".to_string())));
+    }
+
+    #[test]
+    fn token_before_cursor_multibyte_and_multiline() {
+        let mut editor = Editor::new();
+        editor.set_text("中文 @主");
+        assert_eq!(editor.token_before_cursor(), Some((3, "@主".to_string())));
+        // token 不跨行:下一行行首无 token
+        editor.set_text("abc\n@x");
+        assert_eq!(editor.token_before_cursor(), Some((0, "@x".to_string())));
+        editor.handle_key(&Key::Left);
+        editor.handle_key(&Key::Left);
+        assert_eq!(editor.token_before_cursor(), None, "上一行行尾不是本行 token");
+    }
+
+    #[test]
+    fn replace_token_before_cursor_swaps_and_keeps_rest() {
+        let mut editor = Editor::new();
+        editor.set_text("hi @re 总结");
+        for _ in 0..3 {
+            editor.handle_key(&Key::Left);
+        }
+        // 光标在 @re 与 " 总结" 之间:只替换 token,后文保留
+        editor.replace_token_before_cursor("@readme.md ");
+        assert_eq!(editor.text(), "hi @readme.md  总结");
+        let (line, col) = editor.cursor_pos();
+        assert_eq!((line, col), (0, 14), "光标落 replacement 尾部");
+        // 单步 undo 回到替换前
+        editor.undo();
+        assert_eq!(editor.text(), "hi @re 总结");
+    }
+
+    #[test]
+    fn replace_without_token_inserts_at_cursor() {
+        let mut editor = Editor::new();
+        editor.set_text("a b");
+        editor.handle_key(&Key::Left);
+        // 光标紧跟空白:无 token,等价于光标处插入
+        editor.replace_token_before_cursor("X");
+        assert_eq!(editor.text(), "a Xb");
     }
 }

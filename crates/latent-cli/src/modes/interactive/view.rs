@@ -305,9 +305,12 @@ pub fn viewport(
     lines.push(Line::raw(""));
     lines.push(Line::raw(""));
 
-    // 3. 补全弹窗:紧贴编辑器框上方(Codex 布局)
+    // 3. 补全弹窗:紧贴编辑器框上方(Codex 布局);斜杠与 `@` 文件弹窗
+    //    互斥(state 层让位规则),同槽渲染
     if state.select.is_none() && state.slash_popup.visible() {
         lines.extend(state.slash_popup.render(width, theme, popup_cap));
+    } else if state.select.is_none() && state.mention_popup.visible() {
+        lines.extend(state.mention_popup.render(width, theme, popup_cap));
     }
 
     // 4. 编辑器区:无边框,整行铺 user_bg 背景(与已发送用户消息同款,
