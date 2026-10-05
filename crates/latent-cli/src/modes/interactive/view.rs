@@ -65,7 +65,9 @@ pub fn render_item(
             card
         }
         TranscriptItem::ToolCall { name, args, status } => {
-            tool_card::tool_box_top(name, args, (*status).into(), width, theme)
+            // 已定稿转录行帧间不可变:pending 态(异步 subagent 运行中)用
+            // 静态 ⏺,旋转动画只存在于实时预览(见 tool_preview_parts)
+            tool_card::tool_box_top(name, args, (*status).into(), width, theme, None)
         }
         TranscriptItem::ToolResult {
             output, is_error, ..
@@ -506,6 +508,9 @@ fn tool_preview_parts(
     width: usize,
 ) -> (Vec<UiLine>, Vec<UiLine>, usize) {
     let mut cards: Vec<UiLine> = Vec::new();
+    // 执行中的工具卡片用旋转字符替代静态 ⏺:预览区逐帧重渲染,动画生效
+    // (spinner 帧 = 状态行同源拍数)
+    let spinner = Some(loader::frame(state.spin));
     if let Some(partial) = partial {
         for block in &partial.content {
             if let latent_ai::ContentBlock::ToolCall {
@@ -518,6 +523,7 @@ fn tool_preview_parts(
                     latent_tui::tool_card::ToolStatus::Pending,
                     width,
                     &state.theme,
+                    spinner,
                 ));
             }
         }
@@ -530,6 +536,7 @@ fn tool_preview_parts(
                 latent_tui::tool_card::ToolStatus::Pending,
                 width,
                 &state.theme,
+                spinner,
             ));
         }
     }

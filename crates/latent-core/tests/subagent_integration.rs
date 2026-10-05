@@ -575,3 +575,72 @@ async fn unknown_agent_name_lists_available() {
         .unwrap_err();
     assert!(error.to_string().contains("available agents"), "{error}");
 }
+
+#[tokio::test]
+async fn batched_wake_merges_concurrent_settled_notices_into_one_turn() {
+    // 两个后台 run 先后结算:supervisor 等父空闲后把预算内的通知合并成
+    // 一条 follow_up user 消息,一次 continue_run 消费(而非逐条唤醒)。
+    // 快子 run 先入队(supervisor 在 wait_idle 处等父会话),慢子 run 在
+    // 父 run 结束前必然也已入队 → 收批时两条都在通道。
+    let fx = fixture(
+        vec![
+            ScriptedTurn::tool_calls(
+                &parent_model(),
+                vec![
+                    task_call(
+                        "t1",
+                        serde_json::json!({"task": "job one", "systemPrompt": "s", "model": "mock/child", "async": true}),
+                    ),
+                    task_call(
+                        "t2",
+                        serde_json::json!({"task": "job two", "systemPrompt": "s", "model": "mock/child", "async": true}),
+                    ),
+                ],
+            ),
+            // 父 turn 2 延迟:两个子 run(无延迟)必然在父 run 结束前
+            // 结算入队,supervisor 收批时两条通知都在通道
+            ScriptedTurn::text(&parent_model(), "both started").with_delay(200),
+            ScriptedTurn::text(&parent_model(), "woken by batch"),
+        ],
+        vec![
+            ScriptedTurn::text(&child_model(), "fast result"),
+            ScriptedTurn::text(&child_model(), "slow result"),
+        ],
+        vec![],
+        SessionMode::FullAccess,
+    )
+    .await;
+    fx.session.prompt("go").await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if assistant_texts(fx.session.agent())
+            .iter()
+            .any(|text| text.contains("woken by batch"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "supervisor 未在期限内唤醒父会话: {:?}",
+            assistant_texts(fx.session.agent())
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let merged: Vec<String> = fx
+        .session
+        .agent()
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            latent_agent::AgentMessage::User { content, .. }
+                if content.contains("Subagent inline completed") =>
+            {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(merged.len(), 1, "两条结算通知应合并为一条 user 消息");
+    assert!(merged[0].contains("fast result"), "{}", merged[0]);
+    assert!(merged[0].contains("slow result"), "{}", merged[0]);
+}

@@ -346,6 +346,10 @@ pub struct InteractiveState {
     /// 即清除,由折叠的 ToolResult 定稿)。并行批显示最近更新者。
     /// (tool_call_id, tail)
     pub pending_tool_output: Option<(String, String)>,
+    /// 异步 subagent 的已定稿卡片绑定(runId, transcript 下标):后台运行
+    /// 结算前标题保持 pending 态,帧循环据此在结算后翻终态(绿/红)。
+    /// runId 来自 subagent 工具结果的 details.runId。
+    pub subagent_run_cards: Vec<(String, usize)>,
     /// 最近一次工具执行的错误标记
     pub last_tool_error: bool,
     /// /model「添加模型」表单(None = 未激活)
@@ -412,6 +416,7 @@ impl InteractiveState {
             git_branch: None,
             pending_tools: Vec::new(),
             pending_tool_output: None,
+            subagent_run_cards: Vec::new(),
             last_tool_error: false,
             resources: Vec::new(),
             model_form: None,
@@ -484,6 +489,7 @@ impl InteractiveState {
         self.pending_thinking = None;
         self.pending_tools.clear();
         self.pending_tool_output = None;
+        self.subagent_run_cards.clear();
         self.last_tool_error = false;
         self.usage = UsageTracker::default();
         self.stream_started = None;

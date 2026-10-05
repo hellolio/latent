@@ -167,6 +167,14 @@ pub async fn run_interactive_mode(
         Some(&cwd),
         latent_core::latent_dir(home.as_deref()).as_deref(),
     ));
+    // 打字门控:编辑器非空 = 用户正在输入,supervisor 的后台 subagent 结算
+    // 唤醒延迟(有上限),避免抢在用户提交前拉起新 turn;帧循环每轮回写
+    let user_composing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Some(registry) = &subagent_registry {
+        let gate = user_composing.clone();
+        registry.set_wake_gate(Arc::new(move || gate.load(std::sync::atomic::Ordering::Relaxed)));
+    }
+
     let router = crate::modes::interactive::handlers::SessionRouter::new(session.clone());
     let ctx = InteractiveCtx {
         session: &router,
@@ -175,6 +183,7 @@ pub async fn run_interactive_mode(
         resolver: &resolver,
         compaction_config: &compaction_config,
         subagent_registry: subagent_registry.as_ref(),
+        user_composing: Some(&user_composing),
         ui_tx: ui.tx.clone(),
     };
 
@@ -267,6 +276,10 @@ async fn event_loop(
             .subagent_registry
             .map(|registry| registry.active_count())
             .unwrap_or(0);
+        // 打字门控回写(supervisor 唤醒延迟依据)+ 异步 subagent 卡片结算
+        // 翻转(run 结算 → 标题终态着色,全文重绘至多一次)
+        handlers::sync_wake_gate(ctx.user_composing, state);
+        handlers::flush_settled_subagent_cards(ctx.subagent_registry, state);
         let partial = ctx.session.current().agent().partial_message();
         render_tick(state, app, partial.as_ref()).map_err(|e| e.to_string())?;
 

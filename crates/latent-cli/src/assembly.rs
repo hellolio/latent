@@ -1417,11 +1417,27 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         .await
         .map_err(|e| e.to_string())?;
     built.session.wait_idle().await;
-    // print 模式跑完即退出:停掉仍在运行的后台 subagent(进程生命周期同父)
-    if let Some(registry) = &built.subagent_registry {
-        registry.abort_all();
-    }
+    // print 模式:后台 subagent 的结算通知经 supervisor 唤醒新 turn、照常
+    // 打印(订阅者已挂);全部安静后才退出,不再有结果随进程静默丢失
+    wait_background_subagents(&built).await;
     Ok(outcome.stop())
+}
+
+/// 等待后台 subagent 全部结算且完成通知投递完毕(print/json 退出前调用
+/// ——进程生命周期同父,直接退出会让后台结果静默丢失)。结算后的唤醒
+/// turn 由 supervisor 驱动、事件照常流向订阅者;活跃运行、未投递通知与
+/// streaming 全部安静后返回。无注册表 = 立即返回。
+pub async fn wait_background_subagents(built: &BuiltSession) {
+    let Some(registry) = &built.subagent_registry else {
+        return;
+    };
+    let agent = built.session.agent();
+    while registry.active_background() > 0
+        || registry.pending_notices() > 0
+        || agent.is_streaming()
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 /// latent-core 的 `SessionSink` 适配器:把可选组件 latent-session 注入业务核。

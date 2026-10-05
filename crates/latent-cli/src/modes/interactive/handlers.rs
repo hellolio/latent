@@ -80,6 +80,9 @@ pub struct InteractiveCtx<'a> {
     pub compaction_config: &'a crate::assembly::CompactionConfig,
     /// 后台 subagent 运行注册表(footer 计数与 /new、退出清理;None = 未装配)
     pub subagent_registry: Option<&'a Arc<latent_core::SubagentRegistry>>,
+    /// 打字门控共享标志(与 supervisor 的唤醒门控同源):编辑器非空 = 用户
+    /// 正在输入,帧循环每轮回写。None = 未装配(测试)。
+    pub user_composing: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
     /// prompt 错误兜底回 UI 通道(事件流之外的装配/并发错误)
     pub ui_tx: mpsc::UnboundedSender<UiEvent>,
 }
@@ -90,6 +93,67 @@ impl InteractiveCtx<'_> {
         &self,
     ) -> Option<Arc<latent_session::SessionManager>> {
         self.manager_holder.and_then(|holder| holder.get())
+    }
+}
+
+use std::sync::atomic::Ordering;
+
+/// 帧循环每轮调用:异步 subagent 卡片(runId 绑定)对应的后台运行结算后,
+/// 把卡片标题从 pending 翻为终态(成功绿/失败红)并触发全文重绘 ——
+/// 已定稿转录行帧间不可变,状态翻转只能走整屏重绘(每次结算至多一次)。
+pub(crate) fn flush_settled_subagent_cards(
+    registry: Option<&Arc<latent_core::SubagentRegistry>>,
+    state: &mut InteractiveState,
+) {
+    let Some(registry) = registry else {
+        return;
+    };
+    if state.subagent_run_cards.is_empty() {
+        return;
+    }
+    let mut flipped = false;
+    state.subagent_run_cards.retain(|(run_id, index)| {
+        match registry.run_state(run_id) {
+            latent_core::RunState::Active => true,
+            latent_core::RunState::Settled { success } => {
+                if let Some(TranscriptItem::ToolCall { status, .. }) =
+                    state.transcript.get_mut(*index)
+                {
+                    *status = if success {
+                        ToolStatus::Success
+                    } else {
+                        ToolStatus::Error
+                    };
+                }
+                flipped = true;
+                false
+            }
+            // 记录被淘汰(单会话 50+ 运行)等异常:按完成兜底翻绿,不留
+            // 永久 pending 的死卡片
+            latent_core::RunState::Unknown => {
+                if let Some(TranscriptItem::ToolCall { status, .. }) =
+                    state.transcript.get_mut(*index)
+                {
+                    *status = ToolStatus::Success;
+                }
+                flipped = true;
+                false
+            }
+        }
+    });
+    if flipped {
+        state.needs_full_redraw = true;
+    }
+}
+
+/// 帧循环每轮回写打字门控标志:编辑器非空 = 用户正在输入,supervisor 的
+/// 结算唤醒延迟(有上限),避免抢在用户提交前拉起新 turn。
+pub(crate) fn sync_wake_gate(
+    flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    state: &InteractiveState,
+) {
+    if let Some(flag) = flag {
+        flag.store(!state.editor.is_empty(), Ordering::Relaxed);
     }
 }
 
@@ -1523,7 +1587,7 @@ pub async fn handle_ui_event(
 }
 
 async fn handle_session_event(
-    _ctx: &InteractiveCtx<'_>,
+    ctx: &InteractiveCtx<'_>,
     state: &mut InteractiveState,
     event: AgentSessionEvent,
 ) {
@@ -1593,6 +1657,7 @@ async fn handle_session_event(
                     tool_call_id,
                     tool_name,
                     is_error,
+                    details,
                     ..
                 } => {
                     flush_stream(state);
@@ -1613,8 +1678,35 @@ async fn handle_session_event(
                     } else {
                         ToolStatus::Success
                     };
+                    // 异步 subagent:后台 run 尚未结算时标题保持 pending 态并
+                    // 绑定 runId,帧循环在结算后翻终态(成功绿/失败红);
+                    // 同步运行此刻已结算,直接终态
+                    let run_binding = details
+                        .as_ref()
+                        .and_then(|details| details.get("runId"))
+                        .and_then(|value| value.as_str())
+                        .filter(|_| tool_name == latent_core::TOOL_NAME)
+                        .filter(|id| {
+                            ctx.subagent_registry
+                                .is_some_and(|registry| {
+                                    registry.run_state(id) == latent_core::RunState::Active
+                                })
+                        })
+                        .map(str::to_string);
                     state.commit_blank();
-                    state.commit(TranscriptItem::ToolCall { name, args, status });
+                    let card_index = state.transcript.len();
+                    state.commit(TranscriptItem::ToolCall {
+                        name,
+                        args,
+                        status: if run_binding.is_some() {
+                            ToolStatus::Pending
+                        } else {
+                            status
+                        },
+                    });
+                    if let Some(run_id) = run_binding {
+                        state.subagent_run_cards.push((run_id, card_index));
+                    }
                     state.commit(TranscriptItem::ToolResult {
                         output,
                         is_error: *is_error,

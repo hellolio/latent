@@ -92,12 +92,15 @@ fn pad_line() -> Line<'static> {
 /// 终态卡片由 tool_box_bottom 补底部内边距。
 /// 命令本身永远完整折行显示(续行对齐参数起始列),不受 ctrl+o 展开态
 /// 影响;ctrl+o 只作用于输出段折叠。
+/// `spinner`:Some(帧字符) = Pending 状态用旋转字符替代静态 `⏺`(实时
+/// 预览逐帧重渲染,动画生效);None = 静态 `⏺`(已定稿转录,行帧间不可变)。
 pub fn tool_box_top(
     name: &str,
     args: &str,
     status: ToolStatus,
     width: usize,
     theme: &Theme,
+    spinner: Option<&str>,
 ) -> Vec<Line<'static>> {
     let width = width.max(1);
     let dot_style = Style::new().fg(status.color(theme));
@@ -106,6 +109,7 @@ pub fn tool_box_top(
         .add_modifier(Modifier::BOLD);
     // 命令参数用正文白(muted 过暗,暗色终端上不易辨认)
     let args_style = Style::new().fg(theme.assistant_text);
+    let marker = spinner.unwrap_or("⏺");
 
     let name_w = display_width(name);
     // 参数可用宽度 = 整行 - 「⏺ 」 - 工具名 - 间隔空格
@@ -121,7 +125,7 @@ pub fn tool_box_top(
     for (i, chunk) in chunks.iter().enumerate() {
         let mut spans: Vec<Span<'static>> = Vec::new();
         if i == 0 {
-            spans.push(Span::styled("⏺ ".to_string(), dot_style));
+            spans.push(Span::styled(format!("{marker} "), dot_style));
             spans.push(Span::styled(name.to_string(), name_style));
             spans.push(Span::styled(" ".to_string(), args_style));
             spans.push(Span::styled(chunk.clone(), args_style));
@@ -134,7 +138,7 @@ pub fn tool_box_top(
     }
     if chunks.is_empty() {
         out.push(Line::from(vec![
-            Span::styled("⏺ ".to_string(), dot_style),
+            Span::styled(format!("{marker} "), dot_style),
             Span::styled(name.to_string(), name_style),
         ]));
     }
@@ -267,8 +271,20 @@ mod tests {
     }
 
     #[test]
+    fn tool_box_top_spinner_replaces_marker_when_pending() {
+        // Pending + spinner 帧:旋转字符替代静态 ⏺,状态色前景保留
+        let top = tool_box_top("subagent", r#"{"task":"x"}"#, ToolStatus::Pending, 40, &theme(), Some("◐"));
+        let text = line_text(&top[1]);
+        assert!(text.starts_with("◐ subagent"), "{text}");
+        assert!(!text.contains('⏺'), "{text}");
+        // 终态不受 spinner 参数影响(调用方传 None,防御性校验一次)
+        let done = tool_box_top("bash", "ls", ToolStatus::Success, 40, &theme(), Some("◐"));
+        assert!(line_text(&done[1]).starts_with("◐ bash"), "spinner 参数只在 Pending 语义下由调用方约束");
+    }
+
+    #[test]
     fn tool_box_top_shows_name_args_and_status_dot() {
-        let top = tool_box_top("bash", "ls -la", ToolStatus::Success, 40, &theme());
+        let top = tool_box_top("bash", "ls -la", ToolStatus::Success, 40, &theme(), None);
         // 首行为顶部内边距空行,命令行紧随其后
         assert!(line_text(&top[0]).trim().is_empty());
         let text = line_text(&top[1]);
@@ -291,7 +307,7 @@ mod tests {
     fn tool_box_top_narrow_omits_args() {
         // 整行铺满后参数可用宽度 = width - (2 + 名称宽 + 1);宽 10 时 < 4,
         // 参数不渲染
-        let top = tool_box_top("bash", "ls", ToolStatus::Pending, 10, &theme());
+        let top = tool_box_top("bash", "ls", ToolStatus::Pending, 10, &theme(), None);
         // Pending 卡片单独成块:顶部内边距 + 标题 + 底部内边距
         assert_eq!(top.len(), 3);
         assert!(!line_text(&top[1]).contains("ls"), "{:?}", top);
@@ -302,11 +318,11 @@ mod tests {
     fn tool_box_top_always_wraps_args_in_full() {
         // 命令本身始终完整折行:短参数单行,长参数多行(与展开态无关)
         let args = "arg1 arg2 arg3 arg4 arg5";
-        let short = tool_box_top("bash", args, ToolStatus::Success, 40, &theme());
+        let short = tool_box_top("bash", args, ToolStatus::Success, 40, &theme(), None);
         // 顶部内边距 + 单行命令
         assert_eq!(short.len(), 2, "短参数单行: {short:?}");
         let long_args = "word ".repeat(30);
-        let wrapped = tool_box_top("bash", &long_args, ToolStatus::Success, 40, &theme());
+        let wrapped = tool_box_top("bash", &long_args, ToolStatus::Success, 40, &theme(), None);
         assert!(wrapped.len() > 1, "{wrapped:?}");
         // 折行不丢字:30 个 word 全部出现在卡片各行中
         let joined: String = wrapped.iter().map(|l| line_text(l)).collect();
@@ -348,7 +364,7 @@ mod tests {
     #[test]
     fn tool_box_top_and_bottom_form_one_block() {
         let t = Theme::dark();
-        let mut lines = tool_box_top("bash", "ls", ToolStatus::Success, 40, &t);
+        let mut lines = tool_box_top("bash", "ls", ToolStatus::Success, 40, &t, None);
         lines.extend(tool_box_bottom("file1", false, false, 40, &t));
         // 无边框:首行不以 ╭ 开头、末行不以 ╰ 开头
         assert!(!line_text(&lines[0]).starts_with('╭'));

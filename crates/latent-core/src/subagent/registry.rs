@@ -1,22 +1,29 @@
 //! 运行注册表 + supervisor 空闲唤醒(14 文档 §4.3)。
 //!
-//! 所有运行(同步/后台)统一登记;后台运行结算后由 supervisor 任务唤醒父
-//! 会话:`wait_idle()` → `follow_up(通知)` → `continue_run()`。若 continue
-//! 撞上用户已开启的新 run(AlreadyRunning),follow_up 留在队列由下一停止点
-//! 消费——天然兜底,不丢消息(agent.rs 的 requeue 语义)。
+//! 所有运行(同步/后台)统一登记;后台运行结算后由 supervisor 任务批量唤醒
+//! 父会话:收集预算内全部已结算通知 → `wait_idle()` →(打字门控)→
+//! `follow_up(合并通知)` → `continue_run()`。若 continue 撞上用户已开启的
+//! 新 run(AlreadyRunning),follow_up 留在队列由下一停止点消费——天然兜底,
+//! 不丢消息(agent.rs 的 requeue 语义)。
+//!
+//! 通知抑制是按 run 的标记(`suppress_notice`):/new 与会话退出 abort_all
+//! 后,被终止运行的残留结算不再唤醒父会话;其后新登记的运行不受影响
+//! (全局布尔会因新 register 复位而让旧 run 的迟到结算泄漏进新会话)。
 //!
 //! 父 abort 级联停止的运行(cancelled_by_parent)不投递通知:用户按 Esc 后
 //! 不应被"已停止"的通知重新拉起新 turn。
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use futures::FutureExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use latent_agent::{Agent, AgentMessage};
+use latent_agent::{Agent, AgentError, AgentMessage};
 
-use super::runner::{format_child_result, truncate_chars, ChildOutcome, RunStatus};
+use super::runner::{format_child_result, truncate_chars, ChildOutcome, RunStatus, MAX_OUTPUT_CHARS};
 
 /// 后台活跃上限(14 文档 §4.3)。
 pub const MAX_ACTIVE_ASYNC: usize = 16;
@@ -27,6 +34,13 @@ const NOTIFY_PREVIEW_CHARS: usize = 2_000;
 /// stop 后等待结算的轮询上限。
 const STOP_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_SETTLE_POLL: Duration = Duration::from_millis(50);
+/// 单次唤醒注入的通知文本预算(字符):超出部分留在通道,下轮继续投递
+/// ——与单条工具结果的输出预算同源,避免合并通知把上下文一次性撑爆。
+const WAKE_BATCH_MAX_CHARS: usize = MAX_OUTPUT_CHARS;
+/// 打字门控:用户正在输入时延迟唤醒的轮询间隔与上限(超时后照常唤醒,
+/// 用户输入经 steering 兜底,不丢消息)。
+const WAKE_GATE_POLL: Duration = Duration::from_millis(250);
+const WAKE_GATE_MAX: Duration = Duration::from_secs(60);
 
 /// 注册表内的一条运行记录。
 #[derive(Clone)]
@@ -43,6 +57,9 @@ pub struct RunEntry {
     pub duration_ms: Option<u64>,
     pub cancelled_by_parent: bool,
     pub tool_calls: usize,
+    /// 通知抑制(按 run):abort_all(/new、退出清理)对运行中的条目置位,
+    /// 其残留结算不再投递通知;之后新登记的运行不受影响
+    suppress_notice: bool,
     stop: CancellationToken,
 }
 
@@ -57,14 +74,28 @@ pub struct CompletionNotice {
     pub text: String,
 }
 
+/// run 查询结果(TUI 异步卡片翻转依据)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunState {
+    /// 仍在运行
+    Active,
+    /// 已结算(success = 是否 Completed)
+    Settled { success: bool },
+    /// 注册表无此 id(历史超限被淘汰等)
+    Unknown,
+}
+
 pub struct SubagentRegistry {
     runs: Mutex<Vec<RunEntry>>,
     completions_tx: mpsc::UnboundedSender<CompletionNotice>,
     completions_rx: Mutex<Option<mpsc::UnboundedReceiver<CompletionNotice>>>,
     parent: Arc<Mutex<Weak<Agent>>>,
-    /// 通知抑制(/new 与会话退出 abort_all 后,残留结算不再唤醒父会话;
-    /// 下一次 register 重新启用)
-    suppressed: Mutex<bool>,
+    /// 已入通道、尚未被 supervisor 投递(continue_run 结束)的通知条数
+    /// (非交互模式退出前的等待依据)
+    pending_notices: Arc<AtomicUsize>,
+    /// 打字门控(交互模式注入):返回 true = 用户正在输入,唤醒延迟。
+    /// None = 不门控(非交互模式)。
+    wake_gate: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
 }
 
 impl SubagentRegistry {
@@ -75,27 +106,55 @@ impl SubagentRegistry {
             completions_tx,
             completions_rx: Mutex::new(Some(completions_rx)),
             parent,
-            suppressed: Mutex::new(false),
+            pending_notices: Arc::new(AtomicUsize::new(0)),
+            wake_gate: Mutex::new(None),
         })
     }
 
-    /// supervisor 任务(单例):等父空闲 → follow_up 通知 → 驱动新 run。
-    /// 重复调用是 no-op(接收端只能取一次)。
+    /// 注入打字门控(交互模式装配后调用一次):true = 用户正在编辑器输入,
+    /// supervisor 延迟唤醒(有上限),避免结算通知抢在用户提交前拉起新 turn。
+    pub fn set_wake_gate(&self, gate: Arc<dyn Fn() -> bool + Send + Sync>) {
+        *self.wake_gate.lock().unwrap() = Some(gate);
+    }
+
+    /// 已入通道、尚未投递完成的通知条数(print/json 退出等待用)。
+    pub fn pending_notices(&self) -> usize {
+        self.pending_notices.load(Ordering::SeqCst)
+    }
+
+    /// supervisor 任务(单例):等父空闲 → 打字门控 → follow_up 合并通知 →
+    /// 驱动新 run。重复调用是 no-op(接收端只能取一次)。
     pub fn spawn_supervisor(&self) {
         let Some(mut rx) = self.completions_rx.lock().unwrap().take() else {
             return;
         };
-        let this = self.parent.clone();
+        let parent = self.parent.clone();
+        let gate = self.wake_gate.lock().unwrap().clone();
+        let pending = self.pending_notices.clone();
+        let completions_tx = self.completions_tx.clone();
         tokio::spawn(async move {
-            while let Some(notice) = rx.recv().await {
-                let Some(agent) = this.lock().unwrap().upgrade() else {
-                    continue; // 父会话已释放(换会话/退出):通知无处投递,丢弃
-                };
-                agent.wait_idle().await;
-                agent.follow_up(AgentMessage::user(notice.text));
-                // 已有活动 run(用户恰在交互)时失败:通知已在 follow_up 队列,
-                // 下一停止点由循环整流消费
-                let _ = agent.continue_run().await;
+            while let Some(first) = rx.recv().await {
+                // 单批处理全程 panic 防护:supervisor 意外终止会让后续通知
+                // 永久积压,这里吞掉 panic + 诊断后继续消费(计数可能多计,
+                // 只影响退出等待的时长,不影响投递)
+                let outcome = std::panic::AssertUnwindSafe(deliver_batch(
+                    &parent,
+                    &gate,
+                    &completions_tx,
+                    &pending,
+                    &mut rx,
+                    first,
+                ))
+                .catch_unwind()
+                .await;
+                if let Err(panic) = outcome {
+                    let message = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    eprintln!("[latent][subagent] supervisor wake panicked: {message}");
+                }
             }
         });
     }
@@ -108,7 +167,6 @@ impl SubagentRegistry {
         background: bool,
         stop: CancellationToken,
     ) -> String {
-        *self.suppressed.lock().unwrap() = false;
         let mut runs = self.runs.lock().unwrap();
         let id = fresh_id(&runs);
         runs.push(RunEntry {
@@ -123,13 +181,14 @@ impl SubagentRegistry {
             duration_ms: None,
             cancelled_by_parent: false,
             tool_calls: 0,
+            suppress_notice: false,
             stop,
         });
         evict_overflow(&mut runs);
         id
     }
 
-    /// 结算一条运行;后台且非父级联停止时投递完成通知。
+    /// 结算一条运行;后台且非父级联停止、未被抑制时投递完成通知。
     pub fn finish(&self, id: &str, outcome: &ChildOutcome) {
         let entry = {
             let mut runs = self.runs.lock().unwrap();
@@ -149,10 +208,24 @@ impl SubagentRegistry {
                 None => return,
             }
         };
-        let suppressed = *self.suppressed.lock().unwrap();
-        if entry.background && !outcome.cancelled_by_parent && !suppressed {
+        if entry.background && !outcome.cancelled_by_parent && !entry.suppress_notice {
             let text = format_child_result(&entry.agent, &entry.id, outcome);
+            self.pending_notices.fetch_add(1, Ordering::SeqCst);
             let _ = self.completions_tx.send(CompletionNotice { text });
+        }
+    }
+
+    /// 按 id(精确匹配)查询运行状态(TUI 异步卡片翻转依据)。
+    pub fn run_state(&self, id: &str) -> RunState {
+        let runs = self.runs.lock().unwrap();
+        match runs.iter().find(|entry| entry.id == id) {
+            Some(entry) => match entry.status {
+                None => RunState::Active,
+                Some(status) => RunState::Settled {
+                    success: matches!(status, RunStatus::Completed),
+                },
+            },
+            None => RunState::Unknown,
         }
     }
 
@@ -170,18 +243,10 @@ impl SubagentRegistry {
     pub async fn stop(&self, id: &str) -> Result<String, String> {
         let (entry, ambiguity) = {
             let runs = self.runs.lock().unwrap();
-            let matches: Vec<&RunEntry> = runs
-                .iter()
-                .filter(|entry| entry.id == id || entry.id.starts_with(id))
-                .collect();
-            if matches.iter().any(|entry| entry.id == id) {
-                (Some(matches.into_iter().find(|e| e.id == id).unwrap().clone()), 0)
-            } else if matches.len() == 1 {
-                (Some(matches[0].clone()), 0)
-            } else if matches.len() > 1 {
-                (None, matches.len())
-            } else {
-                (None, 0)
+            match match_entry(&runs, id) {
+                Ok(Some(entry)) => (Some(entry.clone()), 0),
+                Ok(None) => (None, 0),
+                Err(ambiguity) => (None, ambiguity),
             }
         };
         let Some(entry) = entry else {
@@ -224,7 +289,8 @@ impl SubagentRegistry {
         }
     }
 
-    /// action:"list":运行记录表。
+    /// action:"list":运行记录表(仅状态面;结果内容只经推送送达,避免
+    /// 拉取与推送重复注入同一份输出)。
     pub fn list(&self) -> String {
         let runs = self.runs.lock().unwrap();
         if runs.is_empty() {
@@ -255,10 +321,10 @@ impl SubagentRegistry {
     /// /new 与会话退出清理:停止全部存活运行并抑制其完成通知
     /// (旧会话的后台运行不应把新会话从 idle 拉起)。
     pub fn abort_all(&self) {
-        *self.suppressed.lock().unwrap() = true;
-        let runs = self.runs.lock().unwrap();
-        for entry in runs.iter() {
+        let mut runs = self.runs.lock().unwrap();
+        for entry in runs.iter_mut() {
             if entry.status.is_none() {
+                entry.suppress_notice = true;
                 entry.stop.cancel();
             }
         }
@@ -273,6 +339,89 @@ impl SubagentRegistry {
             .filter(|entry| entry.status.is_none())
             .count()
     }
+}
+
+/// id(或唯一前缀)匹配;Err = 前缀命中多条(歧义数)。
+fn match_entry<'a>(runs: &'a [RunEntry], id: &str) -> Result<Option<&'a RunEntry>, usize> {
+    let matches: Vec<&RunEntry> = runs
+        .iter()
+        .filter(|entry| entry.id == id || entry.id.starts_with(id))
+        .collect();
+    if matches.iter().any(|entry| entry.id == id) {
+        Ok(matches.into_iter().find(|e| e.id == id))
+    } else if matches.len() == 1 {
+        Ok(Some(matches[0]))
+    } else if matches.len() > 1 {
+        Err(matches.len())
+    } else {
+        Ok(None)
+    }
+}
+
+/// 预算内批量收集:从通道 try_recv 尽可能多的通知合并为一批,超预算的
+/// 第一条推回通道并停止(硬上限;单批至少含 first)。
+fn collect_batch(
+    rx: &mut mpsc::UnboundedReceiver<CompletionNotice>,
+    completions_tx: &mpsc::UnboundedSender<CompletionNotice>,
+    first: CompletionNotice,
+) -> Vec<String> {
+    let mut texts = vec![first.text];
+    let mut total = chars_of(&texts[0]);
+    while let Ok(next) = rx.try_recv() {
+        let len = chars_of(&next.text);
+        if total + len > WAKE_BATCH_MAX_CHARS {
+            // 超预算:推回通道(仅 supervisor 自己 recv,顺序至多与并发
+            // 新通知交错;条目自描述,乱序无碍)
+            let _ = completions_tx.send(next);
+            break;
+        }
+        total += len;
+        texts.push(next.text);
+    }
+    texts
+}
+
+/// 投递一批结算通知:预算内尽量合并 → 等父空闲 → 打字门控 → follow_up →
+/// continue_run。pending 计数在投递尝试结束后按实际合并条数递减
+/// (finish 侧逐条递增)。
+async fn deliver_batch(
+    parent: &Arc<Mutex<Weak<Agent>>>,
+    gate: &Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    completions_tx: &mpsc::UnboundedSender<CompletionNotice>,
+    pending: &AtomicUsize,
+    rx: &mut mpsc::UnboundedReceiver<CompletionNotice>,
+    first: CompletionNotice,
+) {
+    let texts = collect_batch(rx, completions_tx, first);
+    let batch_len = texts.len();
+    let Some(agent) = parent.lock().unwrap().upgrade() else {
+        // 父会话已释放(换会话/退出):通知无处投递,丢弃并回落计数
+        pending.fetch_sub(batch_len, Ordering::SeqCst);
+        return;
+    };
+    agent.wait_idle().await;
+    // 打字门控:用户正在输入时延迟唤醒(有上限),避免结算通知抢在用户
+    // 提交前拉起新 turn;超时后照常投递(用户输入经 steering 兜底不丢)
+    let deadline = Instant::now() + WAKE_GATE_MAX;
+    loop {
+        let composing = gate.as_ref().is_some_and(|g| g());
+        if !composing || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(WAKE_GATE_POLL).await;
+    }
+    agent.follow_up(AgentMessage::user(texts.join("\n\n")));
+    // 已有活动 run(用户恰在交互)时失败:通知已在 follow_up 队列,
+    // 下一停止点由循环整流消费
+    match agent.continue_run().await {
+        Ok(_) | Err(AgentError::AlreadyRunning) | Err(AgentError::NothingToContinue) => {}
+        Err(error) => eprintln!("[latent][subagent] wake continue failed: {error}"),
+    }
+    pending.fetch_sub(batch_len, Ordering::SeqCst);
+}
+
+fn chars_of(text: &str) -> usize {
+    text.chars().count()
 }
 
 /// run id:进程级单调计数器(**不能用 uuid v7 截短**:其 simple 形态前 8 位
@@ -315,6 +464,7 @@ mod tests {
             duration_ms: None,
             cancelled_by_parent: false,
             tool_calls: 0,
+            suppress_notice: false,
             stop: CancellationToken::new(),
         }
     }
@@ -391,6 +541,7 @@ mod tests {
         };
         let id = registry.register("a", "task", true, CancellationToken::new());
         registry.finish(&id, &outcome_ok);
+        assert_eq!(registry.pending_notices(), 1, "正常结算入队一条通知");
         assert_eq!(registry.list().lines().count(), 2, "表头 + 一条记录");
 
         let id2 = registry.register("a", "task", true, CancellationToken::new());
@@ -398,8 +549,72 @@ mod tests {
         cancelled.cancelled_by_parent = true;
         cancelled.status = RunStatus::Stopped;
         registry.finish(&id2, &cancelled);
-        // 通知通道:只有第一条产生通知(第二条父级联停止不投递)
-        // 通道在 spawn_supervisor take 之前不可读,这里通过 list 侧面验证状态
+        // 父级联停止不投递:pending 计数不变
+        assert_eq!(registry.pending_notices(), 1);
         assert!(registry.list().contains("stopped"));
+    }
+
+    #[tokio::test]
+    async fn abort_all_suppression_is_per_run() {
+        // /new 场景:abort_all 后新登记的运行不继承抑制,旧 run 的迟到
+        // 结算仍被抑制(全局布尔会在新 register 时复位,导致旧通知泄漏)
+        let registry = SubagentRegistry::new(Arc::new(Mutex::new(Weak::new())));
+        let old = registry.register("a", "old task", true, CancellationToken::new());
+        registry.abort_all();
+        let new = registry.register("a", "new task", true, CancellationToken::new());
+        let outcome = ChildOutcome {
+            status: RunStatus::Stopped,
+            output: None,
+            error: None,
+            duration: Duration::from_millis(5),
+            tool_calls: 0,
+            usage: latent_ai::Usage::zero(),
+            cancelled_by_parent: false,
+            model_id: "m".into(),
+        };
+        registry.finish(&old, &outcome);
+        assert_eq!(registry.pending_notices(), 0, "旧 run 迟到结算被抑制");
+        registry.finish(&new, &outcome);
+        assert_eq!(registry.pending_notices(), 1, "新登记的运行正常通知");
+    }
+
+    #[test]
+    fn run_state_reports_active_settled_unknown() {
+        let registry = SubagentRegistry::new(Arc::new(Mutex::new(Weak::new())));
+        let id = registry.register("a", "task", true, CancellationToken::new());
+        assert_eq!(registry.run_state(&id), RunState::Active);
+        let outcome = ChildOutcome {
+            status: RunStatus::Failed,
+            output: None,
+            error: Some("boom".into()),
+            duration: Duration::from_millis(5),
+            tool_calls: 0,
+            usage: latent_ai::Usage::zero(),
+            cancelled_by_parent: false,
+            model_id: "m".into(),
+        };
+        registry.finish(&id, &outcome);
+        assert_eq!(
+            registry.run_state(&id),
+            RunState::Settled { success: false }
+        );
+        assert_eq!(registry.run_state("nope"), RunState::Unknown);
+    }
+
+    #[test]
+    fn collect_batch_merges_within_budget_and_pushes_back_overflow() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(CompletionNotice { text: "a".repeat(100) }).unwrap();
+        tx.send(CompletionNotice { text: "b".repeat(100) }).unwrap();
+        // 单条超预算也照收(至少一批一条,预算为软上限起点)
+        tx.send(CompletionNotice { text: "c".repeat(WAKE_BATCH_MAX_CHARS + 1) }).unwrap();
+        tx.send(CompletionNotice { text: "d".into() }).unwrap();
+        let first = rx.try_recv().unwrap();
+        let batch = collect_batch(&mut rx, &tx, first);
+        assert_eq!(batch.len(), 2, "前两条在预算内合并: {batch:?}");
+        // 第三条超预算推回,第四条留在通道:通道里应有 2 条
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
     }
 }

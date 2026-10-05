@@ -66,6 +66,7 @@ fn ctx_of<'a>(
         resolver,
         compaction_config: &built.compaction_config,
         subagent_registry: None,
+        user_composing: None,
         ui_tx: {
             let (tx, _rx) = mpsc::unbounded_channel();
             tx
@@ -1753,4 +1754,87 @@ async fn bare_variant_commands_show_usage_only() {
     assert!(rendered.contains("用法: /session list"), "{rendered}");
     assert!(rendered.contains("用法: /mode <"), "{rendered}");
     assert!(state.select.is_none(), "裸命令不应打开任何选择器");
+}
+
+/// 异步 subagent 卡片:运行中保持 pending,结算翻终态(成功绿/失败红)
+/// 并解绑 + 触发全文重绘。
+#[test]
+fn flush_settled_subagent_cards_flips_status() {
+    use latent_core::{ChildOutcome, RunStatus, SubagentRegistry};
+    use std::sync::{Mutex, Weak};
+    use tokio_util::sync::CancellationToken;
+
+    let registry = Arc::new(SubagentRegistry::new(Arc::new(Mutex::new(Weak::new()))));
+    let outcome = |status: RunStatus| ChildOutcome {
+        status,
+        output: Some("done".into()),
+        error: None,
+        duration: std::time::Duration::from_millis(10),
+        tool_calls: 0,
+        usage: latent_ai::Usage::zero(),
+        cancelled_by_parent: false,
+        model_id: "m".into(),
+    };
+    let mut state = test_state();
+    let card = |status| super::state::TranscriptItem::ToolCall {
+        name: "subagent".into(),
+        args: r#"{"task":"t"}"#.into(),
+        status,
+    };
+
+    let run_id = registry.register("reviewer", "task", true, CancellationToken::new());
+    state.commit(card(super::state::ToolStatus::Pending));
+    state.subagent_run_cards.push((run_id.clone(), 0));
+
+    // 运行中:保持 pending,不触发重绘
+    super::handlers::flush_settled_subagent_cards(Some(&registry), &mut state);
+    assert!(matches!(
+        state.transcript[0],
+        super::state::TranscriptItem::ToolCall {
+            status: super::state::ToolStatus::Pending,
+            ..
+        }
+    ));
+    assert!(!state.needs_full_redraw);
+
+    // 结算(成功):翻绿 + 全文重绘 + 解绑
+    registry.finish(&run_id, &outcome(RunStatus::Completed));
+    super::handlers::flush_settled_subagent_cards(Some(&registry), &mut state);
+    assert!(matches!(
+        state.transcript[0],
+        super::state::TranscriptItem::ToolCall {
+            status: super::state::ToolStatus::Success,
+            ..
+        }
+    ));
+    assert!(state.needs_full_redraw);
+    assert!(state.subagent_run_cards.is_empty());
+
+    // 失败:翻红
+    let run2 = registry.register("reviewer", "task2", true, CancellationToken::new());
+    state.needs_full_redraw = false;
+    state.commit(card(super::state::ToolStatus::Pending));
+    state.subagent_run_cards.push((run2.clone(), 1));
+    registry.finish(&run2, &outcome(RunStatus::Failed));
+    super::handlers::flush_settled_subagent_cards(Some(&registry), &mut state);
+    assert!(matches!(
+        state.transcript[1],
+        super::state::TranscriptItem::ToolCall {
+            status: super::state::ToolStatus::Error,
+            ..
+        }
+    ));
+}
+
+/// 打字门控回写:编辑器非空 = true(延迟唤醒),清空 = false。
+#[test]
+fn sync_wake_gate_follows_editor_buffer() {
+    use std::sync::atomic::AtomicBool;
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut state = test_state();
+    super::handlers::sync_wake_gate(Some(&flag), &state);
+    assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+    state.editor.set_text("还在输入");
+    super::handlers::sync_wake_gate(Some(&flag), &state);
+    assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
 }

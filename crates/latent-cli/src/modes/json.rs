@@ -31,6 +31,9 @@ pub async fn run_json_mode(
         .await
         .map_err(|e| e.to_string())?;
     built.session.wait_idle().await;
+    // 后台 subagent 的结算通知经 supervisor 唤醒新 turn、事件照常上 JSONL;
+    // 全部安静后才退出,不再有后台结果随进程静默丢失
+    crate::assembly::wait_background_subagents(&built).await;
     Ok(outcome.stop())
 }
 

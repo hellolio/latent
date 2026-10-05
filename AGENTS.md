@@ -121,10 +121,10 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/extensions/event_bus.rs` | 事件分发：15 观察类 + 6 决策类事件；block 短路、改参链（改参后重新过 schema）、fail-open/closed 按注册声明、断连诊断 |
 | `src/extensions/mcp_host.rs` | MCP 协议宿主：settings `mcpServers` 声明 → stdio 子进程连接；自定义方法 `latent/register`/`latent/event`；崩溃/断连 = 标记 stale + 诊断 + 跳过，绝不击穿宿主 |
 | `src/extensions/mcp_tool.rs` | MCP 工具桥：wire 名 `{extension}__{tool}`、progress 转发、取消通知映射、600s 兜底超时 |
-| `src/subagent/mod.rs` | 子代理门面：同步 execute 内嵌套 await（并发上限 4）、异步立即返回 run id + supervisor 唤醒、递归防护 = 子工具面剔除 subagent |
+| `src/subagent/mod.rs` | 子代理门面：同步 execute 内嵌套 await（并发上限 4）、异步立即返回 run id + supervisor 批量合并唤醒（wait_idle → 打字门控 → follow_up 合并通知 → continue_run）、递归防护 = 子工具面剔除 subagent |
 | `src/subagent/defs.rs` | `AgentDef` 发现：`.latent/agents/*.md`（项目优先），frontmatter name/description/model/tools，正文即 system prompt |
 | `src/subagent/runner.rs` | `run_child`：run/parent_cancel/stop/timeout select 竞速；进度节流；默认超时 30min |
-| `src/subagent/registry.rs` | `SubagentRegistry`：8 位单调 id、后台 run 上限 16、`spawn_supervisor`（wait_idle → follow_up 唤醒父会话）、stop/list/abort_all |
+| `src/subagent/registry.rs` | `SubagentRegistry`：8 位单调 id、后台 run 上限 16、`spawn_supervisor`（wait_idle → 打字门控 → follow_up 预算内合并通知唤醒父会话，panic 防护 + 诊断；通知抑制按 run 标记，abort_all 不泄漏进新登记的运行；pending_notices 供 print/json 退出等待）、stop/list/abort_all、run_state（TUI 卡片翻转依据） |
 | `src/subagent/factory.rs` | `/subagent` 平行会话工厂：独立 PermissionEngine、系统提示词被定义 md 整体替换、可选落盘 |
 | `src/subagent/tool.rs` | `SubagentTool`：同步排队（信号量 4）、后台审批默认 Deny（fail-closed）、`action:"list"/"stop"` |
 | `src/subagent/store.rs` | 子会话 JSONL 落盘（`ChildStoreFactory`，条目格式与主会话一致） |
@@ -159,7 +159,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/markdown.rs` | Markdown 渲染（标题/列表/围栏代码块 syntect 高亮/GFM 表格/行内样式） |
 | `src/command_popup.rs` | 斜杠命令补全弹窗（前缀>子串>模糊打分；`/mode` 展开变体子项） |
 | `src/file_popup.rs` | `@` 文件选择弹窗（pi @ autocomplete 对应）：光标 token 触发、目录 `/` 下钻直接子项、文件名前缀>子串>路径子串>模糊打分；文件补全带尾随空格退场、目录保持下钻；`base`（工作目录）注入后**选中补全绝对全路径**（手输原样，过滤前自动剥离 base 前缀）；候选集由上层注入（不感知文件系统） |
-| `src/tool_card.rs` | 工具调用卡片：命令本身完整折行（不随 ctrl+o 变化），输出折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，上下各一行同色内边距；成功绿/失败红为压暗低饱和色调，运行中中性） |
+| `src/tool_card.rs` | 工具调用卡片：命令本身完整折行（不随 ctrl+o 变化），输出折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，上下各一行同色内边距；成功绿/失败红为压暗低饱和色调，运行中中性）；Pending 卡片标题用旋转字符（实时预览逐帧动画，定稿转录行帧间不可变保持静态 ⏺） |
 | `src/footer.rs` | 两行状态栏：上=左 cwd+git 分支 + 右 token 段（↑prompt 含缓存明细 U/R 与命中率 / ↓out / ctx% 变色 / $cost）；下=左 agent:main(或当前子 agent)│模式标记（plan 黄、full-access 红）+ 右 model·thinking |
 | `src/theme/` | 语义主题：ratatui-themes 映射 + 逐主题微调（Tokyo Night/Catppuccin/Dracula…），16 色降级 ANSI |
 | `src/highlight.rs` / `text.rs` / `width.rs` / `key.rs` / `loader.rs` / `select_list.rs` / `header.rs` | syntect 高亮单例 / span 感知折行截断 / 零依赖 CJK 宽度表 / 按键语义归一（含鼠标滚轮/左键手势 `Mouse`（携带 Shift 修饰）、Ctrl+X 复制在事件循环层拦截）/ spinner / 单选列表 / 启动横幅 |
@@ -170,9 +170,9 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 |---|---|
 | `src/main.rs` | CLI 入口：flag 解析（--mode/--mock/--provider/--model/--theme/--continue|-c|-r [序号]/-l|--list/--session-mode/--plan/--yolo/--sandbox-*/--mcp-mock-server）、模式自动判定（两端 TTY → interactive 否则 print）、装配分支 |
 | `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子 + LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.latent/settings.json` 优先） |
-| `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
+| `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；两者退出前经 `wait_background_subagents`（assembly）等后台 subagent 全部结算并投递，结果不随进程丢失；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
 | `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent（无参打开 agent+off 选择器）/session（list/info）/fullscreen（[on\|off] 切换全屏渲染模式）/quit；带变体命令裸调用只提示用法，部分输入回车展开变体选择页、方向键选定后回车执行；未识别 `/xxx` 本地警告不发给模型 |
-| `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记、`StreamWrapCache` 流式文本增量折行缓存（append-only 时仅重折最后一个未完成源行，流式预览全量行的数据源）、`sync_mention_popup` @ 文件弹窗同步（cwd 采集候选 + 检索忽略剪枝 + 注入补全根（选中补全全路径）+ `/`/`!` 让位））、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、`@` 文件弹窗 ↑/↓/Tab/Enter/Esc 补全经编辑器 token 替换落文本、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局数据目录 settings.json）、/model 选择器+添加模型表单）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，latent 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
+| `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记、`StreamWrapCache` 流式文本增量折行缓存（append-only 时仅重折最后一个未完成源行，流式预览全量行的数据源）、`sync_mention_popup` @ 文件弹窗同步（cwd 采集候选 + 检索忽略剪枝 + 注入补全根（选中补全全路径）+ `/`/`!` 让位）、`subagent_run_cards` 异步卡片 (runId, transcript 下标) 绑定）、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、`@` 文件弹窗 ↑/↓/Tab/Enter/Esc 补全经编辑器 token 替换落文本、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局数据目录 settings.json）、/model 选择器+添加模型表单）、异步 subagent 卡片 runId 绑定与结算翻色（`flush_settled_subagent_cards`：pending → 绿/红，全文重绘至多一次）、打字门控回写（`sync_wake_gate`：编辑器非空 → supervisor 唤醒延迟）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，latent 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
 | `src/mcp_mock.rs` | mock MCP 扩展服务端（`latent --mcp-mock-server`）：订阅 tool_call 拦截危险 bash + 注册 echo 工具 + elicitation 确认，供扩展全链路验收 |
 | `tests/modes.rs` | 四模式集成测试（ScriptedProvider 不联网）：json 剥 partial、rpc 反向通道、LATENT_* 注入、Plan 只读 bash、JSONL 重建 == 内存 context、ModeChange 持久化等 |
 | `tests/e2e_mcp_extension.rs` | 真实子进程 MCP 扩展端到端验收 |
