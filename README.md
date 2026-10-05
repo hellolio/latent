@@ -206,7 +206,7 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
 ```
 
 ### todo list
- - [ ] .latentignore文件独立
+ - [x] .latentignore文件独立（gitignore 语法，全局 `~/.latent/.latentignore` + 项目 `.latentignore`，项目优先可反选）
  - [ ] 子agent调用和显示优化
  - [ ] harness适配微信qq，如何保证长时间工作不中断，定时任务
  - [ ] jev决策小模型引入

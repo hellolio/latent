@@ -2,9 +2,9 @@
 //!
 //! 语义对齐 pi 的 `fd` 采集(`--hidden --exclude .git` + .gitignore 感知),
 //! 但进程内用 `ignore` crate 完成,不依赖外部二进制;叠加 search_ignore
-//! 检索忽略列表剪枝(依赖/构建目录不进候选)。产出扁平的相对路径列表
-//! (文件 + 目录),按 深度 → 目录优先 → 字母 排序后截断——排序先于截断,
-//! 保证浅层条目不被深层子树挤掉。
+//! 检索忽略列表剪枝(`.latentignore` 规则,依赖/构建目录不进候选)。产出
+//! 扁平的相对路径列表(文件 + 目录),按 深度 → 目录优先 → 字母 排序后
+//! 截断——排序先于截断,保证浅层条目不被深层子树挤掉。
 
 use std::path::Path;
 
@@ -47,16 +47,19 @@ pub fn collect_entries_capped(
         .hidden(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != ".git");
-    // 检索忽略列表:相对采集根判定,命中目录直接剪枝(不进入遍历)
+    // 检索忽略列表(.latentignore 规则):命中目录直接剪枝(不进入遍历);
+    // 深度 0(采集根本身)不参与过滤——显式指定的根永不剪枝
     if !ignore.is_empty() {
         let ignore = ignore.clone();
-        let base = root.to_path_buf();
         walker.filter_entry(move |entry| {
             if entry.file_name() == ".git" {
                 return false;
             }
-            let relative = entry.path().strip_prefix(&base).unwrap_or(entry.path());
-            !ignore.matches(relative)
+            if entry.depth() == 0 {
+                return true;
+            }
+            let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+            !ignore.matches(entry.path(), is_dir)
         });
     }
     let mut collected: Vec<(usize, ListingEntry)> = Vec::new();
@@ -112,10 +115,15 @@ mod tests {
         entries.iter().map(|e| e.path.as_str()).collect()
     }
 
+    /// 以采集根为匹配根构建忽略列表(坏行 panic:测试不含非法行)。
+    fn ignore_for(root: &Path, patterns: &[&str]) -> SearchIgnore {
+        SearchIgnore::from_patterns(root, patterns, |_, error| panic!("{error}"))
+    }
+
     #[test]
     fn collects_files_and_dirs_pruning_noise() {
         let dir = setup("basic");
-        let entries = collect_entries(&dir, &SearchIgnore::builtin());
+        let entries = collect_entries(&dir, &ignore_for(&dir, &["node_modules"]));
         let all = paths(&entries);
         // 文件与目录都在;隐藏文件包含(pi --hidden)
         for expected in ["README.md", "Cargo.toml", ".hidden", "src", "src/main.rs", "src/ui", "src/ui/button.rs"] {
@@ -133,7 +141,7 @@ mod tests {
     #[test]
     fn orders_by_depth_dirs_first_then_alpha() {
         let dir = setup("order");
-        let entries = collect_entries(&dir, &SearchIgnore::builtin());
+        let entries = collect_entries(&dir, &ignore_for(&dir, &["node_modules"]));
         let all = paths(&entries);
         // 深度 1 的目录(src)在深度 1 的文件前;文件按字母序
         let src_pos = all.iter().position(|p| *p == "src").unwrap();
@@ -149,7 +157,7 @@ mod tests {
     #[test]
     fn cap_truncates_after_sorting() {
         let dir = setup("cap");
-        let entries = collect_entries_capped(&dir, &SearchIgnore::builtin(), 3);
+        let entries = collect_entries_capped(&dir, &ignore_for(&dir, &["node_modules"]), 3);
         // 排序后截断:深度 1 的 src 在最前,深层条目被截掉
         assert_eq!(paths(&entries), vec!["src", ".hidden", "Cargo.toml"]);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -157,10 +165,10 @@ mod tests {
 
     #[test]
     fn empty_or_missing_root_yields_empty() {
-        assert!(collect_entries(Path::new("/nonexistent-latent-xyz"), &SearchIgnore::builtin()).is_empty());
+        assert!(collect_entries(Path::new("/nonexistent-latent-xyz"), &SearchIgnore::default()).is_empty());
         let file = std::env::temp_dir().join(format!("latent-listing-file-{}", uuid::Uuid::now_v7()));
         std::fs::write(&file, "x").unwrap();
-        assert!(collect_entries(&file, &SearchIgnore::builtin()).is_empty(), "文件根不是目录");
+        assert!(collect_entries(&file, &SearchIgnore::default()).is_empty(), "文件根不是目录");
         std::fs::remove_file(&file).unwrap();
     }
 
@@ -170,9 +178,28 @@ mod tests {
         std::fs::create_dir_all(dir.join("generated")).unwrap();
         std::fs::write(dir.join("generated/out.rs"), "x").unwrap();
         std::fs::write(dir.join(".gitignore"), "generated/\n").unwrap();
-        let entries = collect_entries(&dir, &SearchIgnore::builtin());
+        let entries = collect_entries(&dir, &SearchIgnore::default());
         let all = paths(&entries);
         assert!(!all.iter().any(|p| p.contains("generated")), "gitignore 应生效: {all:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn latentignore_rules_prune_and_negation_cannot_resurrect_inside_ignored_dir() {
+        let dir = setup("latentignore");
+        std::fs::write(dir.join("NOTES.md"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("build/keep")).unwrap();
+        std::fs::write(dir.join("build/keep/x.rs"), "x").unwrap();
+        // build 被忽略 → 整棵剪枝;目录内 ! 反选无法复活(git 同款限制)
+        let entries = collect_entries(&dir, &ignore_for(&dir, &["build/", "!build/keep/"]));
+        let all = paths(&entries);
+        assert!(!all.iter().any(|p| p.contains("build")), "{all:?}");
+        // 反选顶层文件:同规则集下 NOTES.md 被过滤、README.md 恢复可见
+        let entries = collect_entries(&dir, &ignore_for(&dir, &["*.md", "!README.md"]));
+        let all = paths(&entries);
+        assert!(all.contains(&"README.md"), "{all:?}");
+        assert!(!all.contains(&"NOTES.md"), "{all:?}");
+        assert!(all.contains(&"Cargo.toml"), "非 .md 条目不受影响: {all:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

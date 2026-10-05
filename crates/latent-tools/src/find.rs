@@ -1,4 +1,5 @@
-//! find 工具(05 文档 §8):glob 文件查找,尊重 .gitignore,目录匹配保留尾 `/`。
+//! find 工具(05 文档 §8):glob 文件查找,尊重 .gitignore 与 `.latentignore`,
+//! 目录匹配保留尾 `/`。
 //!
 //! pi 用外部 fd 二进制;本实现用 `ignore` crate 的 override glob(gitignore
 //! 语义,含 `/` 的 pattern 自动锚定到搜索根,等价 fd 的 --full-path 行为)。
@@ -26,11 +27,11 @@ pub struct FindTool {
 
 /// 工厂。
 pub fn create_find_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_find_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::builtin()))
+    create_find_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::default()))
 }
 
 /// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)+ 检索忽略列表
-/// (search_ignore 模块;settings `searchIgnore` 配置,未配置 = 内置默认表)。
+/// (search_ignore 模块;`.latentignore` 规则,装配层读取)。
 pub fn create_find_tool_with_limits(
     cwd: &Path,
     limits: OutputLimits,
@@ -38,10 +39,11 @@ pub fn create_find_tool_with_limits(
 ) -> Arc<dyn Tool> {
     let description = format!(
         "Search for files by glob pattern. Returns matching file paths relative to the search \
-         directory. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} results or {} \
-         bytes (whichever is hit first). Respecting .gitignore and excluding dependency/build \
-         directories (node_modules, dist, target, ...) means generated files are already \
-         filtered out; use find to narrow down targets before reading anything.",
+         directory. Respects .gitignore and .latentignore rules (project root and \
+         ~/.latent/.latentignore, gitignore syntax); ignored directories are not searched. \
+         Output is truncated to {DEFAULT_LIMIT} results or {} bytes (whichever is hit first). \
+         Generated files are already filtered out; use find to narrow down targets before \
+         reading anything.",
         limits.effective_max_bytes()
     );
     Arc::new(FindTool {
@@ -138,16 +140,19 @@ impl Tool for FindTool {
             .hidden(false)
             .require_git(false)
             .filter_entry(|entry| entry.file_name() != ".git");
-        // 检索忽略列表(search_ignore 模块):相对搜索根判定,命中目录即剪枝
+        // 检索忽略列表(.latentignore 规则):命中目录即剪枝;深度 0(搜索
+        // 根本身)不参与过滤——显式指定的搜索根永不剪枝
         if !self.ignore.is_empty() {
             let ignore = self.ignore.clone();
-            let root = search_root.clone();
             walker.filter_entry(move |entry| {
                 if entry.file_name() == ".git" {
                     return false;
                 }
-                let relative = entry.path().strip_prefix(&root).unwrap_or(entry.path());
-                !ignore.matches(relative)
+                if entry.depth() == 0 {
+                    return true;
+                }
+                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+                !ignore.matches(entry.path(), is_dir)
             });
         }
         let walker = walker.build();
@@ -234,9 +239,14 @@ fn test_tool(cwd: PathBuf) -> FindTool {
     FindTool {
         cwd,
         limits: OutputLimits::default(),
-        ignore: Arc::new(SearchIgnore::builtin()),
+        ignore: Arc::new(SearchIgnore::default()),
         description: String::new(),
     }
+}
+
+#[cfg(test)]
+fn ignore_for(root: &Path, patterns: &[&str]) -> Arc<SearchIgnore> {
+    Arc::new(SearchIgnore::from_patterns(root, patterns, |_, error| panic!("{error}")))
 }
 
 #[cfg(test)]
@@ -345,9 +355,9 @@ mod tests {
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
-    // ---- 检索忽略列表(search_ignore):无 .gitignore 也排除依赖/构建目录 ----
+    // ---- 检索忽略列表(.latentignore):无 .gitignore 也按规则排除 ----
     #[tokio::test]
-    async fn ignores_generated_dirs_even_without_gitignore() {
+    async fn latentignore_excludes_dirs_and_negation_restores() {
         let dir = std::env::temp_dir().join(format!("latent-find-ignore-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(dir.join("src")).await.unwrap();
         tokio::fs::create_dir_all(dir.join("dist/assets")).await.unwrap();
@@ -355,11 +365,25 @@ mod tests {
             tokio::fs::write(dir.join(p), "x").await.unwrap();
         }
         // 无 .gitignore:dist 整棵剪枝
-        let tool = test_tool(dir.clone());
+        let tool = FindTool {
+            cwd: dir.clone(),
+            limits: OutputLimits::default(),
+            ignore: ignore_for(&dir, &["dist"]),
+            description: String::new(),
+        };
         let output = exec(&tool, json!({"pattern": "**/*.js"})).await.unwrap();
         assert_eq!(output.output, "No files found matching pattern");
         let output = exec(&tool, json!({"pattern": "*.ts"})).await.unwrap();
         assert!(output.output.contains("src/a.ts"));
+        // `!` 反选恢复:文件级反选直接生效
+        let tool = FindTool {
+            cwd: dir.clone(),
+            limits: OutputLimits::default(),
+            ignore: ignore_for(&dir, &["dist", "!dist/b.js"]),
+            description: String::new(),
+        };
+        let output = exec(&tool, json!({"pattern": "b.js"})).await.unwrap();
+        assert_eq!(output.output, "No files found matching pattern", "目录已剪枝,子项无法复活");
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }

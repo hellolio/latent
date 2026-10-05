@@ -23,11 +23,11 @@ pub struct LsTool {
 
 /// 工厂。
 pub fn create_ls_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_ls_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::builtin()))
+    create_ls_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::default()))
 }
 
 /// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)+ 检索忽略列表
-/// (search_ignore 模块;settings `searchIgnore` 配置,未配置 = 内置默认表)。
+/// (search_ignore 模块;`.latentignore` 规则,装配层读取)。
 pub fn create_ls_tool_with_limits(
     cwd: &Path,
     limits: OutputLimits,
@@ -35,8 +35,9 @@ pub fn create_ls_tool_with_limits(
 ) -> Arc<dyn Tool> {
     let description = format!(
         "List directory contents. Returns entries sorted alphabetically, with '/' suffix for \
-         directories. Includes dotfiles. Dependency/build directories (node_modules, dist, \
-         target, ...) are hidden. Output is truncated to {DEFAULT_LIMIT} entries or {} bytes \
+         directories. Includes dotfiles. The .git directory and paths matched by \
+         .latentignore rules (project root and ~/.latent/.latentignore, gitignore syntax) \
+         are hidden. Output is truncated to {DEFAULT_LIMIT} entries or {} bytes \
          (whichever is hit first).",
         limits.effective_max_bytes()
     );
@@ -120,8 +121,15 @@ impl Tool for LsTool {
                 message: format!("Cannot read directory: {e}"),
             })?
             .filter_map(|entry| entry.ok())
-            // 检索忽略列表(search_ignore 模块):单层列表按条目名判定
-            .filter(|entry| !self.ignore.matches(Path::new(&entry.file_name())))
+            // .git 恒排除(与 grep/find/@弹窗口径一致);检索忽略列表
+            // (.latentignore 规则)按绝对路径判定——锚定模式相对匹配根
+            .filter(|entry| {
+                if entry.file_name() == ".git" {
+                    return false;
+                }
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                !self.ignore.matches(&dir.join(entry.file_name()), is_dir)
+            })
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect();
         // 字母序,大小写不敏感(pi 的 sort)
@@ -183,9 +191,14 @@ fn test_tool(cwd: PathBuf) -> LsTool {
     LsTool {
         cwd,
         limits: OutputLimits::default(),
-        ignore: Arc::new(SearchIgnore::builtin()),
+        ignore: Arc::new(SearchIgnore::default()),
         description: String::new(),
     }
+}
+
+#[cfg(test)]
+fn ignore_for(root: &Path, patterns: &[&str]) -> Arc<SearchIgnore> {
+    Arc::new(SearchIgnore::from_patterns(root, patterns, |_, error| panic!("{error}")))
 }
 
 #[cfg(test)]
@@ -257,18 +270,42 @@ mod tests {
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
-    // ---- 检索忽略列表(search_ignore):依赖/构建目录不出现在列表里 ----
+    // ---- 检索忽略列表(.latentignore) + .git 恒排除 ----
     #[tokio::test]
-    async fn hides_dependency_and_build_dirs() {
+    async fn hides_latentignore_entries_and_git_dir() {
         let dir = std::env::temp_dir().join(format!("latent-ls-ignore-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(dir.join("src")).await.unwrap();
         tokio::fs::create_dir_all(dir.join("node_modules")).await.unwrap();
-        tokio::fs::create_dir_all(dir.join("dist")).await.unwrap();
+        tokio::fs::create_dir_all(dir.join(".git/objects")).await.unwrap();
         tokio::fs::write(dir.join("a.ts"), "x").await.unwrap();
-        let tool = test_tool(dir.clone());
+        let tool = LsTool {
+            cwd: dir.clone(),
+            limits: OutputLimits::default(),
+            ignore: ignore_for(&dir, &["node_modules"]),
+            description: String::new(),
+        };
         let output = exec(&tool, json!({})).await.unwrap();
         let lines: Vec<&str> = output.output.lines().collect();
+        // node_modules 按 .latentignore 排除;.git 恒排除(此前 ls 漏排)
         assert_eq!(lines, vec!["a.ts", "src/"]);
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn anchored_rule_hits_subdir_listing_by_project_relative_path() {
+        // 锚定模式相对匹配根(cwd)解析:列子目录时 `src/gen` 仍命中
+        let dir = std::env::temp_dir().join(format!("latent-ls-anchor-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(dir.join("src/gen")).await.unwrap();
+        tokio::fs::create_dir_all(dir.join("src/keep")).await.unwrap();
+        let tool = LsTool {
+            cwd: dir.clone(),
+            limits: OutputLimits::default(),
+            ignore: ignore_for(&dir, &["src/gen"]),
+            description: String::new(),
+        };
+        let output = exec(&tool, json!({"path": "src"})).await.unwrap();
+        assert!(output.output.contains("keep/"), "{}", output.output);
+        assert!(!output.output.contains("gen"), "{}", output.output);
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }

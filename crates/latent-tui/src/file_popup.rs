@@ -13,7 +13,7 @@
 //! 会把 token 里的 base 前缀剥掉,绝对路径 token 的下钻/打分照常工作。
 //!
 //! 组件不感知文件系统:候选集由上层采集注入(依赖方向约束:latent-tui
-//! 零内部依赖,不做目录遍历,也不感知 searchIgnore)。
+//! 零内部依赖,不做目录遍历,也不感知 `.latentignore` 忽略规则)。
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};

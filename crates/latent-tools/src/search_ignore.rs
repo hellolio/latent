@@ -1,143 +1,109 @@
-//! 检索忽略列表:grep/find/ls 三个检索工具共享的"无效对象"过滤。
+//! 检索忽略列表:grep/find/ls/@文件弹窗共享的"无效对象"过滤。
 //!
-//! 动机:依赖目录与构建产物(node_modules、dist、target…)即使不在
-//! .gitignore 里,检索它们也毫无意义,只会淹没结果、浪费轮次。本模块把
-//! "要忽略什么"收敛为一个可注入配置:未配置 = 内置默认表;settings.json
-//! `searchIgnore` 配置后**整体覆盖**默认表(空数组 = 完全关闭过滤)。
+//! 规则唯一来源是 `.latentignore` 文件(gitignore 语法):全局
+//! `~/.latent/.latentignore` 在前、项目 `<cwd>/.latentignore` 在后拼接,按
+//! gitignore 语义 last-match-wins —— 项目可用 `!` 反选全局规则。没有任何
+//! 规则 = 关闭过滤(仅剩工具层写死的 `.git` 排除与遍历自带的 .gitignore
+//! 感知)。
 //!
-//! 匹配语义(对相对搜索根的路径判定):
-//! - 不含 `/` 的条目:匹配相对路径的**任意一段**(目录名/文件名,如
-//!   `node_modules` 命中任意深度的同名目录);
-//! - 含 `/` 的条目:按 glob 锚定匹配相对路径整体(如 `**/*.min.js`)。
+//! 匹配语义对齐 .gitignore(经 `ignore` crate 的 `GitignoreBuilder`):
+//! - 不含 `/` 的模式匹配任意深度的同名文件/目录;
+//! - 含 `/` 的模式锚定到匹配根(装配期 = 会话 cwd,即项目 `.latentignore`
+//!   所在目录),与检索子根(grep `path` 参数等)无关;
+//! - `#` 注释、`dir/` 仅目录、`**` 跨段、`!` 反选。
+//!
+//! 与 .gitignore 一致的限制:目录命中忽略后遍历即剪枝,其子项无法用 `!`
+//! 复活;不支持子目录级 `.latentignore`。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// 内置默认忽略表:常见依赖目录、构建产物与工具缓存。
-/// settings `searchIgnore` 未配置时生效;配置后整体覆盖。
-const DEFAULT_PATTERNS: &[&str] = &[
-    // 依赖目录(JS/Python/PHP/Go/iOS)
-    "node_modules",
-    "vendor",
-    "Pods",
-    // 构建产物
-    "dist",
-    "build",
-    "out",
-    "target",
-    "obj",
-    "DerivedData",
-    "coverage",
-    // 语言/工具缓存
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".turbo",
-    ".parcel-cache",
-    ".cache",
-    // 虚拟环境
-    ".venv",
-    "venv",
-    ".tox",
-    // 框架产物
-    ".next",
-    ".nuxt",
-    ".svelte-kit",
-    ".output",
-    // IDE / 构建系统内部目录
-    ".idea",
-    ".vs",
-    ".gradle",
-    ".terraform",
-];
-
-/// 检索忽略列表:编译后的 glob 集合 + 原始条目(供提示词规则回显)。
-/// 克隆廉价(三个检索工具 + 装配层共享同一份)。
-#[derive(Debug, Clone, Default)]
+/// 检索忽略列表:编译后的 gitignore 匹配器 + 正向模式(供提示词规则回显)。
+/// 克隆廉价(检索工具 + 装配层共享同一份)。
+#[derive(Debug, Clone)]
 pub struct SearchIgnore {
-    /// 原始条目(去空白后;供系统提示词规则回显与诊断)
-    patterns: Vec<String>,
-    /// 不含 `/` 的条目:匹配任一路径段
-    components: GlobSet,
-    /// 含 `/` 的条目:锚定匹配相对路径整体(literal_separator,`*` 不跨段)
-    anchored: GlobSet,
+    /// 匹配根(装配期 = 会话 cwd);含 `/` 的模式锚定到此根
+    root: PathBuf,
+    gitignore: Gitignore,
+    /// 正向(非 `!`、非注释)模式原文;系统提示词规则回显用
+    positive: Vec<String>,
 }
 
 impl SearchIgnore {
-    /// 从条目列表编译;非法 glob 返回 Err(配置错误要显式暴露,不静默丢弃)。
-    /// 空白条目跳过;空列表 = 关闭过滤(两集合皆空,matches 恒 false)。
-    pub fn from_patterns<I, S>(patterns: I) -> Result<Self, String>
+    /// 从规则行编译(gitignore 语法;顺序即优先级,后行覆盖先行)。非法行
+    /// 跳过并经 `on_error(行序号, 诊断)` 上报——手工编辑的配置一行写坏
+    /// 不应废掉整个文件,其余行照常生效。
+    pub fn from_patterns<I, S, F>(root: impl Into<PathBuf>, patterns: I, mut on_error: F) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
+        F: FnMut(usize, String),
     {
-        let mut kept: Vec<String> = Vec::new();
-        let mut components = GlobSetBuilder::new();
-        let mut anchored = GlobSetBuilder::new();
-        for pattern in patterns {
-            let pattern = pattern.as_ref().trim();
-            if pattern.is_empty() {
+        let root = root.into();
+        let mut builder = GitignoreBuilder::new(&root);
+        let mut positive: Vec<String> = Vec::new();
+        for (index, line) in patterns.into_iter().enumerate() {
+            let line = line.as_ref();
+            // add_line 自行处理注释/空行/尾随空白与 glob 编译
+            if let Err(error) = builder.add_line(None, line) {
+                on_error(
+                    index,
+                    format!("invalid ignore pattern `{}`: {error}", line.trim_end()),
+                );
                 continue;
             }
-            // strip 尾 `/`:目录条目两种写法等价(`node_modules/` ≈ `node_modules`)
-            let pattern = pattern.trim_end_matches('/');
-            if pattern.is_empty() {
-                continue;
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with('!') {
+                positive.push(trimmed.to_string());
             }
-            let glob = GlobBuilder::new(pattern)
-                .literal_separator(true)
-                .build()
-                .map_err(|e| format!("invalid ignore pattern `{pattern}`: {e}"))?;
-            if pattern.contains('/') {
-                anchored.add(glob);
-            } else {
-                components.add(glob);
-            }
-            kept.push(pattern.to_string());
         }
-        Ok(SearchIgnore {
-            components: components.build().map_err(|e| e.to_string())?,
-            anchored: anchored.build().map_err(|e| e.to_string())?,
-            patterns: kept,
-        })
+        match builder.build() {
+            Ok(gitignore) => SearchIgnore {
+                root,
+                gitignore,
+                positive,
+            },
+            Err(error) => {
+                on_error(usize::MAX, format!("ignore patterns compile failed: {error}"));
+                SearchIgnore {
+                    root,
+                    gitignore: Gitignore::empty(),
+                    positive: Vec::new(),
+                }
+            }
+        }
     }
 
-    /// 内置默认表(`searchIgnore` 未配置时)。
-    pub fn builtin() -> Self {
-        // 静态表不含非法 glob,unwrap 安全
-        Self::from_patterns(DEFAULT_PATTERNS.iter().copied()).expect("builtin patterns valid")
-    }
-
-    /// 未配置任何条目(空列表 = 关闭过滤)。
+    /// 未配置任何规则(关闭过滤)。
     pub fn is_empty(&self) -> bool {
-        self.patterns.is_empty()
+        self.gitignore.is_empty()
     }
 
-    /// 原始条目(供提示词规则回显)。
+    /// 正向模式原文(供系统提示词规则回显;`!` 反选行不回显)。
     pub fn patterns(&self) -> &[String] {
-        &self.patterns
+        &self.positive
     }
 
-    /// 相对搜索根的路径是否命中忽略列表:任一路径段命中组件条目,或
-    /// 整条相对路径命中锚定条目。绝对路径请先 `strip_prefix` 搜索根。
-    pub fn matches(&self, relative: &Path) -> bool {
-        if self.patterns.is_empty() {
-            return false;
-        }
-        for component in relative.components() {
-            let name = component.as_os_str();
-            // `.`/`..` 等特殊段不参与匹配
-            if name == "." || name == ".." || name.is_empty() {
-                continue;
-            }
-            if self.components.is_match(name) {
-                return true;
-            }
-        }
-        let text = relative.to_string_lossy().replace('\\', "/");
-        self.anchored.is_match(text)
+    /// 匹配根。
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// `path` 是否命中忽略列表。`path` 可为匹配根下的绝对路径(内部剥根
+    /// 前缀)或相对匹配根的路径;`is_dir` 决定 `dir/` 仅目录模式是否命中。
+    /// 绝对路径在匹配根之外时,锚定模式不生效、裸名模式仍按路径段匹配。
+    pub fn matches(&self, path: &Path, is_dir: bool) -> bool {
+        matches!(
+            self.gitignore.matched(path, is_dir),
+            ignore::Match::Ignore(_)
+        )
+    }
+}
+
+impl Default for SearchIgnore {
+    fn default() -> Self {
+        Self::from_patterns(PathBuf::new(), Vec::<String>::new(), |_, _| {})
     }
 }
 
@@ -145,70 +111,97 @@ impl SearchIgnore {
 mod tests {
     use super::*;
 
-    fn matches(ignore: &SearchIgnore, path: &str) -> bool {
-        ignore.matches(Path::new(path))
+    fn temp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("latent-si-{name}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 构建辅助:坏行直接 panic(正例不含非法行)。
+    fn build(root: &Path, patterns: &[&str]) -> SearchIgnore {
+        SearchIgnore::from_patterns(root, patterns, |_, error| {
+            panic!("unexpected bad pattern: {error}")
+        })
     }
 
     #[test]
-    fn component_patterns_match_at_any_depth() {
-        let ignore = SearchIgnore::from_patterns(["node_modules", "dist/"]).unwrap();
-        assert!(matches(&ignore, "node_modules"));
-        assert!(matches(&ignore, "node_modules/react/index.js"));
-        assert!(matches(&ignore, "src/node_modules/x.ts"));
-        // 尾 `/` 已剥:目录条目两种写法等价
-        assert!(matches(&ignore, "a/b/dist/c.js"));
-        assert!(!matches(&ignore, "src/a.ts"));
-        assert!(!matches(&ignore, "distribution/x.ts"), "段级完整匹配,非前缀");
+    fn bare_patterns_match_entry_at_any_depth() {
+        let root = temp_root("bare");
+        let ignore = build(&root, &["node_modules", "dist/"]);
+        // 裸名模式命中任意深度的**条目本身**(gitignore 语义);子项是否
+        // 被忽略由消费点对目录条目剪枝保证,模式不匹配子项路径
+        assert!(ignore.matches(&root.join("node_modules"), true));
+        assert!(ignore.matches(&root.join("src/node_modules"), true));
+        assert!(!ignore.matches(&root.join("node_modules/react/index.js"), false));
+        // 尾 `/` = 仅目录:目录命中,同名文件不命中
+        assert!(ignore.matches(&root.join("a/b/dist"), true));
+        assert!(!ignore.matches(&root.join("a/b/dist"), false), "`dist/` 仅目录");
+        assert!(!ignore.matches(&root.join("src/a.ts"), false));
+        assert!(!ignore.matches(&root.join("distribution"), true), "段级完整匹配,非前缀");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn anchored_patterns_match_relative_path() {
-        let ignore = SearchIgnore::from_patterns(["**/*.min.js", "src/generated/**"]).unwrap();
-        assert!(matches(&ignore, "dist/bundle.min.js"));
-        assert!(matches(&ignore, "src/generated/tables.rs"));
-        assert!(!matches(&ignore, "src/app.js"));
-        assert!(!matches(&ignore, "other/generated/x.rs"), "锚定到搜索根");
+    fn anchored_patterns_resolve_against_root() {
+        let root = temp_root("anchored");
+        let ignore = build(&root, &["**/*.min.js", "src/generated/**", "/top-only.txt"]);
+        assert!(ignore.matches(&root.join("dist/bundle.min.js"), false));
+        assert!(ignore.matches(&root.join("src/generated/tables.rs"), false));
+        assert!(!ignore.matches(&root.join("src/app.js"), false));
+        assert!(!ignore.matches(&root.join("other/generated/x.rs"), false), "锚定到匹配根");
+        // 前导 `/` 只匹配根自身层级
+        assert!(ignore.matches(&root.join("top-only.txt"), false));
+        assert!(!ignore.matches(&root.join("sub/top-only.txt"), false));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn empty_list_disables_filtering() {
-        let ignore = SearchIgnore::from_patterns(Vec::<String>::new()).unwrap();
+    fn negation_overrides_earlier_rules() {
+        let root = temp_root("negation");
+        // last-match-wins:`!` 反选更早的规则
+        let ignore = build(&root, &["*.log", "!keep.log"]);
+        assert!(ignore.matches(&root.join("a.log"), false));
+        assert!(!ignore.matches(&root.join("keep.log"), false), "`!` 反选生效");
+        // 拼接语义:后面的源(项目)反选前面的源(全局)
+        let ignore = build(&root, &["target/", "!target/"]);
+        assert!(!ignore.matches(&root.join("target/a"), true));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn comments_and_blank_lines_are_skipped() {
+        let root = temp_root("comments");
+        let ignore = build(&root, &["# 注释行", "", "   ", "build"]);
+        assert_eq!(ignore.patterns(), ["build"]);
+        assert!(!ignore.is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn empty_patterns_disable_filtering() {
+        let root = temp_root("empty");
+        let ignore = build(&root, &[]);
         assert!(ignore.is_empty());
-        assert!(!matches(&ignore, "node_modules/x.js"));
-        // 空白条目 = 未配置
-        let ignore = SearchIgnore::from_patterns(["  ", ""]).unwrap();
-        assert!(ignore.is_empty());
+        assert!(ignore.patterns().is_empty());
+        assert!(!ignore.matches(&root.join("node_modules/x.js"), false));
+        // Default 同样是"不过滤"
+        assert!(SearchIgnore::default().is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn invalid_glob_is_an_error() {
-        let err = SearchIgnore::from_patterns(["a[.ts"]).unwrap_err();
-        assert!(err.contains("invalid ignore pattern"), "{err}");
-    }
-
-    #[test]
-    fn builtin_covers_common_noise() {
-        let ignore = SearchIgnore::builtin();
-        for path in [
-            "node_modules/react/index.js",
-            "dist/bundle.js",
-            "target/debug/build.rs",
-            "src/__pycache__/mod.cpython.pyc",
-            ".venv/lib/python.py",
-            ".next/server/page.js",
-        ] {
-            assert!(matches(&ignore, path), "应忽略 {path}");
-        }
-        assert!(!matches(&ignore, "src/main.rs"));
-        assert!(!matches(&ignore, "Cargo.toml"));
-        assert!(!matches(&ignore, ".github/workflows/ci.yml"));
-    }
-
-    #[test]
-    fn traversal_segments_do_not_match() {
-        // 相对路径里的 `.`/`..` 段不参与匹配(不会因 "." 命中 ".idea" 类条目)
-        let ignore = SearchIgnore::from_patterns([".idea"]).unwrap();
-        assert!(matches(&ignore, "./.idea/x"));
-        assert!(!matches(&ignore, "./idea/x"));
+    fn invalid_pattern_is_reported_and_skipped() {
+        let root = temp_root("invalid");
+        let errors = std::sync::Mutex::new(Vec::new());
+        let ignore = SearchIgnore::from_patterns(&root, ["a\\", "dist"], |index, error| {
+            errors.lock().unwrap().push((index, error));
+        });
+        // 坏行上报,其余行照常生效(条目本身命中)
+        assert!(ignore.matches(&root.join("dist"), true));
+        let errors = errors.into_inner().unwrap();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].0, 0);
+        assert!(errors[0].1.contains("invalid ignore pattern"), "{}", errors[0].1);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

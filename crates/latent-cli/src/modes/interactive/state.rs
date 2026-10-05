@@ -382,7 +382,7 @@ impl InteractiveState {
             slash_popup: CommandPopup::new(crate::modes::slash::popup_entries()),
             mention_popup: FilePopup::default(),
             mention_loaded: false,
-            mention_ignore: std::sync::Arc::new(latent_tools::SearchIgnore::builtin()),
+            mention_ignore: std::sync::Arc::new(latent_tools::SearchIgnore::default()),
             status: Status::Idle,
             spin: 0,
             active_agent: None,

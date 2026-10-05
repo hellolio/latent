@@ -1349,16 +1349,22 @@ fn mention_fixture_dir(tag: &str) -> std::path::PathBuf {
 }
 
 /// 共享前奏:内存会话 + 已注入 cwd 的状态(cwd 须在按键前注入,
-/// 首次激活时按需采集候选)。
+/// 首次激活时按需采集候选)。mention_ignore 注入 `.latentignore` 规则
+/// (生产中由装配层 load_search_ignore 以 cwd 为匹配根提供)。
 async fn mention_state_at(dir: &std::path::Path) -> (crate::assembly::BuiltSession, InteractiveState) {
     let built = built_memory_session().await;
     let mut state = test_state();
     state.cwd = dir.to_path_buf();
+    state.mention_ignore = std::sync::Arc::new(latent_tools::SearchIgnore::from_patterns(
+        dir,
+        ["node_modules/"],
+        |_, error| panic!("{error}"),
+    ));
     (built, state)
 }
 
 #[tokio::test]
-async fn typing_at_opens_file_popup_filtered_by_search_ignore() {
+async fn typing_at_opens_file_popup_filtered_by_latentignore() {
     let dir = mention_fixture_dir("open");
     let (built, mut state) = mention_state_at(&dir).await;
     let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
@@ -1373,7 +1379,7 @@ async fn typing_at_opens_file_popup_filtered_by_search_ignore() {
         Some("README.md")
     );
 
-    // 裸 @ 列出全部候选:node_modules 被检索忽略表剪枝,src 目录在列
+    // 裸 @ 列出全部候选:node_modules 被 .latentignore 规则剪枝,src 目录在列
     let (built, mut state) = mention_state_at(&dir).await;
     let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());

@@ -1,4 +1,5 @@
-//! grep 工具(05 文档 §7):内容搜索,尊重 .gitignore,匹配行截到 500 字符。
+//! grep 工具(05 文档 §7):内容搜索,尊重 .gitignore 与 `.latentignore`,
+//! 匹配行截到 500 字符。
 //!
 //! pi 用外部 ripgrep 二进制;本实现用 `ignore` crate 原生遍历(同样默认
 //! require_git:仅 git 仓库内应用 .gitignore),语义与 pi 一致。
@@ -29,11 +30,11 @@ pub struct GrepTool {
 
 /// 工厂。
 pub fn create_grep_tool(cwd: &Path) -> Arc<dyn Tool> {
-    create_grep_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::builtin()))
+    create_grep_tool_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::default()))
 }
 
 /// 工厂 + 输出上限注入(装配层统一派生值,truncate 模块文档)+ 检索忽略列表
-/// (search_ignore 模块;settings `searchIgnore` 配置,未配置 = 内置默认表)。
+/// (search_ignore 模块;`.latentignore` 规则,装配层读取)。
 pub fn create_grep_tool_with_limits(
     cwd: &Path,
     limits: OutputLimits,
@@ -41,10 +42,10 @@ pub fn create_grep_tool_with_limits(
 ) -> Arc<dyn Tool> {
     let description = format!(
         "Search file contents for a pattern. Returns matching lines with file paths and line \
-         numbers. Respects .gitignore. Output is truncated to {DEFAULT_LIMIT} matches or {} \
-         bytes (whichever is hit first). Long lines are truncated to {GREP_MAX_LINE_LENGTH} \
-         chars. Results are clean: .gitignore is respected, and dependency/build directories \
-         (node_modules, dist, target, ...) are excluded regardless. Use grep to locate code \
+         numbers. Respects .gitignore and .latentignore rules (project root and \
+         ~/.latent/.latentignore, gitignore syntax); ignored directories are not searched. \
+         Output is truncated to {DEFAULT_LIMIT} matches or {} bytes (whichever is hit first). \
+         Long lines are truncated to {GREP_MAX_LINE_LENGTH} chars. Use grep to locate code \
          first, then read only the matched regions; searching here is cheaper and quieter \
          than listing or reading directories.",
         limits.effective_max_bytes()
@@ -149,16 +150,19 @@ fn build_walker(
         .hidden(false)
         .require_git(false)
         .filter_entry(|entry| entry.file_name() != ".git");
-    // 检索忽略列表(search_ignore 模块):相对搜索根判定,命中即剪枝
+    // 检索忽略列表(.latentignore 规则):命中目录直接剪枝(不进入遍历);
+    // 深度 0(搜索根本身)不参与过滤——显式指定的搜索根永不剪枝
     if !ignore.is_empty() {
         let ignore = ignore.clone();
-        let root = search_root.to_path_buf();
         walker.filter_entry(move |entry| {
             if entry.file_name() == ".git" {
                 return false;
             }
-            let relative = entry.path().strip_prefix(&root).unwrap_or(entry.path());
-            !ignore.matches(relative)
+            if entry.depth() == 0 {
+                return true;
+            }
+            let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+            !ignore.matches(entry.path(), is_dir)
         });
     }
     if metadata.is_file() {
@@ -358,7 +362,12 @@ impl Tool for GrepTool {
 
 #[cfg(test)]
 fn test_tool(cwd: PathBuf) -> GrepTool {
-    test_tool_with_ignore(cwd, Arc::new(SearchIgnore::builtin()))
+    GrepTool {
+        cwd,
+        limits: OutputLimits::default(),
+        ignore: Arc::new(SearchIgnore::default()),
+        description: String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +378,11 @@ fn test_tool_with_ignore(cwd: PathBuf, ignore: Arc<SearchIgnore>) -> GrepTool {
         ignore,
         description: String::new(),
     }
+}
+
+#[cfg(test)]
+fn ignore_for(root: &Path, patterns: &[&str]) -> Arc<SearchIgnore> {
+    Arc::new(SearchIgnore::from_patterns(root, patterns, |_, error| panic!("{error}")))
 }
 
 #[cfg(test)]
@@ -511,9 +525,9 @@ mod tests {
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
-    // ---- 检索忽略列表(search_ignore):无 .gitignore 也排除依赖/构建目录 ----
+    // ---- 检索忽略列表(.latentignore):无 .gitignore 也按规则排除 ----
     #[tokio::test]
-    async fn ignores_generated_dirs_even_without_gitignore() {
+    async fn latentignore_excludes_dirs_and_negation_restores() {
         let dir = std::env::temp_dir().join(format!("latent-grep-ignore-{}", uuid::Uuid::now_v7()));
         tokio::fs::create_dir_all(dir.join("src")).await.unwrap();
         tokio::fs::create_dir_all(dir.join("dist")).await.unwrap();
@@ -521,19 +535,47 @@ mod tests {
         tokio::fs::write(dir.join("dist/b.js"), "alpha in build\n")
             .await
             .unwrap();
-        // 无 .gitignore:dist 仍应被内置忽略表排除
-        let tool = test_tool(dir.clone());
+        // 无 .gitignore:dist 按 .latentignore 规则排除
+        let tool = test_tool_with_ignore(dir.clone(), ignore_for(&dir, &["dist"]));
         let output = exec(&tool, json!({"pattern": "alpha"})).await.unwrap();
         assert!(output.output.contains("src/a.ts"));
         assert!(
             !output.output.contains("dist"),
-            "内置忽略表应排除 dist: {}",
+            ".latentignore 应排除 dist: {}",
             output.output
         );
-        // 空忽略列表 = 关闭过滤,dist 恢复可见
-        let tool = test_tool_with_ignore(dir.clone(), Arc::new(SearchIgnore::from_patterns(Vec::<String>::new()).unwrap()));
+        // 空规则 = 关闭过滤,dist 恢复可见
+        let tool = test_tool_with_ignore(dir.clone(), Arc::new(SearchIgnore::default()));
         let output = exec(&tool, json!({"pattern": "alpha"})).await.unwrap();
         assert!(output.output.contains("dist/b.js"));
+        // `!` 反选恢复可见
+        let tool = test_tool_with_ignore(dir.clone(), ignore_for(&dir, &["dist", "!dist/"]));
+        let output = exec(&tool, json!({"pattern": "alpha"})).await.unwrap();
+        assert!(output.output.contains("dist/b.js"), "{}", output.output);
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn latentignore_root_anchoring_survives_subdir_search() {
+        // 规则锚定匹配根(会话 cwd),与搜索子根无关:搜 src/ 时
+        // `src/generated/**` 仍按 cwd 相对路径命中
+        let dir = std::env::temp_dir().join(format!("latent-grep-anchor-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(dir.join("src/generated")).await.unwrap();
+        tokio::fs::write(dir.join("src/a.ts"), "alpha here\n").await.unwrap();
+        tokio::fs::write(dir.join("src/generated/g.ts"), "alpha in gen\n")
+            .await
+            .unwrap();
+        let tool = test_tool_with_ignore(dir.clone(), ignore_for(&dir, &["src/generated/**"]));
+        // 子根搜索的显示路径相对子根("a.ts"),无 "src/" 前缀
+        let output = exec(&tool, json!({"pattern": "alpha", "path": "src"}))
+            .await
+            .unwrap();
+        assert!(output.output.contains("a.ts:1: alpha here"), "{}", output.output);
+        assert!(
+            !output.output.contains("generated"),
+            "锚定 cwd 的规则在子根搜索中仍生效: {}",
+            output.output
+        );
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 

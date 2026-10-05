@@ -92,13 +92,13 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/bash.rs` | bash/powershell 共用工厂：流式输出、超时/中止杀进程树（Unix `process_group(0)` + kill(-pgid)，含孙进程）、默认超时（120s，`ShellTimeoutPolicy`）与自动转后台（生效超时 > 阈值 60s 时结算 tool result、watcher 托管进程、完成经 `BackgroundNotifier` follow_up 唤醒）、LATENT_* 环境注入（不覆盖已有变量）、commandPrefix 前置、`ShellSpawnHook` 改写/拒绝、沙箱拒绝事后提示；**工具结果字节级保真不净化** |
 | `src/edit.rs` | 多点精确替换（每个 oldText 在原文件中唯一、互不重叠），BOM/行尾保持 |
 | `src/write.rs` | 整文件写入，自动创建父目录 |
-| `src/grep.rs` | 内容搜索：`ignore` crate 原生遍历（无外部 rg 依赖）、尊重 .gitignore、匹配行截 500 字符 |
-| `src/find.rs` | glob 文件查找（含 `/` 的 pattern 自动锚定搜索根） |
-| `src/ls.rs` | 目录列表（目录加 `/` 后缀、含 dotfiles） |
+| `src/grep.rs` | 内容搜索：`ignore` crate 原生遍历（无外部 rg 依赖）、尊重 .gitignore 与 .latentignore、匹配行截 500 字符 |
+| `src/find.rs` | glob 文件查找（含 `/` 的 pattern 自动锚定搜索根；尊重 .gitignore 与 .latentignore） |
+| `src/ls.rs` | 目录列表（目录加 `/` 后缀、含 dotfiles；`.git` 恒排除 + `.latentignore` 过滤） |
 | `src/powershell.rs` | bash 的 Windows 等价物，4 行 re-export 同工厂 |
 | `src/truncate.rs` | 统一双限截断（默认 2000 行 / 50KiB，先到为准，永不返回半行）：`truncate_head`（read 保留头）/ `truncate_tail`（bash 保留尾）；工具自身输出预算 = agent 上限 − 2000 余量 |
 | `src/output_accumulator.rs` | bash 流式聚合：增量 UTF-8 解码、超限完整输出落临时文件（`fullOutputPath`） |
-| `src/search_ignore.rs` | 检索忽略列表（grep/find/ls 共享）：组件段/锚定 glob 双语义匹配、命中目录剪枝不进入遍历；settings `searchIgnore` 配置（未配置 = 内置默认表，空数组 = 关闭） |
+| `src/search_ignore.rs` | 检索忽略列表（grep/find/ls/@弹窗共享）：`.latentignore`（gitignore 语法）经 ignore crate `GitignoreBuilder` 编译，全局 `~/.latent/.latentignore` + 项目 `.latentignore` 拼接、last-match-wins（项目可 `!` 反选）；锚定模式相对会话 cwd、命中目录剪枝不进入遍历；坏行诊断跳过，无规则 = 关闭过滤 |
 | `src/file_listing.rs` | 文件清单采集（TUI `@` 文件弹窗数据源）：ignore crate 遍历（对齐 pi `--hidden --exclude .git`）+ searchIgnore 剪枝；按深度→目录优先→字母排序后截断（默认 2000 条） |
 | `src/sanitize.rs` | ANSI/控制字符净化——**只用于 `!` 裸命令路径**，模型工具结果不做净化 |
 
@@ -192,14 +192,15 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `harness.py` | 驱动核心 `LatentApp`：隔离临时 HOME + pexpect 真 PTY 启动 latent + pyte 解析屏幕；API：`wait_ready`/`sendline`/`send_key`/`expect_text`（正则、忽略空白）/`expect_absent`/`visible_text`/`transcript`/`wait_for_requests`/`quit`；`finally` 必须 `close()` |
 | `mock_llm.py` | 本地 mock LLM：伪装 anthropic-messages SSE 端点，按场景 JSON 逐 turn 返回（`{"text":…}` / `{"tool_calls":[…]}` / `{"error":…, "status":500}` 三种 turn；`delay_ms` 响应前延迟、`chunk_delay_ms` delta 间逐块延迟模拟慢速流式），记录请求体供反向断言 |
 | `conftest.py` / `pytest.ini` / `requirements.txt` | sys.path 注入 / DeprecationWarning 过滤 / pexpect+pyte+pytest（装全局环境，不建 venv） |
-| `test_*.py`（30 个场景） | startup 横幅、ask_and_reply 问答、tool_roundtrip 工具闭环、abort/abort_then_continue、ctrl_c 双击退出、steering 注入、continue 恢复、provider_error 重试、session_half_line 崩溃恢复、bash_tool 截断、bash_sanitize 净化对齐、parallel_tools 源序、tool_validation 非法参数、ctrl_o 折叠、write_edit 落盘、compact 空对话回归、new_session、plan_mode 审批流、theme、output_display CJK 回归、slash_commands、shift_enter 多行输入、session_resume（-r/-l//session 切换）、fullscreen（钉底/翻页/视口冻结/模式切换）、fullscreen_stream_scroll（流式进行中滚动，正在输出的内容随滚动移动）、file_mention（@ 文件弹窗与纯文本提交）、quit |
+| `test_*.py`（31 个场景） | startup 横幅、ask_and_reply 问答、tool_roundtrip 工具闭环、abort/abort_then_continue、ctrl_c 双击退出、steering 注入、continue 恢复、provider_error 重试、session_half_line 崩溃恢复、bash_tool 截断、bash_sanitize 净化对齐、parallel_tools 源序、tool_validation 非法参数、ctrl_o 折叠、write_edit 落盘、compact 空对话回归、new_session、plan_mode 审批流、theme、output_display CJK 回归、slash_commands、shift_enter 多行输入、session_resume（-r/-l//session 切换）、fullscreen（钉底/翻页/视口冻结/模式切换）、fullscreen_stream_scroll（流式进行中滚动，正在输出的内容随滚动移动）、file_mention（@ 文件弹窗与纯文本提交）、latentignore（.latentignore 项目/全局规则过滤 @ 弹窗候选 + `!` 反选恢复）、quit |
 | `scenarios/*.json` | 24 个 mock 响应脚本（格式见 `scenarios/README.md`） |
 
 ## 配置文件体系
 
 | 文件 | 位置（项目优先，逐字段覆盖全局） | 内容 |
 |---|---|---|
-| settings.json | `.latent/settings.json` / `~/.latent/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`searchIgnore`（检索忽略列表：grep/find/ls 过滤 + 系统提示词规则；未配置 = 内置默认表 node_modules/dist/target 等，空数组 = 关闭过滤，配置 = 整体覆盖）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
+| settings.json | `.latent/settings.json` / `~/.latent/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
+| .latentignore | 项目 `<cwd>/.latentignore` / 全局 `~/.latent/.latentignore` | AI 检索忽略规则（gitignore 语法，格式同 .gitignore）：grep/find/ls/@文件弹窗过滤 + 系统提示词规则。全局在前、项目在后拼接，gitignore 语义 last-match-wins——项目可用 `!` 反选全局规则。文件缺失静默跳过，坏行诊断后跳过；无任何规则 = 不做额外过滤（`.git` 由工具层恒排除，遍历仍自带 .gitignore 感知）。启动时读一次，中途修改不生效；不支持子目录级 `.latentignore` |
 | models.json | `.latent/models.json` / `~/.latent/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：LATENT_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载 |
 | web-search.json | `.latent/web-search.json` / `~/.latent/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
 | skills | `.latent/skills/<name>/SKILL.md` / `~/.latent/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |

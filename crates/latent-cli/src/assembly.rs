@@ -76,10 +76,6 @@ struct SettingsFile {
     /// **空数组 `[]` = 显式不激活任何工具**
     #[serde(rename = "tools", alias = "active_tools", default)]
     tools: Option<Vec<String>>,
-    /// 检索忽略列表(`searchIgnore`):grep/find/ls 过滤 + 系统提示词规则;
-    /// 未配置 = 内置默认表;**空数组 `[]` = 关闭过滤**
-    #[serde(rename = "searchIgnore", alias = "search_ignore", default)]
-    search_ignore: Option<Vec<String>>,
     /// 超长 tool result 进转录的字符上限(头尾裁剪);未配置 = 默认 20000
     #[serde(rename = "toolResultMaxChars", alias = "tool_result_max_chars", default)]
     tool_result_max_chars: Option<usize>,
@@ -232,27 +228,46 @@ fn active_tool_names_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<Vec
     )
 }
 
-/// 检索忽略列表(settings `searchIgnore`):项目 settings 优先于全局,首个配置
-/// 生效;未配置 = 内置默认表(node_modules/dist/target 等);条目非法 glob =
-/// 诊断 + 回退内置默认表(配置错误显式暴露,不阻断会话)。
+/// 检索忽略规则(`.latentignore`,gitignore 语法):全局 `~/.latent/.latentignore`
+/// 在前、项目 `<cwd>/.latentignore` 在后拼接,gitignore 语义 last-match-wins
+/// ——项目可用 `!` 反选全局规则。文件缺失静默跳过;非法行诊断 + 跳过该行,
+/// 不阻断会话。启动时读一次,会话中途修改不生效。
 pub fn load_search_ignore() -> latent_tools::SearchIgnore {
     let cwd = std::env::current_dir().ok();
     let home = dirs_home();
     search_ignore_from(cwd.as_deref(), home.as_deref())
 }
 
-/// 纯函数面(可测)。
+/// 纯函数面(可测):拼接 `.latentignore` 规则行(全局在前、项目在后)后
+/// 编译;匹配根 = cwd(锚定模式相对项目根解析)。
 fn search_ignore_from(cwd: Option<&Path>, home: Option<&Path>) -> latent_tools::SearchIgnore {
-    match read_settings_files(cwd, home)
-        .into_iter()
-        .find_map(|settings| settings.search_ignore)
-    {
-        Some(patterns) => latent_tools::SearchIgnore::from_patterns(patterns).unwrap_or_else(|error| {
-            eprintln!("[latent] settings `searchIgnore` 解析失败,回退内置默认表: {error}");
-            latent_tools::SearchIgnore::builtin()
-        }),
-        None => latent_tools::SearchIgnore::builtin(),
+    let root = cwd.map(Path::to_path_buf).unwrap_or_default();
+    let mut sources: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = home {
+        sources.push(home.join(".latent/.latentignore"));
     }
+    if let Some(cwd) = cwd {
+        sources.push(cwd.join(".latentignore"));
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut source_starts: Vec<(usize, String)> = Vec::new();
+    for path in sources {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        source_starts.push((lines.len(), path.display().to_string()));
+        // git 同款:剥首行 BOM
+        lines.extend(text.trim_start_matches('\u{feff}').lines().map(str::to_string));
+    }
+    latent_tools::SearchIgnore::from_patterns(root, &lines, |index, error| {
+        let source = source_starts
+            .iter()
+            .rev()
+            .find(|(start, _)| *start <= index)
+            .map(|(_, label)| label.as_str())
+            .unwrap_or(".latentignore");
+        eprintln!("[latent] {source}: {error}");
+    })
 }
 
 /// 校验并解析激活工具集:配置的名字必须存在于候选工具(含扩展工具)中,
@@ -467,8 +482,8 @@ pub struct BuildOptions {
     /// `tools` 键解析成此字段 —— build_session 不直接读用户 settings,测试
     /// 不依赖本机配置。
     pub active_tools: Option<Vec<String>>,
-    /// 检索忽略列表(grep/find/ls 过滤 + 系统提示词规则;settings `searchIgnore`,
-    /// main 解析;未配置 = 内置默认表)
+    /// 检索忽略规则(`.latentignore`):grep/find/ls 过滤 + 系统提示词规则
+    /// (main 解析;无规则 = 不过滤)
     pub search_ignore: latent_tools::SearchIgnore,
     /// 超长 tool result 字符上限:None = 默认 20000;Some(0) = 不裁剪。
     pub tool_result_max_chars: Option<usize>,
@@ -564,8 +579,8 @@ pub struct SessionSettings {
     pub context_snapshot: bool,
     /// settings `tools`:None = 全部激活;Some(空) = 不激活任何工具
     pub active_tools: Option<Vec<String>>,
-    /// settings `searchIgnore`:grep/find/ls 检索忽略列表 + 系统提示词规则
-    /// (未配置 = 内置默认表)
+    /// 检索忽略规则(`.latentignore`):grep/find/ls 检索忽略列表 + 系统提示词
+    /// 规则(无规则 = 不过滤)
     pub search_ignore: latent_tools::SearchIgnore,
     /// settings `toolResultMaxChars`:超长 tool result 进转录的字符上限
     /// (头尾裁剪);None = 默认 20000,0 = 不裁剪
@@ -628,7 +643,7 @@ impl Default for SessionSettings {
         SessionSettings {
             context_snapshot: false,
             active_tools: None,
-            search_ignore: latent_tools::SearchIgnore::builtin(),
+            search_ignore: latent_tools::SearchIgnore::default(),
             tool_result_max_chars: None,
             block_images: false,
             compaction: CompactionConfig::default(),
@@ -655,16 +670,16 @@ fn parse_headless_approval(name: Option<&String>) -> HeadlessApproval {
     }
 }
 
-/// 检索忽略表 → 系统提示词规则(空列表 = 关闭过滤 = 无规则)。主会话检索多经
-/// bash(rg/find/ls),工具层过滤只覆盖只读工具集;这里把同一份忽略表同步给
+/// 检索忽略规则 → 系统提示词规则(无规则 = 关闭过滤 = 不注入)。主会话检索多经
+/// bash(rg/find/ls),工具层过滤只覆盖只读工具集;这里把同一份忽略规则同步给
 /// 模型,约束任意路径的检索行为。
 fn search_ignore_rule(ignore: &latent_tools::SearchIgnore) -> Option<String> {
     if ignore.is_empty() {
         return None;
     }
     Some(format!(
-        "When searching or listing files (find/grep/rg/ls), never descend into dependency or \
-         build-output paths: {}. Exclude them from every search unless the user asks \
+        "When searching or listing files (find/grep/rg/ls), never descend into paths matched \
+         by .latentignore rules: {}. Exclude them from every search unless the user asks \
          explicitly.",
         ignore.patterns().join(", ")
     ))
@@ -1250,7 +1265,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
                 // 用户外置提示词(.latent/system-prompt.md,项目→全局):块外内容
                 // 替换身份句(preamble),<rules> 标记块内容追加进 <rules> 节;
                 // <env>/<tools> 等动态节仍自动注入。装配期读一次,会话中途
-                // 修改不生效。检索忽略规则拼在用户规则之后(同一份 searchIgnore)
+                // 修改不生效。检索忽略规则(.latentignore)拼在用户规则之后
                 custom_prompt: prompt_override.0,
                 custom_rules: merge_rules(prompt_override.1, search_ignore_rule(&search_ignore)),
                 ..Default::default()
@@ -2090,52 +2105,62 @@ mod tests {
         assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Plan);
     }
 
-    // ---- 检索忽略列表(settings `searchIgnore`) ----
+    // ---- 检索忽略列表(.latentignore,gitignore 语法) ----
 
     #[test]
-    fn search_ignore_unset_yields_builtin_and_project_wins() {
-        let project = TempDir::new("si_unset");
-        // 未配置 = 内置默认表(含 node_modules)
-        let ignore = search_ignore_from(Some(&project.0), None);
-        assert!(
-            ignore.patterns().iter().any(|p| p == "node_modules"),
-            "未配置 = 内置默认表"
-        );
-        // 空数组 = 显式关闭过滤
-        project.write_settings(r#"{"searchIgnore": []}"#);
-        assert!(search_ignore_from(Some(&project.0), None).is_empty());
-        // 自定义列表整体覆盖默认表;尾 `/` 剥离
-        project.write_settings(r#"{"searchIgnore": ["generated", "node_modules/"]}"#);
-        let ignore = search_ignore_from(Some(&project.0), None);
+    fn latentignore_reads_global_then_project_and_negates() {
+        let project = TempDir::new("li_proj");
+        let global = TempDir::new("li_global");
+        // 无任何文件 = 无规则(关闭过滤)
+        assert!(search_ignore_from(Some(&project.0), Some(&global.0)).is_empty());
+        // 只全局:规则生效,匹配根 = 项目 cwd
+        global.write_file(".latent/.latentignore", "vendor/\n");
+        let ignore = search_ignore_from(Some(&project.0), Some(&global.0));
+        assert!(ignore.matches(&project.0.join("vendor"), true));
+        assert!(!ignore.matches(&project.0.join("src/a.ts"), false));
         assert_eq!(
             ignore.patterns().iter().map(String::as_str).collect::<Vec<_>>(),
-            vec!["generated", "node_modules"]
+            vec!["vendor/"]
         );
-        // 项目优先:项目配置生效,未配置时回退全局
-        let global = TempDir::new("si_global");
-        global.write_settings(r#"{"searchIgnore": ["vendor"]}"#);
+        // 项目 + 全局拼接:项目行在后,`!` 反选全局规则
+        project.write_file(".latentignore", "generated/\n!vendor/\n");
         let ignore = search_ignore_from(Some(&project.0), Some(&global.0));
-        assert_eq!(ignore.patterns().first().map(String::as_str), Some("generated"));
-        let ignore = search_ignore_from(Some(&global.0), None);
-        assert_eq!(ignore.patterns().iter().map(String::as_str).collect::<Vec<_>>(), vec!["vendor"]);
+        assert!(ignore.matches(&project.0.join("generated"), true));
+        assert!(
+            !ignore.matches(&project.0.join("vendor"), true),
+            "项目 `!` 反选全局 vendor/"
+        );
+        // 正向回显只含非 `!` 行,顺序 = 全局在前项目在后
+        assert_eq!(
+            ignore.patterns().iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["vendor/", "generated/"]
+        );
     }
 
     #[test]
-    fn search_ignore_invalid_pattern_falls_back_to_builtin() {
-        let project = TempDir::new("si_bad");
-        project.write_settings(r#"{"searchIgnore": ["a[.ts"]}"#);
-        // 非法 glob 打诊断回退内置默认(配置错误显式暴露,不阻断会话)
+    fn latentignore_invalid_line_is_skipped_and_rest_works() {
+        let project = TempDir::new("li_bad");
+        // "a\" 悬空转义 = 非法 glob;坏行诊断跳过,其余行照常生效
+        project.write_file(".latentignore", "a\\\nnode_modules\n");
         let ignore = search_ignore_from(Some(&project.0), None);
-        assert!(ignore.patterns().iter().any(|p| p == "node_modules"));
+        assert!(ignore.matches(&project.0.join("node_modules"), true));
+        assert_eq!(
+            ignore.patterns().iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["node_modules"]
+        );
     }
 
     #[test]
     fn search_ignore_rule_merges_after_user_rules() {
-        // 空列表 = 关闭过滤 = 无规则
-        let empty = latent_tools::SearchIgnore::from_patterns(Vec::<String>::new()).unwrap();
+        // 无规则 = 不注入
+        let empty = latent_tools::SearchIgnore::default();
         assert_eq!(search_ignore_rule(&empty), None);
-        // 有列表 = 一条规则,条目回显其中
-        let ignore = latent_tools::SearchIgnore::from_patterns(["node_modules", "dist"]).unwrap();
+        // 有规则 = 一条规则,正向条目回显其中
+        let ignore = latent_tools::SearchIgnore::from_patterns(
+            std::path::PathBuf::new(),
+            ["node_modules", "dist"],
+            |_, _| {},
+        );
         let rule = search_ignore_rule(&ignore).unwrap();
         assert!(rule.contains("node_modules, dist"), "{rule}");
         // 用户外置规则在前,装配级规则在后

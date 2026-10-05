@@ -122,8 +122,9 @@ pub fn default_tools_with_shell_and_limits(
 }
 
 /// 只读工具列表(read/grep/find/ls,pi 的 createReadOnlyTools)。
+/// 便捷工厂不带检索忽略规则(`.latentignore` 经 `read_only_tools_with_limits` 注入)。
 pub fn read_only_tools(cwd: &Path) -> Vec<Arc<dyn Tool>> {
-    read_only_tools_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::builtin()))
+    read_only_tools_with_limits(cwd, OutputLimits::default(), Arc::new(SearchIgnore::default()))
 }
 
 /// 只读工具列表 + 输出上限注入 + 检索忽略列表(装配层统一派生值)。
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn all_tools_registry_has_eight_tools() {
         let mut registry = ToolRegistry::default();
-        for tool in all_tools(Path::new("."), Arc::new(SearchIgnore::builtin())) {
+        for tool in all_tools(Path::new("."), Arc::new(SearchIgnore::default())) {
             registry.register(tool);
         }
         for name in [
@@ -224,7 +225,7 @@ mod shell_validation_tests {
     /// jsonschema 编译——错误信息以 "invalid tool schema" 开头即 compile 失败。
     #[test]
     fn all_builtin_tool_schemas_pass_jsonschema() {
-        for tool in all_tools(Path::new("."), Arc::new(SearchIgnore::builtin())) {
+        for tool in all_tools(Path::new("."), Arc::new(SearchIgnore::default())) {
             let schema = tool.schema();
             let empty = serde_json::json!({});
             let outcome = latent_agent::validate_arguments(&schema, &empty);

@@ -27,6 +27,8 @@ def make_workdir() -> str:
         f.write("fn main() {}")
     with open(f"{workdir}/node_modules/x.js", "w", encoding="utf-8") as f:
         f.write("noise")
+    with open(f"{workdir}/.latentignore", "w", encoding="utf-8") as f:
+        f.write("node_modules/\n")
     return workdir
 
 
@@ -71,7 +73,7 @@ def test_at_popup_select_and_submit_keeps_mention_as_plain_text():
         app.type_text("@")
         app.expect_visible("README.md")
         app.expect_visible("src/")
-        # node_modules 被检索忽略表剪枝,不出现在候选里
+        # node_modules 被 .latentignore 规则剪枝,不出现在候选里
         time.sleep(0.3)
         assert "node_modules" not in app.visible_text()
 
