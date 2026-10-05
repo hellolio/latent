@@ -383,7 +383,7 @@ fn compact_error_text(label: &str, text: &str) -> String {
 /// 全部 provider 不可用时的兜底指引(gemini-search.ts:815-824 的 latent 改写)。
 pub fn no_provider_guidance() -> String {
     "No search provider available. Either:\n  \
-     1. Set braveApiKey, tavilyApiKey, or exaApiKey in web-search.json (~/.latent/web-search.json or .latent/web-search.json)\n  \
+     1. Set braveApiKey, tavilyApiKey, or exaApiKey in web-search.json ($LATENT_HOME/web-search.json, default ~/.config/latent, or .latent/web-search.json)\n  \
      2. Set BRAVE_API_KEY, TAVILY_API_KEY, or EXA_API_KEY environment variables\n  \
      3. Set searxngBaseUrl (or SEARXNG_BASE_URL) to a self-hosted SearXNG instance\n  \
      4. Nothing to configure: the auto chain falls back to free DuckDuckGo HTML search"

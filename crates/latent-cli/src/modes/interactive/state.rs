@@ -128,7 +128,7 @@ pub enum ModelFormStep {
     ModelId,
 }
 
-/// 配置写回目标(项目 `.latent/models.json` 或全局 `~/.latent/models.json`)。
+/// 配置写回目标(项目 `.latent/models.json` 或全局数据目录 `models.json`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelFormTarget {
     Project,

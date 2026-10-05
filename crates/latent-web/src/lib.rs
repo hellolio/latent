@@ -31,10 +31,14 @@ pub struct WebRuntime {
 }
 
 impl WebRuntime {
-    pub fn load(project_dir: Option<&std::path::Path>, home: Option<&std::path::Path>) -> Self {
-        let config = config::load_web_search_config(project_dir, home);
+    /// `latent_dir` 为已解析的用户数据目录(见 latent-core `paths`)。
+    pub fn load(
+        project_dir: Option<&std::path::Path>,
+        latent_dir: Option<&std::path::Path>,
+    ) -> Self {
+        let config = config::load_web_search_config(project_dir, latent_dir);
         let cache_limits = config.cache_limits.unwrap_or_default();
-        storage::set_fetch_cache_dir(config::config_dir(home).join("web-search-cache"));
+        storage::set_fetch_cache_dir(config::config_dir(latent_dir).join("web-search-cache"));
         WebRuntime {
             config,
             cache_limits,

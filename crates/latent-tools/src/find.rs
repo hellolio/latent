@@ -40,7 +40,8 @@ pub fn create_find_tool_with_limits(
     let description = format!(
         "Search for files by glob pattern. Returns matching file paths relative to the search \
          directory. Respects .gitignore and .latentignore rules (project root and \
-         ~/.latent/.latentignore, gitignore syntax); ignored directories are not searched. \
+         the user-level ignore file $LATENT_HOME/.latentignore, default \
+         ~/.config/latent/.latentignore, gitignore syntax); ignored directories are not searched. \
          Output is truncated to {DEFAULT_LIMIT} results or {} bytes (whichever is hit first). \
          Generated files are already filtered out; use find to narrow down targets before \
          reading anything.",

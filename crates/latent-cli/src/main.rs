@@ -193,6 +193,23 @@ fn parse_args(args: &[String]) -> Args {
     }
 }
 
+/// 数据目录落在旧版 `~/.latent` 时提示一次:新版默认 `~/.config/latent`,
+/// 可设 `LATENT_HOME` 显式指定,或把目录移动到新位置。只走 stderr,不污染
+/// print/json/rpc 模式的 stdout 协议。
+fn notify_legacy_data_dir() {
+    let home = dirs_home();
+    let env = std::env::var_os("LATENT_HOME");
+    let (dir, source) = latent_core::resolve_latent_dir(home.as_deref(), env.as_deref());
+    if source == latent_core::LatentDirSource::LegacyDotLatent {
+        if let Some(dir) = dir {
+            eprintln!(
+                "[latent] 数据目录沿用旧版 {}(新版默认 ~/.config/latent;可设 LATENT_HOME 指定,或将目录移动到新位置)",
+                dir.display()
+            );
+        }
+    }
+}
+
 async fn run(args: &[String]) -> Result<(), String> {
     match parse_args(args) {
         Args::MockExtensionServer => latent::mcp_mock::run_mock_server().await,
@@ -217,6 +234,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         sandbox_network,
         prompt,
     } => {
+        notify_legacy_data_dir();
         if list {
             print_session_list();
             return Ok(());
@@ -322,22 +340,24 @@ async fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// 会话存储:默认在 `~/.latent/sessions/<项目前缀>/` 新建 `<时间>__<session-id>.jsonl`;
-/// `--continue`/`-r` 续聊当前项目最近的会话文件(resume_index 指定 `-l`
-/// 列表中的序号,1 起)。HOME 缺失时降级为内存会话。
+/// 会话存储:默认在数据目录 `sessions/<项目前缀>/` 新建
+/// `<时间>__<session-id>.jsonl`(数据目录 = LATENT_HOME,默认
+/// `~/.config/latent`,旧版 `~/.latent` 沿用);`--continue`/`-r` 续聊当前
+/// 项目最近的会话文件(resume_index 指定 `-l` 列表中的序号,1 起)。
+/// HOME/LATENT_HOME 都缺失时降级为内存会话。
 fn resolve_session_store(
     cont: bool,
     resume_index: Option<usize>,
 ) -> Result<latent::assembly::SessionStore, String> {
     use latent::assembly::SessionStore;
-    let Some(home) = dirs_home() else {
+    let Some(dir) = latent_core::latent_dir(dirs_home().as_deref()) else {
         if cont {
-            return Err("--continue 需要 HOME 目录".into());
+            return Err("--continue 需要 HOME 或 LATENT_HOME 环境变量".into());
         }
-        eprintln!("[latent] 无法定位 HOME,本次会话仅保存在内存");
+        eprintln!("[latent] 无法定位数据目录(HOME/LATENT_HOME),本次会话仅保存在内存");
         return Ok(SessionStore::Memory);
     };
-    let sessions_dir = home.join(".latent/sessions");
+    let sessions_dir = dir.join("sessions");
     if cont {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let sessions = latent_session::list_session_files(&sessions_dir, Some(cwd.to_string_lossy().as_ref()));
@@ -365,11 +385,11 @@ fn resolve_session_store(
 
 /// `-l`/`--list`:打印当前项目的历史会话列表(最新在前,序号供 `latent -r <n>`)。
 fn print_session_list() {
-    let Some(home) = dirs_home() else {
-        eprintln!("latent: --list 需要 HOME 目录");
+    let Some(dir) = latent_core::latent_dir(dirs_home().as_deref()) else {
+        eprintln!("latent: --list 需要 HOME 或 LATENT_HOME 环境变量");
         std::process::exit(1);
     };
-    let sessions_dir = home.join(".latent/sessions");
+    let sessions_dir = dir.join("sessions");
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let sessions =
         latent_session::list_session_files(&sessions_dir, Some(cwd.to_string_lossy().as_ref()));
@@ -426,14 +446,14 @@ fn resolve_provider_and_model(
         ));
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let home = dirs_home();
-    let resolver = latent_core::create_model_resolver_from_config(Some(&cwd), home.as_deref());
+    let dir = latent_core::latent_dir(dirs_home().as_deref());
+    let resolver = latent_core::create_model_resolver_from_config(Some(&cwd), dir.as_deref());
     // 未指定 provider/model 时回退 settings.json 的 defaultProvider/defaultModel
     let (provider, model) = match (&provider, &model) {
         (Some(_), _) | (_, Some(_)) => (provider, model),
         (None, None) => {
             let (default_provider, default_model) =
-                latent_core::load_default_model_selection(Some(&cwd), home.as_deref());
+                latent_core::load_default_model_selection(Some(&cwd), dir.as_deref());
             if default_provider.is_none() && default_model.is_none() {
                 return Err(
                     "缺少 --provider(或 --mock);也可在 .latent/settings.json 配置 defaultProvider/defaultModel"
@@ -486,8 +506,10 @@ fn print_help() {
          \n\
          provider 示例:anthropic / openai / deepseek / openrouter / groq …\n\
          API key 从环境变量读取(如 ANTHROPIC_API_KEY / OPENAI_API_KEY);\n\
-         自定义 provider/model/URL 在 .latent/models.json 或 ~/.latent/models.json 声明,\n\
+         自定义 provider/model/URL 在 .latent/models.json 或用户数据目录 models.json 声明,\n\
          默认 provider/model 在 .latent/settings.json 的 defaultProvider/defaultModel 配置。\n\
-         MCP 扩展在 .latent/settings.json 或 ~/.latent/settings.json 的 mcpServers 中声明。"
+         MCP 扩展在 .latent/settings.json 或数据目录 settings.json 的 mcpServers 中声明。\n\
+         用户数据目录(LATENT_HOME 可覆盖;默认 ~/.config/latent,旧版 ~/.latent 自动沿用)\n\
+         存放 settings/models/web-search/skills/agents/sessions 等全局数据。"
     );
 }

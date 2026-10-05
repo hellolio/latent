@@ -8,6 +8,7 @@
 pub mod config;
 pub mod extensions;
 pub mod model;
+pub mod paths;
 pub mod permission;
 pub mod retry;
 pub mod session;
@@ -28,6 +29,7 @@ pub use extensions::{
     McpConnection, McpServerSpec, NoopUi,
 };
 pub use model::{create_model_resolver, default_model_for, ModelResolver};
+pub use paths::{latent_dir, resolve_latent_dir, LatentDirSource};
 pub use permission::{
     classify_tool, mode_baseline_tools, mode_section, normalize_command, policy_for_mode,
     ApprovalDecision, ApprovalHooks, ApprovalKey, ApprovalReason, ApprovalRequest, ApprovalUi,

@@ -1,5 +1,6 @@
 //! skill 发现(pi skills.ts 移植):skill 是数据目录(`<cwd>/.latent/skills/<name>/SKILL.md`
-//! 项目优先 → `~/.latent/skills/`),frontmatter 只取 name/description 摘要。
+//! 项目优先 → 用户数据目录 `skills/`,见 `crate::paths`),frontmatter 只取
+//! name/description 摘要。
 //!
 //! 解析纪律与 agent 定义一致:手写逐行 `key: value`,未知键忽略,失败单条
 //! 诊断跳过不阻断其他文件(07 §8.5)。
@@ -20,13 +21,14 @@ pub struct SkillDef {
 }
 
 /// 发现两级目录的 skill;同名时项目级覆盖用户级。
+/// `latent_dir` 为已解析的用户数据目录(`crate::paths::latent_dir`)。
 /// 返回 (按 name 排序的定义, 诊断消息)。
-pub fn discover_skill_defs(cwd: &Path, home: Option<&Path>) -> (Vec<SkillDef>, Vec<String>) {
+pub fn discover_skill_defs(cwd: &Path, latent_dir: Option<&Path>) -> (Vec<SkillDef>, Vec<String>) {
     let mut diagnostics = Vec::new();
     let mut by_name: BTreeMap<String, SkillDef> = BTreeMap::new();
     // 后扫描的覆盖先扫描的:先用户级,后项目级(项目优先)
     let dirs = [
-        home.map(|home| home.join(".latent").join("skills")),
+        latent_dir.map(|dir| dir.join("skills")),
         Some(cwd.join(".latent").join("skills")),
     ];
     for dir in dirs.into_iter().flatten() {
@@ -186,7 +188,7 @@ mod tests {
         std::fs::write(project_dir.join("loose.md"), "---\ndescription: d\n---\nbody").unwrap();
 
         let (defs, diagnostics) =
-            discover_skill_defs(&root.join("project"), Some(&root.join("home")));
+            discover_skill_defs(&root.join("project"), Some(&root.join("home/.latent")));
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["only-user", "shared"]);
         let shared = defs.iter().find(|d| d.name == "shared").unwrap();

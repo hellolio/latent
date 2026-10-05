@@ -1,5 +1,6 @@
 //! Skill 机制(pi skills.ts 移植):skill 是数据目录
-//! (`<cwd>/.latent/skills/<name>/SKILL.md` 项目优先 → `~/.latent/skills/`)。
+//! (`<cwd>/.latent/skills/<name>/SKILL.md` 项目优先 → 用户数据目录
+//! `skills/`,见 `crate::paths`)。
 //!
 //! skill 摘要的唯一出口是 `load_skill` 工具声明 —— `description()` 动态渲染
 //! 可用清单,随每轮请求发给模型(主会话与勾选本工具的子 agent 一视同仁);

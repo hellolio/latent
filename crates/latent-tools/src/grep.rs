@@ -43,7 +43,8 @@ pub fn create_grep_tool_with_limits(
     let description = format!(
         "Search file contents for a pattern. Returns matching lines with file paths and line \
          numbers. Respects .gitignore and .latentignore rules (project root and \
-         ~/.latent/.latentignore, gitignore syntax); ignored directories are not searched. \
+         the user-level ignore file $LATENT_HOME/.latentignore, default \
+         ~/.config/latent/.latentignore, gitignore syntax); ignored directories are not searched. \
          Output is truncated to {DEFAULT_LIMIT} matches or {} bytes (whichever is hit first). \
          Long lines are truncated to {GREP_MAX_LINE_LENGTH} chars. Use grep to locate code \
          first, then read only the matched regions; searching here is cheaper and quieter \

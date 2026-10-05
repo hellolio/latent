@@ -1,7 +1,9 @@
 //! 检索忽略列表:grep/find/ls/@文件弹窗共享的"无效对象"过滤。
 //!
 //! 规则唯一来源是 `.latentignore` 文件(gitignore 语法):全局
-//! `~/.latent/.latentignore` 在前、项目 `<cwd>/.latentignore` 在后拼接,按
+//! 全局忽略文件(`$LATENT_HOME/.latentignore`,默认
+//! `~/.config/latent/.latentignore`,旧版 `~/.latent` 沿用;路径由装配层解析注入)
+//! 在前、项目 `<cwd>/.latentignore` 在后拼接,按
 //! gitignore 语义 last-match-wins —— 项目可用 `!` 反选全局规则。没有任何
 //! 规则 = 关闭过滤(仅剩工具层写死的 `.git` 排除与遍历自带的 .gitignore
 //! 感知)。

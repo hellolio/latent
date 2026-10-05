@@ -1,5 +1,5 @@
-""".latentignore(gitignore 语法):AI 检索忽略的唯一配置入口——全局
-~/.latent/.latentignore 在前、项目 <workdir>/.latentignore 在后拼接
+""".latentignore(gitignore 语法):AI 检索忽略的唯一配置入口——全局数据目录
+(LATENT_HOME,见 harness 注入)的 .latentignore 在前、项目 <workdir>/.latentignore 在后拼接
 (gitignore 语义 last-match-wins),项目可用 `!` 反选全局规则;@ 文件弹窗
 候选随规则过滤。
 

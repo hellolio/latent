@@ -98,7 +98,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/powershell.rs` | bash 的 Windows 等价物，4 行 re-export 同工厂 |
 | `src/truncate.rs` | 统一双限截断（默认 2000 行 / 50KiB，先到为准，永不返回半行）：`truncate_head`（read 保留头）/ `truncate_tail`（bash 保留尾）；工具自身输出预算 = agent 上限 − 2000 余量 |
 | `src/output_accumulator.rs` | bash 流式聚合：增量 UTF-8 解码、超限完整输出落临时文件（`fullOutputPath`） |
-| `src/search_ignore.rs` | 检索忽略列表（grep/find/ls/@弹窗共享）：`.latentignore`（gitignore 语法）经 ignore crate `GitignoreBuilder` 编译，全局 `~/.latent/.latentignore` + 项目 `.latentignore` 拼接、last-match-wins（项目可 `!` 反选）；锚定模式相对会话 cwd、命中目录剪枝不进入遍历；坏行诊断跳过，无规则 = 关闭过滤 |
+| `src/search_ignore.rs` | 检索忽略列表（grep/find/ls/@弹窗共享）：`.latentignore`（gitignore 语法）经 ignore crate `GitignoreBuilder` 编译，全局数据目录 `.latentignore` + 项目 `.latentignore` 拼接、last-match-wins（项目可 `!` 反选）；锚定模式相对会话 cwd、命中目录剪枝不进入遍历；坏行诊断跳过，无规则 = 关闭过滤 |
 | `src/file_listing.rs` | 文件清单采集（TUI `@` 文件弹窗数据源）：ignore crate 遍历（对齐 pi `--hidden --exclude .git`）+ searchIgnore 剪枝；按深度→目录优先→字母排序后截断（默认 2000 条） |
 | `src/sanitize.rs` | ANSI/控制字符净化——**只用于 `!` 裸命令路径**，模型工具结果不做净化 |
 
@@ -109,7 +109,8 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/session.rs` | 业务核 `AgentSession`：prompt/steer/follow_up、模式切换、激活工具集切换、overflow 恢复（`run_with_recovery`）与自动压缩（`maybe_auto_compact`）、`SessionSink`/`ContextCompactor` trait、事件翻译层 `SessionBridge` |
 | `src/system_prompt.rs` | 系统提示词命名 sections 机制（preamble/tools/rules/project_context/env/addendum）；env 节含工作目录与当前本地时间，rules 节支持 system-prompt.md `<rules>` 标记块自定义追加；提示词不持久化，恢复时按配置重组 |
 | `src/model.rs` | `ModelResolver`：`provider/model` spec 解析、内置默认模型表、/model 候选清单 |
-| `src/config.rs` | models.json/settings.json 配置体系：全局 `~/.latent` 先读、项目 `.latent` 逐字段覆盖合并；apiKey 按环境变量名解析 |
+| `src/config.rs` | models.json/settings.json 配置体系：全局数据目录（见 `src/paths.rs`）先读、项目 `.latent` 逐字段覆盖合并；apiKey 按环境变量名解析 |
+| `src/paths.rs` | 用户数据目录解析唯一权威：`LATENT_HOME` 环境变量 → 旧版 `~/.latent`（存在即沿用）→ 默认 `~/.config/latent`；入口层解析后作参数下传，纯函数面不读环境 |
 | `src/retry.rs` | provider 重试薄装配（`RetryHooks` 上报 AutoRetryStart/End 事件；quota 类不重试） |
 | `src/permission/types.rs` | `SessionMode`（Plan/Confirm/FullAccess，默认 Plan，Shift+Tab 循环）、`ToolRiskClass` 静态分类、`Verdict`（Allow/Ask/Deny）、沙箱策略映射 |
 | `src/permission/engine.rs` | `PermissionEngine` 判定引擎：FullAccess 全放 → 会话级审批缓存 → 按风险类分模式判定；可写根 = cwd + TMPDIR + /tmp + 配置 |
@@ -171,7 +172,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子 + LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.latent/settings.json` 优先） |
 | `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
 | `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent（无参打开 agent+off 选择器）/session（list/info）/fullscreen（[on\|off] 切换全屏渲染模式）/quit；带变体命令裸调用只提示用法，部分输入回车展开变体选择页、方向键选定后回车执行；未识别 `/xxx` 本地警告不发给模型 |
-| `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记、`StreamWrapCache` 流式文本增量折行缓存（append-only 时仅重折最后一个未完成源行，流式预览全量行的数据源）、`sync_mention_popup` @ 文件弹窗同步（cwd 采集候选 + 检索忽略剪枝 + 注入补全根（选中补全全路径）+ `/`/`!` 让位））、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、`@` 文件弹窗 ↑/↓/Tab/Enter/Esc 补全经编辑器 token 替换落文本、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局 ~/.latent/settings.json）、/model 选择器+添加模型表单）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，latent 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
+| `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记、`StreamWrapCache` 流式文本增量折行缓存（append-only 时仅重折最后一个未完成源行，流式预览全量行的数据源）、`sync_mention_popup` @ 文件弹窗同步（cwd 采集候选 + 检索忽略剪枝 + 注入补全根（选中补全全路径）+ `/`/`!` 让位））、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、`@` 文件弹窗 ↑/↓/Tab/Enter/Esc 补全经编辑器 token 替换落文本、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局数据目录 settings.json）、/model 选择器+添加模型表单）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`）、bash 净化（`bash.rs`，latent 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
 | `src/mcp_mock.rs` | mock MCP 扩展服务端（`latent --mcp-mock-server`）：订阅 tool_call 拦截危险 bash + 注册 echo 工具 + elicitation 确认，供扩展全链路验收 |
 | `tests/modes.rs` | 四模式集成测试（ScriptedProvider 不联网）：json 剥 partial、rpc 反向通道、LATENT_* 注入、Plan 只读 bash、JSONL 重建 == 内存 context、ModeChange 持久化等 |
 | `tests/e2e_mcp_extension.rs` | 真实子进程 MCP 扩展端到端验收 |
@@ -197,17 +198,19 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 
 ## 配置文件体系
 
+**用户数据目录**：全局配置/数据的根目录，解析优先级 `LATENT_HOME` 环境变量 → 旧版 `~/.latent`（存在即沿用，启动时 stderr 提示一次）→ 默认 `~/.config/latent`；解析唯一权威在 `latent-core/src/paths.rs`，入口层解析后作参数下传。下表记作 `<数据目录>`。
+
 | 文件 | 位置（项目优先，逐字段覆盖全局） | 内容 |
 |---|---|---|
-| settings.json | `.latent/settings.json` / `~/.latent/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
-| .latentignore | 项目 `<cwd>/.latentignore` / 全局 `~/.latent/.latentignore` | AI 检索忽略规则（gitignore 语法，格式同 .gitignore）：grep/find/ls/@文件弹窗过滤 + 系统提示词规则。全局在前、项目在后拼接，gitignore 语义 last-match-wins——项目可用 `!` 反选全局规则。文件缺失静默跳过，坏行诊断后跳过；无任何规则 = 不做额外过滤（`.git` 由工具层恒排除，遍历仍自带 .gitignore 感知）。启动时读一次，中途修改不生效；不支持子目录级 `.latentignore` |
-| models.json | `.latent/models.json` / `~/.latent/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：LATENT_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载 |
-| web-search.json | `.latent/web-search.json` / `~/.latent/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
-| skills | `.latent/skills/<name>/SKILL.md` / `~/.latent/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |
-| agents | `.latent/agents/<name>.md` / `~/.latent/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
-| system-prompt.md | `.latent/system-prompt.md` / `~/.latent/…` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
+| settings.json | `.latent/settings.json` / `<数据目录>/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 120）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 60）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
+| .latentignore | 项目 `<cwd>/.latentignore` / 全局 `<数据目录>/.latentignore` | AI 检索忽略规则（gitignore 语法，格式同 .gitignore）：grep/find/ls/@文件弹窗过滤 + 系统提示词规则。全局在前、项目在后拼接，gitignore 语义 last-match-wins——项目可用 `!` 反选全局规则。文件缺失静默跳过，坏行诊断后跳过；无任何规则 = 不做额外过滤（`.git` 由工具层恒排除，遍历仍自带 .gitignore 感知）。启动时读一次，中途修改不生效；不支持子目录级 `.latentignore` |
+| models.json | `.latent/models.json` / `<数据目录>/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：LATENT_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载 |
+| web-search.json | `.latent/web-search.json` / `<数据目录>/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
+| skills | `.latent/skills/<name>/SKILL.md` / `<数据目录>/skills/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |
+| agents | `.latent/agents/<name>.md` / `<数据目录>/agents/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
+| system-prompt.md | `.latent/system-prompt.md` / `<数据目录>/system-prompt.md` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
 
-会话文件写 `~/.latent/sessions/<项目前缀>/`（目录名 = cwd 编码；文件名 `<时间>__<tag>__<id>.jsonl`，时间为本地 %Y%m%d-%H%M%S）；`contextSnapshot` 开启时请求快照落旁路 `.ctx/` 目录，不进模型上下文。
+会话文件写 `<数据目录>/sessions/<项目前缀>/`（目录名 = cwd 编码；文件名 `<时间>__<tag>__<id>.jsonl`，时间为本地 %Y%m%d-%H%M%S）；`contextSnapshot` 开启时请求快照落旁路 `.ctx/` 目录，不进模型上下文。
 
 ## 测试方针
 

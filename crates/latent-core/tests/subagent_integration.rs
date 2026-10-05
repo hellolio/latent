@@ -104,7 +104,7 @@ async fn fixture(
         parent: parent_cell.clone(),
         async_approval: HeadlessApproval::Deny,
         cwd: std::env::temp_dir(),
-        home: None,
+        latent_dir: None,
         agent_defs: Vec::new(),
         child_store_factory: None,
     }));
@@ -193,7 +193,7 @@ async fn child_run_persists_session_file_with_run_id_tag() {
         parent: parent_cell.clone(),
         async_approval: HeadlessApproval::Deny,
         cwd: std::env::temp_dir(),
-        home: None,
+        latent_dir: None,
         agent_defs: Vec::new(),
         child_store_factory: Some(Arc::new(move |tag: &str| {
             let manager = latent_session::create_session_in_dir(&store_dir, "/tmp/proj", None, Some(tag))

@@ -388,15 +388,15 @@ async fn handle_select_key(
                                         home_str
                                     )
                                 ),
-                                match &state.home {
-                                    Some(home) => format!(
+                                match latent_core::latent_dir(state.home.as_deref()) {
+                                    Some(dir) => format!(
                                         "全局  {}(所有项目)",
                                         latent_tui::footer::abbreviate_home(
-                                            &home.join(".latent/models.json").display().to_string(),
+                                            &dir.join("models.json").display().to_string(),
                                             home_str
                                         )
                                     ),
-                                    None => "全局(未检测到 HOME)".to_string(),
+                                    None => "全局(未检测到 HOME / LATENT_HOME)".to_string(),
                                 },
                             ];
                             state.select = Some(SelectRequest {
@@ -1028,12 +1028,15 @@ async fn finish_model_form(
     // 写回位置按表单第一步的选择;缺省(异常路径)回退项目优先
     let path = match form.target {
         Some(super::state::ModelFormTarget::Project) => state.cwd.join(".latent/models.json"),
-        Some(super::state::ModelFormTarget::Global) => state
-            .home
-            .as_deref()
-            .map(|home| home.join(".latent/models.json"))
-            .unwrap_or_else(|| state.cwd.join(".latent/models.json")),
-        None => latent_core::preferred_models_path(Some(&state.cwd), state.home.as_deref()),
+        Some(super::state::ModelFormTarget::Global) => {
+            latent_core::latent_dir(state.home.as_deref())
+                .map(|dir| dir.join("models.json"))
+                .unwrap_or_else(|| state.cwd.join(".latent/models.json"))
+        }
+        None => {
+            let dir = latent_core::latent_dir(state.home.as_deref());
+            latent_core::preferred_models_path(Some(&state.cwd), dir.as_deref())
+        }
     };
     let entry = NewModelEntry {
         provider_id: form.provider_id.clone().unwrap_or_default(),
@@ -1075,10 +1078,9 @@ async fn finish_model_form(
 /// build_session 装配期为 web 工具/subagent 建的 resolver 快照不跟随,
 /// 重启后生效。
 pub(crate) fn reload_model_resolver(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
-    let reloaded = latent_core::create_model_resolver_from_config(
-        Some(&state.cwd),
-        state.home.as_deref(),
-    );
+    let dir = latent_core::latent_dir(state.home.as_deref());
+    let reloaded =
+        latent_core::create_model_resolver_from_config(Some(&state.cwd), dir.as_deref());
     *ctx.resolver.write().unwrap() = reloaded;
 }
 
@@ -1126,8 +1128,17 @@ fn open_setting_selector(state: &mut InteractiveState) {
             if state.copy_on_select { "开" } else { "关" }
         ),
     ];
+    // 写回目标动态展示(数据目录可经 LATENT_HOME 自定义)
+    let home_str = state.home.as_deref().and_then(|p| p.to_str());
+    let target = match latent_core::latent_dir(state.home.as_deref()) {
+        Some(dir) => latent_tui::footer::abbreviate_home(
+            &dir.join("settings.json").display().to_string(),
+            home_str,
+        ),
+        None => "全局 settings.json".to_string(),
+    };
     state.select = Some(SelectRequest {
-        prompt: "设置(Enter 切换 · Esc 关闭 · 写入 ~/.latent/settings.json)".into(),
+        prompt: format!("设置(Enter 切换 · Esc 关闭 · 写入 {target})"),
         list: SelectList::new(options),
         kind: SelectKind::Setting,
     });
@@ -1172,9 +1183,10 @@ fn apply_setting_selection(state: &mut InteractiveState, index: usize) {
     open_setting_selector(state);
 }
 
-/// 设置项写回全局 ~/.latent/settings.json(失败仅提示,不阻断交互)。
+/// 设置项写回全局数据目录的 settings.json(失败仅提示,不阻断交互)。
 fn persist_setting(state: &mut InteractiveState, key: &str, value: serde_json::Value) {
-    if let Err(e) = latent_core::write_setting_field(None, state.home.as_deref(), key, value) {
+    let dir = latent_core::latent_dir(state.home.as_deref());
+    if let Err(e) = latent_core::write_setting_field(None, dir.as_deref(), key, value) {
         state.commit_ephemeral(view::error_line(
             &format!("写入 settings.json 失败: {e}"),
             &state.theme,

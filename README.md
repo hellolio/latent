@@ -130,7 +130,7 @@ latent --continue
 
 ## 配置
 
-配置目录按「项目 `.latent/` 优先，逐字段覆盖全局 `~/.latent/`」合并：
+配置目录按「项目 `.latent/` 优先，逐字段覆盖全局数据目录」合并。全局数据目录默认 `~/.config/latent`，可用环境变量 `LATENT_HOME` 指定（旧版 `~/.latent` 存在时自动沿用并提示）：
 
 | 文件 | 作用 |
 |---|---|
@@ -206,16 +206,16 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
 ```
 
 ### todo list
- - [x] .latentignore文件独立（gitignore 语法，全局 `~/.latent/.latentignore` + 项目 `.latentignore`，项目优先可反选）
+ - [x] .latentignore文件独立（gitignore 语法，全局数据目录 `.latentignore` + 项目 `.latentignore`，项目优先可反选）
  - [ ] 子agent调用和显示优化
  - [ ] harness适配微信qq，如何保证长时间工作不中断，定时任务
  - [ ] jev决策小模型引入
  - [ ] 文件检索如何过滤噪音（启用小模型摘要？或者引入第三方库实现？阿里rg？）
  - [x] mac沙箱好像不生效
- - [ ] 环境变量清理，部分和pi重合
  - [ ] 无效模型清理
  - [ ] 实现一个扩展用于测试扩展功能（文件搜索加强？）
  - [ ] 实现可配置追加系统提示词（当前仅可替换）
+ - [ ] ui颜色调整优化
  - [x] @符号添加文件到上下文
  - [x] 当前全屏模式下，如果模型正在输出，我滚动屏幕，正在输出的部分不会跟着滚动，但是我需要输入框以上的部分全部跟随滚动
 

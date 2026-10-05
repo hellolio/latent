@@ -3,8 +3,9 @@
 `LatentApp` 把一次 E2E 测试的全部环境拼起来:
 
 1. 起本地 mock LLM 服务(`mock_llm.MockLLM`,场景脚本决定响应);
-2. 造隔离的临时 `HOME`(写入指向 mock 服务的 `.latent/models.json` provider
-   override),不污染真实 `~/.latent`;
+2. 造隔离的临时 `HOME`,并注入 `LATENT_HOME` 指到其 `.latent` 子目录
+   (数据目录 override;写入指向 mock 服务的 models.json provider
+   override),不污染真实用户数据目录(`~/.config/latent`);
 3. 用 pexpect 在真实 PTY 里启动 `latent --mode interactive`,程序看到的就是
    一个真终端;
 4. 提供 `send`(打字)、`expect_text`(等屏幕上出现内容)等人类视角操作,
@@ -128,6 +129,9 @@ class LatentApp:
 
         env = os.environ.copy()
         env["HOME"] = self.home
+        # 数据目录固定指到隔离 HOME 的 .latent(测试 env override 路径,
+        # 同时保证全局 fixtures/global ignore/session 文件位置确定)
+        env["LATENT_HOME"] = os.path.join(self.home, ".latent")
         env["TERM"] = "xterm-256color"
         bin_path = latent_bin or _default_latent_bin()
         args = ["--mode", "interactive", "--provider", PROVIDER_ID]

@@ -68,4 +68,4 @@ def test_my_flow():
   `expect_text` 对空白不敏感,写 pattern 时不要依赖排版。
 - 应用在 Inline 视口变化时会查询光标位置,harness 的后台读线程会自动应答
   (模拟真终端);不要在测试里绕过 harness 直接读 child 输出。
-- `LatentApp` 用临时目录做 `HOME`,session 写进隔离环境,不会污染真实 `~/.latent`。
+- `LatentApp` 用临时目录做 `HOME` 并注入 `LATENT_HOME` 指到其 `.latent` 子目录,session 写进隔离环境,不会污染真实数据目录。

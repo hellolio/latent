@@ -36,8 +36,9 @@ pub fn create_ls_tool_with_limits(
     let description = format!(
         "List directory contents. Returns entries sorted alphabetically, with '/' suffix for \
          directories. Includes dotfiles. The .git directory and paths matched by \
-         .latentignore rules (project root and ~/.latent/.latentignore, gitignore syntax) \
-         are hidden. Output is truncated to {DEFAULT_LIMIT} entries or {} bytes \
+         .latentignore rules (project root and the user-level ignore file \
+         $LATENT_HOME/.latentignore, default ~/.config/latent/.latentignore, \
+         gitignore syntax) are hidden. Output is truncated to {DEFAULT_LIMIT} entries or {} bytes \
          (whichever is hit first).",
         limits.effective_max_bytes()
     );

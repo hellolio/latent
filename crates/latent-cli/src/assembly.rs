@@ -24,16 +24,16 @@ use latent_core::{
 /// 子代理工厂的模型解析器共享句柄(装配期与 /model 同源)。
 type ModelResolverFn = Arc<dyn Fn(&str) -> Result<latent_ai::Model, String> + Send + Sync>;
 
-/// 读取扩展进程声明:项目 `.latent/settings.json` → 全局 `~/.latent/settings.json`,
-/// mcpServers 列表拼接(07 §8.7 步骤 3)。
+/// 读取扩展进程声明:项目 `.latent/settings.json` → 全局数据目录
+/// settings.json(见 `latent_dir`),mcpServers 列表拼接(07 §8.7 步骤 3)。
 pub fn load_mcp_server_specs() -> Vec<McpServerSpec> {
     let mut specs = Vec::new();
     let mut paths = Vec::new();
     if let Ok(current) = std::env::current_dir() {
         paths.push(current.join(".latent/settings.json"));
     }
-    if let Some(home) = dirs_home() {
-        paths.push(home.join(".latent/settings.json"));
+    if let Some(dir) = latent_dir() {
+        paths.push(dir.join("settings.json"));
     }
     for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -120,15 +120,23 @@ fn dirs_home() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
-/// 纯函数面(可测):按 项目 → 全局 顺序读 `.latent/settings.json`,
-/// 解析失败的文件跳过。
-fn read_settings_files(cwd: Option<&Path>, home: Option<&Path>) -> Vec<SettingsFile> {
+/// 用户数据目录(解析规则唯一权威在 `latent_core::paths`):`LATENT_HOME`
+/// 环境变量优先,缺省 `~/.config/latent`,旧版 `~/.latent` 存在则沿用。
+/// settings/models/web-search/.latentignore/skills/agents/sessions 等全局
+/// 数据都在这个目录下。
+fn latent_dir() -> Option<std::path::PathBuf> {
+    latent_core::latent_dir(dirs_home().as_deref())
+}
+
+/// 纯函数面(可测):按 项目 → 全局数据目录 顺序读 `.latent/settings.json`,
+/// 解析失败的文件跳过。`latent_dir` 为已解析的用户数据目录。
+fn read_settings_files(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Vec<SettingsFile> {
     let mut paths = Vec::new();
     if let Some(cwd) = cwd {
         paths.push(cwd.join(".latent/settings.json"));
     }
-    if let Some(home) = home {
-        paths.push(home.join(".latent/settings.json"));
+    if let Some(dir) = latent_dir {
+        paths.push(dir.join("settings.json"));
     }
     let mut settings = Vec::new();
     for path in paths {
@@ -146,24 +154,24 @@ fn read_settings_files(cwd: Option<&Path>, home: Option<&Path>) -> Vec<SettingsF
 /// T10:读取 shell 命令前缀,项目 settings 优先于全局 settings。
 pub fn load_shell_command_prefix() -> Option<String> {
     let cwd = std::env::current_dir().ok();
-    let home = dirs_home();
-    shell_command_prefix_from(cwd.as_deref(), home.as_deref())
+    let dir = latent_dir();
+    shell_command_prefix_from(cwd.as_deref(), dir.as_deref())
 }
 
 /// shell 运行时限 settings(`bashTimeoutSecs`/`backgroundAfterSecs`):
 /// 项目 settings 优先于全局,首个配置生效;未配置键 = 默认值。
 pub fn load_shell_timeout_policy() -> latent_tools::ShellTimeoutPolicy {
     let cwd = std::env::current_dir().ok();
-    let home = dirs_home();
-    shell_timeout_policy_from(cwd.as_deref(), home.as_deref())
+    let dir = latent_dir();
+    shell_timeout_policy_from(cwd.as_deref(), dir.as_deref())
 }
 
 /// 纯函数面(可测):两键独立解析,各自按 项目 → 全局 首个配置生效。
 fn shell_timeout_policy_from(
     cwd: Option<&Path>,
-    home: Option<&Path>,
+    latent_dir: Option<&Path>,
 ) -> latent_tools::ShellTimeoutPolicy {
-    let files = read_settings_files(cwd, home);
+    let files = read_settings_files(cwd, latent_dir);
     let mut policy = latent_tools::ShellTimeoutPolicy::default();
     if let Some(secs) = files.iter().find_map(|settings| settings.bash_timeout_secs) {
         policy.default_timeout_secs = secs;
@@ -179,8 +187,8 @@ fn shell_timeout_policy_from(
 
 /// 纯函数面(可测):按 项目 → 全局 顺序读 `.latent/settings.json` 的 commandPrefix,
 /// 空白值跳过,首个非空生效。
-fn shell_command_prefix_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<String> {
-    for settings in read_settings_files(cwd, home) {
+fn shell_command_prefix_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Option<String> {
+    for settings in read_settings_files(cwd, latent_dir) {
         if let Some(prefix) = settings.command_prefix {
             if !prefix.trim().is_empty() {
                 return Some(prefix);
@@ -194,13 +202,13 @@ fn shell_command_prefix_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<
 /// 未配置 = false(默认关,不产生快照)。
 pub fn load_context_snapshot_enabled() -> bool {
     let cwd = std::env::current_dir().ok();
-    let home = dirs_home();
-    context_snapshot_enabled_from(cwd.as_deref(), home.as_deref()).unwrap_or(false)
+    let dir = latent_dir();
+    context_snapshot_enabled_from(cwd.as_deref(), dir.as_deref()).unwrap_or(false)
 }
 
 /// 纯函数面(可测):首个配置了 contextSnapshot 的 settings 生效。
-fn context_snapshot_enabled_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<bool> {
-    read_settings_files(cwd, home)
+fn context_snapshot_enabled_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Option<bool> {
+    read_settings_files(cwd, latent_dir)
         .into_iter()
         .find_map(|settings| settings.context_snapshot)
 }
@@ -210,13 +218,13 @@ fn context_snapshot_enabled_from(cwd: Option<&Path>, home: Option<&Path>) -> Opt
 /// 为空)= Some(空)= 显式不激活任何工具**。
 pub fn load_active_tool_names() -> Option<Vec<String>> {
     let cwd = std::env::current_dir().ok();
-    let home = dirs_home();
-    active_tool_names_from(cwd.as_deref(), home.as_deref())
+    let dir = latent_dir();
+    active_tool_names_from(cwd.as_deref(), dir.as_deref())
 }
 
 /// 纯函数面(可测)。
-fn active_tool_names_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<Vec<String>> {
-    let configured = read_settings_files(cwd, home)
+fn active_tool_names_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Option<Vec<String>> {
+    let configured = read_settings_files(cwd, latent_dir)
         .into_iter()
         .find_map(|settings| settings.tools)?;
     Some(
@@ -228,23 +236,23 @@ fn active_tool_names_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<Vec
     )
 }
 
-/// 检索忽略规则(`.latentignore`,gitignore 语法):全局 `~/.latent/.latentignore`
-/// 在前、项目 `<cwd>/.latentignore` 在后拼接,gitignore 语义 last-match-wins
-/// ——项目可用 `!` 反选全局规则。文件缺失静默跳过;非法行诊断 + 跳过该行,
-/// 不阻断会话。启动时读一次,会话中途修改不生效。
+/// 检索忽略规则(`.latentignore`,gitignore 语法):全局数据目录的
+/// `.latentignore` 在前、项目 `<cwd>/.latentignore` 在后拼接,gitignore 语义
+/// last-match-wins ——项目可用 `!` 反选全局规则。文件缺失静默跳过;非法行
+/// 诊断 + 跳过该行,不阻断会话。启动时读一次,会话中途修改不生效。
 pub fn load_search_ignore() -> latent_tools::SearchIgnore {
     let cwd = std::env::current_dir().ok();
-    let home = dirs_home();
-    search_ignore_from(cwd.as_deref(), home.as_deref())
+    let dir = latent_dir();
+    search_ignore_from(cwd.as_deref(), dir.as_deref())
 }
 
 /// 纯函数面(可测):拼接 `.latentignore` 规则行(全局在前、项目在后)后
 /// 编译;匹配根 = cwd(锚定模式相对项目根解析)。
-fn search_ignore_from(cwd: Option<&Path>, home: Option<&Path>) -> latent_tools::SearchIgnore {
+fn search_ignore_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> latent_tools::SearchIgnore {
     let root = cwd.map(Path::to_path_buf).unwrap_or_default();
     let mut sources: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(home) = home {
-        sources.push(home.join(".latent/.latentignore"));
+    if let Some(dir) = latent_dir {
+        sources.push(dir.join(".latentignore"));
     }
     if let Some(cwd) = cwd {
         sources.push(cwd.join(".latentignore"));
@@ -289,27 +297,27 @@ fn resolve_active_tools(
 }
 
 /// 系统提示词外置文件(用户可编辑):项目 `.latent/system-prompt.md` → 全局
-/// `~/.latent/system-prompt.md`,首个存在且非空的文件生效。文件内容经
+/// 数据目录 `system-prompt.md`,首个存在且非空的文件生效。文件内容经
 /// `<rules>` 标记块拆分:块外内容**替换身份句(preamble)**,块内内容追加进
 /// `<rules>` 节(内置规则之后);无标记块 = 全文是身份句(向后兼容)。
 /// 其余 section(`<env>`、`<tools>`)仍自动注入;未配置 = 用内置默认身份句。
 /// 仅在程序启动/新建会话(装配期)读取一次,会话中途修改文件不生效。
 pub fn load_system_prompt_override() -> (Option<String>, Option<String>) {
     let cwd = std::env::current_dir().ok();
-    let home = dirs_home();
-    system_prompt_override_from(cwd.as_deref(), home.as_deref())
+    let dir = latent_dir();
+    system_prompt_override_from(cwd.as_deref(), dir.as_deref())
         .map(|text| latent_core::split_prompt_and_rules(&text))
         .unwrap_or((None, None))
 }
 
 /// 纯函数面(可测):按 项目 → 全局 找 system-prompt.md,空白文件视为未配置。
-fn system_prompt_override_from(cwd: Option<&Path>, home: Option<&Path>) -> Option<String> {
+fn system_prompt_override_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Option<String> {
     let mut paths = Vec::new();
     if let Some(cwd) = cwd {
         paths.push(cwd.join(".latent/system-prompt.md"));
     }
-    if let Some(home) = home {
-        paths.push(home.join(".latent/system-prompt.md"));
+    if let Some(dir) = latent_dir {
+        paths.push(dir.join("system-prompt.md"));
     }
     for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -672,15 +680,14 @@ fn parse_headless_approval(name: Option<&String>) -> HeadlessApproval {
 
 /// 检索忽略规则 → 系统提示词规则(无规则 = 关闭过滤 = 不注入)。主会话检索多经
 /// bash(rg/find/ls),工具层过滤只覆盖只读工具集;这里把同一份忽略规则同步给
-/// 模型,约束任意路径的检索行为。
+/// 模型,约束 bash 等绕过工具层过滤的检索路径。
 fn search_ignore_rule(ignore: &latent_tools::SearchIgnore) -> Option<String> {
     if ignore.is_empty() {
         return None;
     }
     Some(format!(
-        "When searching or listing files (find/grep/rg/ls), never descend into paths matched \
-         by .latentignore rules: {}. Exclude them from every search unless the user asks \
-         explicitly.",
+        "When searching for or listing files, always ignore these paths: {}. They are of no \
+         help.",
         ignore.patterns().join(", ")
     ))
 }
@@ -702,8 +709,8 @@ fn merge_rules(user: Option<String>, extra: Option<String>) -> Option<String> {
 /// 各键独立回退全局)。
 pub fn load_session_settings() -> SessionSettings {
     let cwd = std::env::current_dir().ok();
-    let home = dirs_home();
-    let files = read_settings_files(cwd.as_deref(), home.as_deref());
+    let dir = latent_dir();
+    let files = read_settings_files(cwd.as_deref(), dir.as_deref());
     let tool_result_max_chars = files
         .iter()
         .find_map(|settings| settings.tool_result_max_chars);
@@ -739,7 +746,7 @@ pub fn load_session_settings() -> SessionSettings {
     SessionSettings {
         context_snapshot: load_context_snapshot_enabled(),
         active_tools: load_active_tool_names(),
-        search_ignore: search_ignore_from(cwd.as_deref(), home.as_deref()),
+        search_ignore: search_ignore_from(cwd.as_deref(), dir.as_deref()),
         tool_result_max_chars,
         block_images,
         compaction,
@@ -977,7 +984,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         subscribers.clone(),
     ));
     // 会话树管理器先于工具装配创建:T9 的 LATENT_* 环境闭包需要读 session id/file。
-    // 默认文件持久化(`~/.latent/sessions/<项目前缀>/<时间>__<session-id>.jsonl`),Memory 仅测试用
+    // 默认文件持久化(`<数据目录>/sessions/<项目前缀>/<时间>__<session-id>.jsonl`),Memory 仅测试用
     let session_manager: Arc<latent_session::SessionManager> = match &session_store {
         SessionStore::Memory => latent_session::create_session(None::<String>)
             .map_err(|e| e.to_string())?
@@ -1098,16 +1105,16 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
 
     // 进程内 web 扩展(latent-web,16 文档):搜索/抓取/检索/取证四工具,
     // 随会话常驻激活(tools 数组从首请求起恒定,保 prompt 缓存前缀)。
-    // 配置 ~/.latent/web-search.json + 项目 .latent/web-search.json;零配置可用
+    // 配置 <数据目录>/web-search.json + 项目 .latent/web-search.json;零配置可用
     // (auto 链兜底 duckduckgo)。latent-core 能力经 trait 注入,保持 latent-web
-    // 不依赖 latent-core
-    let web_home = dirs_home();
-    let web_config = latent_web::config::load_web_search_config(Some(&cwd), web_home.as_deref());
+    // 不依赖 latent-core(数据目录由装配层解析后注入)
+    let web_dir = latent_dir();
+    let web_config = latent_web::config::load_web_search_config(Some(&cwd), web_dir.as_deref());
     latent_web::storage::set_fetch_cache_dir(
-        latent_web::config::config_dir(web_home.as_deref()).join("web-search-cache"),
+        latent_web::config::config_dir(web_dir.as_deref()).join("web-search-cache"),
     );
     let web_resolver =
-        latent_core::create_model_resolver_from_config(Some(&cwd), web_home.as_deref());
+        latent_core::create_model_resolver_from_config(Some(&cwd), web_dir.as_deref());
     // 当前主模型:会话建好后回填的弱引(agent 状态快照取 model)
     let web_agent_cell: Arc<Mutex<Weak<latent_agent::Agent>>> = Arc::new(Mutex::new(Weak::new()));
     let web_agent_for_model = web_agent_cell.clone();
@@ -1135,9 +1142,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 进程内 subagent 引擎(14 文档 §4):task 工具编译进二进制,agent 类型
     // 定义是数据文件(.latent/agents/*.md,项目优先);解析失败诊断打 stderr 跳过。
     // 递归防护 = 子工具面裁剪;后台审批按 settings 策略(默认 deny,fail-closed)
-    let subagent_home = dirs_home();
+    let subagent_latent_dir = latent_dir();
     let (agent_defs, subagent_diagnostics) =
-        latent_core::discover_agent_defs(&cwd, subagent_home.as_deref());
+        latent_core::discover_agent_defs(&cwd, subagent_latent_dir.as_deref());
     for diagnostic in &subagent_diagnostics {
         eprintln!("[latent][subagent] {diagnostic}");
     }
@@ -1146,7 +1153,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // push 必须先于 subagent 装配(tool_pool = tools.clone()):子 agent 定义
     // 的 tools 白名单写 load_skill 才可加载,默认只读集不含。
     let (skill_defs, skill_diagnostics) =
-        latent_core::discover_skill_defs(&cwd, subagent_home.as_deref());
+        latent_core::discover_skill_defs(&cwd, subagent_latent_dir.as_deref());
     for diagnostic in &skill_diagnostics {
         eprintln!("[latent][skills] {diagnostic}");
     }
@@ -1157,9 +1164,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // /model 同源的解析面(models.json + 内置 provider 默认表);父模型缺省
     // 继承自父会话快照,显式 `model` 参数走本解析器
     let subagent_resolver =
-        latent_core::create_model_resolver_from_config(Some(&cwd), subagent_home.as_deref());
+        latent_core::create_model_resolver_from_config(Some(&cwd), subagent_latent_dir.as_deref());
     let factory_resolver =
-        latent_core::create_model_resolver_from_config(Some(&cwd), subagent_home.as_deref());
+        latent_core::create_model_resolver_from_config(Some(&cwd), subagent_latent_dir.as_deref());
     let resolve_model: ModelResolverFn = Arc::new(move |spec: &str| subagent_resolver.resolve(spec));
     let factory_resolve_model: ModelResolverFn =
         Arc::new(move |spec: &str| factory_resolver.resolve(spec));
@@ -1226,7 +1233,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         parent: subagent_parent_cell.clone(),
         async_approval: subagent_async_approval,
         cwd: cwd.clone(),
-        home: subagent_home.clone(),
+        latent_dir: subagent_latent_dir.clone(),
         agent_defs,
         child_store_factory: child_store_factory.clone(),
     }));
@@ -1738,19 +1745,19 @@ mod tests {
         let global = TempDir::new("ctx_prio_global");
         global.write_settings(r#"{"contextSnapshot": true}"#);
         assert_eq!(
-            context_snapshot_enabled_from(Some(&project.0), Some(&global.0)),
+            context_snapshot_enabled_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some(true),
             "项目未配置时回退全局"
         );
         project.write_settings("{not json");
         assert_eq!(
-            context_snapshot_enabled_from(Some(&project.0), Some(&global.0)),
+            context_snapshot_enabled_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some(true),
             "项目坏 JSON 跳过,继续看全局"
         );
         project.write_settings(r#"{"contextSnapshot": false}"#);
         assert_eq!(
-            context_snapshot_enabled_from(Some(&project.0), Some(&global.0)),
+            context_snapshot_enabled_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some(false),
             "项目显式 false 优先于全局 true"
         );
@@ -1774,20 +1781,20 @@ mod tests {
         let global = TempDir::new("sp_prio_global");
         global.write_file(".latent/system-prompt.md", "global prompt");
         assert_eq!(
-            system_prompt_override_from(Some(&project.0), Some(&global.0)),
+            system_prompt_override_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some("global prompt".into()),
             "项目无文件时回退全局"
         );
         // 空白文件 = 未配置,继续看全局
         project.write_file(".latent/system-prompt.md", "   \n\t");
         assert_eq!(
-            system_prompt_override_from(Some(&project.0), Some(&global.0)),
+            system_prompt_override_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some("global prompt".into()),
             "项目空白文件跳过"
         );
         project.write_file(".latent/system-prompt.md", "project prompt\n");
         assert_eq!(
-            system_prompt_override_from(Some(&project.0), Some(&global.0)),
+            system_prompt_override_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some("project prompt".into()),
             "项目文件优先且去除首尾空白"
         );
@@ -1824,12 +1831,12 @@ mod tests {
         let project = TempDir::new("to_prio");
         let global = TempDir::new("to_prio_global");
         project.write_settings(r#"{"bashTimeoutSecs": 60}"#);
-        let policy = shell_timeout_policy_from(Some(&project.0), Some(&global.0));
+        let policy = shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent")));
         assert_eq!(policy.default_timeout_secs, 60, "单键配置生效,其余保持默认");
         assert_eq!(policy.background_after_secs, 60);
         global.write_settings(r#"{"bashTimeoutSecs": 30, "backgroundAfterSecs": 45}"#);
         assert_eq!(
-            shell_timeout_policy_from(Some(&project.0), Some(&global.0)),
+            shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent"))),
             latent_tools::ShellTimeoutPolicy {
                 default_timeout_secs: 60,
                 background_after_secs: 45
@@ -1837,7 +1844,7 @@ mod tests {
             "首个含配置的 settings 生效:项目 bash 超时 + 全局后台阈值"
         );
         project.write_settings(r#"{"backgroundAfterSecs": 300}"#);
-        let policy = shell_timeout_policy_from(Some(&project.0), Some(&global.0));
+        let policy = shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent")));
         assert_eq!(policy.default_timeout_secs, 30, "项目未含 bashTimeoutSecs 时回退全局");
         assert_eq!(policy.background_after_secs, 300, "项目 backgroundAfterSecs 覆盖全局");
     }
@@ -1848,19 +1855,19 @@ mod tests {
         let global = TempDir::new("prio_global");
         global.write_settings(r#"{"commandPrefix": "global-prefix"}"#);
         assert_eq!(
-            shell_command_prefix_from(Some(&project.0), Some(&global.0)),
+            shell_command_prefix_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some("global-prefix".into()),
             "项目无 settings 时回退全局"
         );
         project.write_settings(r#"{"commandPrefix": "   "}"#);
         assert_eq!(
-            shell_command_prefix_from(Some(&project.0), Some(&global.0)),
+            shell_command_prefix_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some("global-prefix".into()),
             "项目空白前缀跳过,继续看全局"
         );
         project.write_settings(r#"{"commandPrefix": "project-prefix"}"#);
         assert_eq!(
-            shell_command_prefix_from(Some(&project.0), Some(&global.0)),
+            shell_command_prefix_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some("project-prefix".into()),
             "项目非空前缀优先于全局"
         );
@@ -1909,13 +1916,13 @@ mod tests {
         let global = TempDir::new("tools_prio_global");
         global.write_settings(r#"{"tools": ["read", "write"]}"#);
         assert_eq!(
-            active_tool_names_from(Some(&project.0), Some(&global.0)),
+            active_tool_names_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some(vec!["read".to_string(), "write".to_string()]),
             "项目未配置时回退全局"
         );
         project.write_settings(r#"{"tools": ["bash"]}"#);
         assert_eq!(
-            active_tool_names_from(Some(&project.0), Some(&global.0)),
+            active_tool_names_from(Some(&project.0), Some(&global.0.join(".latent"))),
             Some(vec!["bash".to_string()]),
             "项目配置优先于全局"
         );
@@ -2098,10 +2105,10 @@ mod tests {
         let project2 = TempDir::new("perm_prio");
         let global = TempDir::new("perm_prio_global");
         global.write_settings(r#"{"sessionMode": "full-access"}"#);
-        let files = read_settings_files(Some(&project2.0), Some(&global.0));
+        let files = read_settings_files(Some(&project2.0), Some(&global.0.join(".latent")));
         assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::FullAccess);
         project2.write_settings(r#"{"sessionMode": "plan"}"#);
-        let files = read_settings_files(Some(&project2.0), Some(&global.0));
+        let files = read_settings_files(Some(&project2.0), Some(&global.0.join(".latent")));
         assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Plan);
     }
 
@@ -2112,10 +2119,10 @@ mod tests {
         let project = TempDir::new("li_proj");
         let global = TempDir::new("li_global");
         // 无任何文件 = 无规则(关闭过滤)
-        assert!(search_ignore_from(Some(&project.0), Some(&global.0)).is_empty());
+        assert!(search_ignore_from(Some(&project.0), Some(&global.0.join(".latent"))).is_empty());
         // 只全局:规则生效,匹配根 = 项目 cwd
         global.write_file(".latent/.latentignore", "vendor/\n");
-        let ignore = search_ignore_from(Some(&project.0), Some(&global.0));
+        let ignore = search_ignore_from(Some(&project.0), Some(&global.0.join(".latent")));
         assert!(ignore.matches(&project.0.join("vendor"), true));
         assert!(!ignore.matches(&project.0.join("src/a.ts"), false));
         assert_eq!(
@@ -2124,7 +2131,7 @@ mod tests {
         );
         // 项目 + 全局拼接:项目行在后,`!` 反选全局规则
         project.write_file(".latentignore", "generated/\n!vendor/\n");
-        let ignore = search_ignore_from(Some(&project.0), Some(&global.0));
+        let ignore = search_ignore_from(Some(&project.0), Some(&global.0.join(".latent")));
         assert!(ignore.matches(&project.0.join("generated"), true));
         assert!(
             !ignore.matches(&project.0.join("vendor"), true),
@@ -2191,7 +2198,7 @@ mod tests {
         // 项目文件整体优先于全局(与身份句同一 precedence:文件级)
         let global = TempDir::new("sp_rules_global");
         global.write_file(".latent/system-prompt.md", "global prompt <rules>G</rules>");
-        let text = system_prompt_override_from(Some(&project.0), Some(&global.0)).unwrap();
+        let text = system_prompt_override_from(Some(&project.0), Some(&global.0.join(".latent"))).unwrap();
         let (prompt, rules) = latent_core::split_prompt_and_rules(&text);
         assert_eq!(prompt.as_deref(), Some("You are my agent."));
         assert_eq!(rules.as_deref(), Some("Always run cargo clippy before commit."));

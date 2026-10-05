@@ -38,9 +38,10 @@ pub struct SubagentSessionFactory {
 
 impl SubagentSessionFactory {
     /// 发现可用 agent 定义(项目优先;每次调用重新扫描,数据化)。
+    /// 本方法是进程入口面,允许在此读 HOME/LATENT_HOME 解析数据目录。
     pub fn discover(&self) -> Vec<AgentDef> {
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        discover_agent_defs(&self.cwd, home.as_deref()).0
+        discover_agent_defs(&self.cwd, crate::paths::latent_dir(home.as_deref()).as_deref()).0
     }
 
     /// 创建一个平行会话。

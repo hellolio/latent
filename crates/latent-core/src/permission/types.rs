@@ -73,7 +73,7 @@ pub fn classify_tool(name: &str) -> ToolRiskClass {
         // 否则 Plan 模式会把它当 External 工具整体拒绝
         "subagent" => ToolRiskClass::ReadOnly,
         // web 工具(latent-web):搜索/抓取/检索无本地写副作用(缓存写专属
-        // 目录 ~/.latent/web-search-cache/),出网能力由沙箱 network_access 与
+        // 目录 <数据目录>/web-search-cache/),出网能力由沙箱 network_access 与
         // web-search.json 的用户配置约束;fetch/source_check 的目标 URL 过
         // SSRF 校验(私网封锁),故整体按只读类放行(取舍:确认于 web 设计)
         "web_search" | "get_search_content" | "fetch_content" | "source_check" => {

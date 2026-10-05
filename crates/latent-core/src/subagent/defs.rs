@@ -1,5 +1,5 @@
 //! agent 类型定义(14 文档 §4.4):定义是数据文件(`<cwd>/.latent/agents/*.md`
-//! 项目优先 → `~/.latent/agents/*.md`),加类型不重编译。
+//! 项目优先 → 用户数据目录 `agents/*.md`,见 `crate::paths`),加类型不重编译。
 //!
 //! frontmatter 只支持本子集(name/description/model/tools),正文即 system
 //! prompt;解析失败单条诊断跳过,不阻断其他文件(对齐扩展错误语义 07 §8.5)。
@@ -22,13 +22,14 @@ pub struct AgentDef {
 }
 
 /// 发现两级目录的 agent 定义;同名时项目级覆盖用户级。
+/// `latent_dir` 为已解析的用户数据目录(`crate::paths::latent_dir`)。
 /// 返回 (按 name 排序的定义, 诊断消息)。
-pub fn discover_agent_defs(cwd: &Path, home: Option<&Path>) -> (Vec<AgentDef>, Vec<String>) {
+pub fn discover_agent_defs(cwd: &Path, latent_dir: Option<&Path>) -> (Vec<AgentDef>, Vec<String>) {
     let mut diagnostics = Vec::new();
     let mut by_name: BTreeMap<String, AgentDef> = BTreeMap::new();
     // 后扫描的覆盖先扫描的:先用户级,后项目级(项目优先)
     let dirs = [
-        home.map(|home| home.join(".latent").join("agents")),
+        latent_dir.map(|dir| dir.join("agents")),
         Some(cwd.join(".latent").join("agents")),
     ];
     for dir in dirs.into_iter().flatten() {
@@ -279,7 +280,8 @@ mod tests {
         std::fs::write(project_dir.join("broken.md"), "---\nname: has space\n---\nprompt").unwrap();
         std::fs::write(project_dir.join("notes.txt"), "ignored").unwrap();
 
-        let (defs, diagnostics) = discover_agent_defs(&root.join("project"), Some(&root.join("home")));
+        let (defs, diagnostics) =
+            discover_agent_defs(&root.join("project"), Some(&root.join("home/.latent")));
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["only-user", "shared"]);
         let shared = defs.iter().find(|d| d.name == "shared").unwrap();

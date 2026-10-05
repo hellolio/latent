@@ -48,7 +48,8 @@ fn resolve_theme(explicit: Option<&str>) -> (Theme, Option<String>) {
     }
     let cwd = std::env::current_dir().ok();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    if let Some(name) = latent_core::load_theme_setting(cwd.as_deref(), home.as_deref()) {
+    let dir = latent_core::latent_dir(home.as_deref());
+    if let Some(name) = latent_core::load_theme_setting(cwd.as_deref(), dir.as_deref()) {
         if let Some(resolved) = named(&name, "settings.json") {
             return resolved;
         }
@@ -78,7 +79,8 @@ fn resolve_tui_mode(explicit: Option<&str>) -> bool {
     }
     let cwd = std::env::current_dir().ok();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    if let Some(name) = latent_core::load_tui_mode_setting(cwd.as_deref(), home.as_deref()) {
+    let dir = latent_core::latent_dir(home.as_deref());
+    if let Some(name) = latent_core::load_tui_mode_setting(cwd.as_deref(), dir.as_deref()) {
         if let Some(resolved) = parse(&name, "settings.json") {
             return resolved;
         }
@@ -110,10 +112,11 @@ pub async fn run_interactive_mode(
     // 开关(默认开)
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let dir = latent_core::latent_dir(home.as_deref());
     let copy_on_select =
-        latent_core::load_copy_on_select_setting(Some(&cwd), home.as_deref()).unwrap_or(false);
+        latent_core::load_copy_on_select_setting(Some(&cwd), dir.as_deref()).unwrap_or(false);
     let ctrl_x_copy =
-        latent_core::load_ctrl_x_copy_setting(Some(&cwd), home.as_deref()).unwrap_or(true);
+        latent_core::load_ctrl_x_copy_setting(Some(&cwd), dir.as_deref()).unwrap_or(true);
 
     // 键盘线程暂停开关:TUI 挂起跑外部编辑器($EDITOR)期间置位,线程
     // 停止读取 crossterm 事件,把终端输入让给子进程。
@@ -162,7 +165,7 @@ pub async fn run_interactive_mode(
     // RwLock:/model 配置入口(编辑 models.json/表单)运行期热重载
     let resolver = std::sync::RwLock::new(latent_core::create_model_resolver_from_config(
         Some(&cwd),
-        home.as_deref(),
+        latent_core::latent_dir(home.as_deref()).as_deref(),
     ));
     let router = crate::modes::interactive::handlers::SessionRouter::new(session.clone());
     let ctx = InteractiveCtx {
@@ -352,7 +355,8 @@ fn run_models_editor(
     app: &mut TuiApp,
     keys_paused: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
-    let path = latent_core::preferred_models_path(Some(&state.cwd), state.home.as_deref());
+    let dir = latent_core::latent_dir(state.home.as_deref());
+    let path = latent_core::preferred_models_path(Some(&state.cwd), dir.as_deref());
     if let Err(error) = latent_core::write_models_template_if_absent(&path) {
         state.commit_ephemeral(view::error_line(
             &format!("无法创建 {}: {error}", path.display()),
@@ -498,9 +502,10 @@ fn commit_startup(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
     // 发现诊断已由装配期打 stderr,这里不重复
     if let Ok(cwd) = std::env::current_dir() {
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let dir = latent_core::latent_dir(home.as_deref());
         state
             .resources
-            .extend(discover_resource_sections(&cwd, home.as_deref()));
+            .extend(discover_resource_sections(&cwd, dir.as_deref()));
     }
     let mut extensions: Vec<String> = Vec::new();
     for diagnostic in ctx.session.main().extension_diagnostics() {
@@ -527,17 +532,17 @@ fn commit_startup(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
 /// 跳过(`resources` 渲染同样过滤)。
 fn discover_resource_sections(
     cwd: &std::path::Path,
-    home: Option<&std::path::Path>,
+    latent_dir: Option<&std::path::Path>,
 ) -> Vec<(String, Vec<String>)> {
     let mut sections = Vec::new();
-    let (skills, _) = latent_core::discover_skill_defs(cwd, home);
+    let (skills, _) = latent_core::discover_skill_defs(cwd, latent_dir);
     if !skills.is_empty() {
         sections.push((
             "Skills".into(),
             skills.iter().map(|s| s.name.clone()).collect(),
         ));
     }
-    let (agents, _) = latent_core::discover_agent_defs(cwd, home);
+    let (agents, _) = latent_core::discover_agent_defs(cwd, latent_dir);
     if !agents.is_empty() {
         sections.push((
             "Subagents".into(),

@@ -1,5 +1,7 @@
 //! web-search.json 配置(上游 `~/.pi/agent/web-search.json` 的 latent 对应物):
-//! `~/.latent/web-search.json` + 项目 `.latent/web-search.json`(后读者逐字段覆盖)。
+//! 用户数据目录 `web-search.json`(LATENT_HOME/`~/.config/latent`,装配层注入)
+//! + 项目 `.latent/web-search.json`(后读者逐字段覆盖)。
+//!
 //! 凭据字段保留原始串(可能是 $ENV / !命令),调用时经 credential 模块解析。
 
 use std::path::{Path, PathBuf};
@@ -286,10 +288,12 @@ impl WebSearchConfig {
 }
 
 /// 配置文件候选路径:全局在前,项目在后(与 models.json 同序)。
-pub fn config_paths(project_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+/// `latent_dir` 为已解析的用户数据目录(装配层经 latent-core 的
+/// `latent_dir` 解析后注入;latent-web 自身不感知 HOME/环境变量)。
+pub fn config_paths(project_dir: Option<&Path>, latent_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(home) = home {
-        paths.push(home.join(".latent/web-search.json"));
+    if let Some(dir) = latent_dir {
+        paths.push(dir.join("web-search.json"));
     }
     if let Some(project) = project_dir {
         paths.push(project.join(".latent/web-search.json"));
@@ -298,9 +302,12 @@ pub fn config_paths(project_dir: Option<&Path>, home: Option<&Path>) -> Vec<Path
 }
 
 /// 加载 + 合并;解析失败打 stderr 跳过对应文件(容错风格同 models.json)。
-pub fn load_web_search_config(project_dir: Option<&Path>, home: Option<&Path>) -> WebSearchConfig {
+pub fn load_web_search_config(
+    project_dir: Option<&Path>,
+    latent_dir: Option<&Path>,
+) -> WebSearchConfig {
     let mut merged = WebSearchConfig::default();
-    for path in config_paths(project_dir, home) {
+    for path in config_paths(project_dir, latent_dir) {
         match parse_file(&path) {
             Ok(Some(file)) => merge(&mut merged, file),
             Ok(None) => {}
@@ -310,9 +317,10 @@ pub fn load_web_search_config(project_dir: Option<&Path>, home: Option<&Path>) -
     merged
 }
 
-/// 配置目录(缓存落盘位置):~/.latent/。
-pub fn config_dir(home: Option<&Path>) -> PathBuf {
-    home.map(|home| home.join(".latent"))
+/// 缓存落盘根目录(调用方注入的数据目录;未注入时退回 cwd 下 `.latent`)。
+pub fn config_dir(latent_dir: Option<&Path>) -> PathBuf {
+    latent_dir
+        .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".latent"))
 }
 

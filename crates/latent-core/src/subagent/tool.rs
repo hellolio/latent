@@ -61,7 +61,9 @@ pub struct SubagentDeps {
     pub async_approval: HeadlessApproval,
     /// agent 定义发现目录(§4.4;每次 `agent` 查询重新发现,保持数据化)
     pub cwd: PathBuf,
-    pub home: Option<PathBuf>,
+    /// 用户数据目录(入口层经 `crate::paths::latent_dir` 解析后注入;
+    /// agent 定义的用户级来源 `<数据目录>/agents/*.md`)
+    pub latent_dir: Option<PathBuf>,
     /// 装配期发现的定义快照(prompt snippet 目录用;诊断由装配方打印)
     pub agent_defs: Vec<AgentDef>,
     /// 子会话落盘工厂(可选;tag = run id,JSONL 格式与主会话一致)
@@ -273,12 +275,13 @@ impl Tool for SubagentTool {
                 ))
             }
             (Some(name), None) => {
-                let (defs, _) = discover_agent_defs(&self.deps.cwd, self.deps.home.as_deref());
+                let (defs, _) = discover_agent_defs(&self.deps.cwd, self.deps.latent_dir.as_deref());
                 let def = defs.iter().find(|def| def.name == name).ok_or_else(|| {
                     let available: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
                     Self::fail(format!(
                         "unknown agent `{name}`; available agents: {available:?} (defined in \
-                         .latent/agents/*.md and ~/.latent/agents/*.md)"
+                         .latent/agents/*.md and $LATENT_HOME/agents/*.md, default \
+                         ~/.config/latent/agents)"
                     ))
                 })?;
                 (
@@ -489,7 +492,7 @@ mod tests {
             parent: Arc::new(Mutex::new(Weak::new())),
             async_approval: HeadlessApproval::Deny,
             cwd: cwd.to_path_buf(),
-            home: None,
+            latent_dir: None,
             agent_defs: Vec::new(),
             child_store_factory: None,
         }
