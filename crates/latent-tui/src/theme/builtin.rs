@@ -6,11 +6,12 @@ use ratatui::style::Color;
 
 use super::Theme;
 
-/// 真彩色调色板(COLORTERM=truecolor / 24bit)。
+/// 真彩色调色板(COLORTERM=truecolor / 24bit)。镜像默认主题 Tokyo Night
+/// 的统一推导结果(语义色相见 external.rs 头注释)。
 pub fn dark() -> Theme {
     Theme {
-        // accent 去蓝:与默认主题(Tokyo Night 精选覆盖)同用橙色
-        accent: Color::Rgb(0xff, 0x9e, 0x64),
+        // 绿=主色:与 success 同源(选中项/cwd/行内代码)
+        accent: Color::Rgb(0x9e, 0xce, 0x6a),
         user_bg: Color::Rgb(0x33, 0x34, 0x38),
         user_text: Color::Rgb(0xbe, 0xbe, 0xbe),
         assistant_text: Color::Rgb(0xd4, 0xd4, 0xd4),
@@ -30,23 +31,25 @@ pub fn dark() -> Theme {
         error: Color::Rgb(0xf7, 0x76, 0x8e),
         warning: Color::Rgb(0xe0, 0xaf, 0x68),
         success: Color::Rgb(0x9e, 0xce, 0x6a),
-        muted: Color::Rgb(0x96, 0x9e, 0xb6),
-        dim: Color::Rgb(0x7e, 0x85, 0x97),
+        // 弱文字统一中性灰(与 thinking/tool_output 同值)
+        muted: Color::Rgb(0x8c, 0x8c, 0x8c),
+        dim: Color::Rgb(0x8c, 0x8c, 0x8c),
         md_heading: Color::Rgb(0xe0, 0xaf, 0x68),
-        md_link: Color::Rgb(0x7a, 0xa2, 0xf7),
-        md_code: Color::Rgb(0xff, 0x9e, 0x64),
+        md_link: Color::Rgb(0x7d, 0xcf, 0xff),
+        md_code: Color::Rgb(0x9e, 0xce, 0x6a),
         md_code_block_border: Color::Rgb(0x3b, 0x42, 0x61),
         border_idle: Color::Rgb(0x3b, 0x42, 0x61),
         border_busy: Color::Rgb(0xbb, 0x9a, 0xf7),
         border_bash: Color::Rgb(0x9e, 0xce, 0x6a),
         spinner: Color::Rgb(0xbb, 0x9a, 0xf7),
-        footer_cwd: Color::Rgb(0xff, 0x9e, 0x64),
+        footer_cwd: Color::Rgb(0x9e, 0xce, 0x6a),
         usage_input: Color::Rgb(0x7d, 0xcf, 0xff),
         usage_output: Color::Rgb(0x9e, 0xce, 0x6a),
         usage_cache: Color::Rgb(0xbb, 0x9a, 0xf7),
         usage_cost: Color::Rgb(0xe0, 0xaf, 0x68),
-        usage_ctx: Color::Rgb(0x7a, 0xa2, 0xf7),
-        usage_reasoning: Color::Rgb(0x7a, 0xa2, 0xf7),
+        // ctx%/reasoning 用信息第二色阶(蓝紫过渡,blend(info, secondary, 0.5))
+        usage_ctx: Color::Rgb(0x9c, 0xb5, 0xfb),
+        usage_reasoning: Color::Rgb(0x9c, 0xb5, 0xfb),
         mode_plan: Color::Rgb(0xff, 0x79, 0xc6),
         subagent: Color::Rgb(0xbb, 0x9a, 0xf7),
         popup_border: Color::Rgb(0x6b, 0x73, 0x94),
@@ -54,10 +57,11 @@ pub fn dark() -> Theme {
     }
 }
 
-/// ANSI 16 色兜底(基本色相尽量对齐 dark 调色板的语义;accent 用黄少蓝)。
+/// ANSI 16 色兜底(基本色相尽量对齐 dark 调色板的语义:绿=主色、
+/// Cyan=信息、DarkGray=统一弱文字灰)。
 pub fn dark_ansi() -> Theme {
     Theme {
-        accent: Color::Yellow,
+        accent: Color::Green,
         user_bg: Color::DarkGray,
         user_text: Color::White,
         assistant_text: Color::Gray,
@@ -77,24 +81,25 @@ pub fn dark_ansi() -> Theme {
         error: Color::Red,
         warning: Color::Yellow,
         success: Color::Green,
-        muted: Color::Gray,
-        dim: Color::Gray,
+        // 弱文字统一 DarkGray(与 thinking 同灰档)
+        muted: Color::DarkGray,
+        dim: Color::DarkGray,
         md_heading: Color::Yellow,
         md_link: Color::Blue,
-        md_code: Color::Magenta,
+        md_code: Color::Green,
         md_code_block_border: Color::DarkGray,
         border_idle: Color::DarkGray,
         border_busy: Color::Magenta,
         border_bash: Color::Green,
         spinner: Color::Magenta,
-        footer_cwd: Color::Yellow,
+        footer_cwd: Color::Green,
         usage_input: Color::Cyan,
         usage_output: Color::Green,
         usage_cache: Color::Magenta,
         usage_cost: Color::Yellow,
         usage_ctx: Color::Blue,
         usage_reasoning: Color::Blue,
-        // 16 色下的粉红 = Magenta;subagent 用 Cyan 与 plan/git 绿区分
+        // 16 色下的粉红 = Magenta;subagent 用 Cyan 与 plan/git 区分
         mode_plan: Color::Magenta,
         subagent: Color::Cyan,
         popup_border: Color::DarkGray,

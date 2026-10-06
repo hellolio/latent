@@ -8,7 +8,7 @@
 //! 2. **语义主题**:`Theme`(角色 → 颜色,真彩色/ANSI16 双调色板);
 //! 3. **组件**:多行 `Editor`、`Markdown`(syntect 高亮)、`SelectList`、
 //!    `CommandPopup`(斜杠补全)、`FilePopup`(`@` 文件选择)、
-//!    `tool_card`/`header`/`footer`、`loader`;
+//!    `tool_card`/`header`/`footer`、`loader`、`popup`(弹窗圆角外框);
 //! 4. **类型**:`Key`(crossterm 事件归一)、`text`(span 感知折行工具)。
 //!
 //! 渲染模型(pi TuiMainScreen 对应):**全帧行级差分** —— 已定稿行缓存
@@ -29,6 +29,7 @@ pub mod highlight;
 pub mod key;
 pub mod loader;
 pub mod markdown;
+pub mod popup;
 pub mod select_list;
 pub mod selection;
 pub mod text;

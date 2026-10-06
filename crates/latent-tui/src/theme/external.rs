@@ -1,12 +1,14 @@
 //! ratatui-themes → 语义角色的映射层(主题数据与逻辑分离的边界)。
 //!
 //! 分两层:
-//! 1. **统一推导规则**:`ThemePalette` 的 10 个语义字段直接映射同名角色,
-//!    缺失角色(dim/border/user_bg 等)由 `bg`/`fg`/`muted` 按比例混色推导
-//!    —— 混色方向由 bg/fg 自身的明暗决定,深浅色主题共用同一公式;
-//! 2. **精选微调**:Tokyo Night / Catppuccin Mocha / Dracula / Nord /
-//!    Rosé Pine 五个主题对 user_bg、border、md_code 等角色用官方色值覆盖,
-//!    其余主题走统一规则。
+//! 1. **统一推导规则**:语义色相全局一致,换主题只变色值不变布局语义——
+//!    绿(success)=主色(accent/cwd/行内代码)、蓝(info)=信息主色(tool_title/
+//!    链接/↑prompt)、蓝紫(info×secondary 混色)=信息第二色阶(ctx%/reasoning)、
+//!    紫(secondary)=扩展活跃(subagent/spinner/cache)、黄(warning)=警示与
+//!    git 分支、灰=统一中性弱文字(thinking/muted/dim);背景/边框等结构性
+//!    角色由 `bg`/`fg` 按比例混色推导,深浅色主题共用同一公式;
+//! 2. **精选微调**:各主题对 user_bg、border、popup_border 等结构性角色用
+//!    官方色值覆盖,mode_plan 用各自官方粉;语义色相不微调。
 
 use ratatui::style::Color;
 pub use ratatui_themes::ThemeName;
@@ -29,14 +31,19 @@ pub fn from_name(name: ThemeName) -> Theme {
     } else {
         Color::Rgb(0x4a, 0x4a, 0x4a)
     };
-    // thinking:偏暗的中性灰(去掉调色板 muted 的蓝色偏向)
+    // thinking:偏暗的中性灰(去掉调色板 muted 的蓝色偏向);muted/dim/tool_output
+    // 与之统一为同一弱文字灰
     let thinking = if p.is_dark() {
         Color::Rgb(0x8c, 0x8c, 0x8c)
     } else {
         Color::Rgb(0x76, 0x76, 0x76)
     };
+    // 信息第二色阶:info 与 secondary 的中点(蓝紫过渡),与信息主色同段显示时
+    // 可区分(中点必异于两端),又不逸出冷色信息家族
+    let info_alt = blend(p.info, p.secondary, 0.5);
     let mut theme = Theme {
-        accent: p.accent,
+        // 绿=主色:与 success 同源,用于选中项/cwd/行内代码等强调
+        accent: p.success,
         // 0.14:用户块背景要柔和他可辨,太暗会与终端底色混在一起
         user_bg: blend(p.bg, user_text, 0.14),
         user_text,
@@ -69,24 +76,26 @@ pub fn from_name(name: ThemeName) -> Theme {
         error: p.error,
         warning: p.warning,
         success: p.success,
-        muted: p.muted,
-        // dim 靠近 fg 一侧(而非 bg):footer/提示等大面积弱文字必须可读
-        dim: blend(p.muted, p.fg, 0.25),
+        // 弱文字统一中性灰(与 thinking 同值):键名/提示/分隔符/系统通知一档
+        muted: thinking,
+        dim: thinking,
         md_heading: p.warning,
-        md_link: p.accent,
-        md_code: blend(p.warning, p.error, 0.45),
+        md_link: p.info,
+        // 行内代码用绿主色(与选中项/cwd 同源)
+        md_code: p.success,
         md_code_block_border: blend(p.bg, p.fg, 0.18),
         border_idle: blend(p.bg, p.fg, 0.18),
         border_busy: p.secondary,
         border_bash: p.success,
         spinner: p.secondary,
-        footer_cwd: p.accent,
+        footer_cwd: p.success,
         usage_input: p.info,
         usage_output: p.success,
         usage_cache: p.secondary,
         usage_cost: p.warning,
-        usage_ctx: p.accent,
-        usage_reasoning: p.accent,
+        // ctx%/reasoning 用信息第二色阶:同一 token 段内与 ↑prompt 的 info 主色可区分
+        usage_ctx: info_alt,
+        usage_reasoning: info_alt,
         // 粉红:secondary(多主题为紫/品红系)向 error(红)偏移;subagent
         // 独立色相直接取 secondary,与 plan 粉、success 绿区分
         mode_plan: blend(p.secondary, p.error, 0.4),
@@ -98,169 +107,136 @@ pub fn from_name(name: ThemeName) -> Theme {
     theme
 }
 
-/// 精选微调表:全部主题用各自官方 UI 色板覆盖低饱和角色,保证主题之间
-/// 观感差异明显(统一规则只兜底,特色靠这里)。
+/// 精选微调表:只覆盖结构性角色(user_bg/边框/弹窗边框)与 mode_plan 官方粉,
+/// 保证主题之间背景观感差异明显;语义色相(绿/灰/蓝/紫)不在此微调,
+/// 由统一推导决定,避免污染全局语义映射。
 fn refine(name: ThemeName, t: &mut Theme) {
     match name {
         ThemeName::TokyoNight => {
             t.mode_plan = Color::Rgb(0xff, 0x79, 0xc6); // pink
             t.subagent = Color::Rgb(0xbb, 0x9a, 0xf7); // purple
-            // 去蓝化:accent/提示符/目录用橙色(pi 风格),大面积背景用
-            // 低饱和石墨色,弱文字(dim)提亮保证可读
-            t.accent = Color::Rgb(0xff, 0x9e, 0x64); // orange
-            t.footer_cwd = t.accent;
+            // 大面积背景用低饱和石墨色,弱文字保持统一中性灰
             t.user_bg = Color::Rgb(0x33, 0x34, 0x38); // 中性石墨,去蓝
             t.border_idle = Color::Rgb(0x3b, 0x42, 0x61);
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xff, 0x9e, 0x64);
             t.popup_border = Color::Rgb(0x6b, 0x73, 0x94); // comment 提亮
-            t.dim = Color::Rgb(0x7e, 0x85, 0x97); // 中性灰,弱文字可读
         }
         ThemeName::CatppuccinMocha => {
             t.mode_plan = Color::Rgb(0xf5, 0xc2, 0xe7); // pink
+            // 调色板 secondary 槽位放的即是官方粉,紫系改用官方 mauve 与粉区分
+            t.subagent = Color::Rgb(0xcb, 0xa6, 0xf7);
+            t.spinner = t.subagent;
+            t.usage_cache = t.subagent;
+            t.border_busy = t.subagent;
             t.user_bg = Color::Rgb(0x31, 0x32, 0x44); // surface0
             t.border_idle = Color::Rgb(0x45, 0x47, 0x5a); // surface1
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xfa, 0xb3, 0x87); // peach
             t.popup_border = Color::Rgb(0x6c, 0x70, 0x86); // overlay0
-            t.usage_input = Color::Rgb(0x89, 0xb4, 0xfa); // blue
-            t.usage_cache = Color::Rgb(0xcb, 0xa6, 0xf7); // mauve
         }
         ThemeName::CatppuccinLatte => {
             t.mode_plan = Color::Rgb(0xea, 0x76, 0xcb); // pink
+            // 同 Mocha:secondary 槽位为粉,紫系用官方 mauve
+            t.subagent = Color::Rgb(0x88, 0x39, 0xef);
+            t.spinner = t.subagent;
+            t.usage_cache = t.subagent;
+            t.border_busy = t.subagent;
             t.user_bg = Color::Rgb(0xdf, 0xdf, 0xe1); // surface0
             t.border_idle = Color::Rgb(0xcc, 0xd0, 0xda); // surface1
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xfe, 0x64, 0x0b); // orange? peach
             t.popup_border = Color::Rgb(0x9c, 0xa0, 0xa7); // overlay0
-            t.usage_input = Color::Rgb(0x1e, 0x66, 0xf5); // blue
-            t.usage_cache = Color::Rgb(0x88, 0x39, 0xef); // mauve
         }
         ThemeName::Dracula => {
             t.mode_plan = Color::Rgb(0xff, 0x79, 0xc6); // pink
+            // 调色板 secondary 槽位放的即是官方粉,紫系改用官方紫与粉区分
+            t.subagent = Color::Rgb(0xbd, 0x93, 0xf9);
+            t.spinner = t.subagent;
+            t.usage_cache = t.subagent;
+            t.border_busy = t.subagent;
             t.user_bg = Color::Rgb(0x44, 0x47, 0x5a); // selection
             t.border_idle = Color::Rgb(0x44, 0x47, 0x5a);
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xff, 0xb8, 0x6c); // orange
             t.popup_border = Color::Rgb(0x62, 0x64, 0x83); // comment
-            t.usage_input = Color::Rgb(0x8b, 0xe9, 0xfd); // cyan
-            t.usage_cache = Color::Rgb(0xff, 0x79, 0xc6); // pink
         }
         ThemeName::Nord => {
             t.mode_plan = Color::Rgb(0xb4, 0x8e, 0xad); // aurora purple
             t.user_bg = Color::Rgb(0x3b, 0x42, 0x52); // polar night 2
             t.border_idle = Color::Rgb(0x43, 0x4c, 0x5e); // polar night 3
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0x8f, 0xbc, 0xbb); // frost teal
             t.popup_border = Color::Rgb(0x4c, 0x56, 0x6a); // polar night 3.5
-            t.usage_input = Color::Rgb(0x88, 0xc0, 0xd0); // frost
-            t.usage_cache = Color::Rgb(0xb4, 0x8e, 0xad); // aurora purple
         }
         ThemeName::RosePine => {
             t.mode_plan = Color::Rgb(0xeb, 0xbc, 0xba); // rose
             t.user_bg = Color::Rgb(0x1f, 0x1d, 0x2e); // surface
             t.border_idle = Color::Rgb(0x26, 0x23, 0x3a); // overlay
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xeb, 0xbc, 0xba); // gold
             t.popup_border = Color::Rgb(0x40, 0x3d, 0x52); // overlay
-            t.usage_input = Color::Rgb(0x31, 0x84, 0xbf); // foam
-            t.usage_cache = Color::Rgb(0xc4, 0xa7, 0xe7); // iris
         }
         ThemeName::GruvboxDark => {
-            t.mode_plan = Color::Rgb(0xd3, 0x86, 0x9b); // purple
+            // mode_plan 走统一混色(secondary 向 error 偏移):调色板 secondary
+            // 即官方紫 #d3869b,官方粉覆盖会与紫系撞色
             t.user_bg = Color::Rgb(0x3c, 0x38, 0x36); // bg1
             t.border_idle = Color::Rgb(0x50, 0x49, 0x45); // bg2
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xfe, 0x80, 0x19); // orange
             t.popup_border = Color::Rgb(0x66, 0x5c, 0x54); // bg4
-            t.usage_input = Color::Rgb(0x83, 0xa5, 0x98); // aqua
-            t.usage_cache = Color::Rgb(0xd3, 0x86, 0x9b); // purple
         }
         ThemeName::GruvboxLight => {
-            t.mode_plan = Color::Rgb(0x8f, 0x3f, 0x71); // purple
+            // 同 GruvboxDark:secondary 即官方紫,mode_plan 走统一混色
             t.user_bg = Color::Rgb(0xeb, 0xdb, 0xb2); // bg1
             t.border_idle = Color::Rgb(0xd5, 0xc4, 0xa1); // bg2
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xd6, 0x5d, 0x0e); // orange
             t.popup_border = Color::Rgb(0xbd, 0xae, 0x93); // bg4
-            t.usage_input = Color::Rgb(0x4d, 0x76, 0x60); // aqua
-            t.usage_cache = Color::Rgb(0x8f, 0x3f, 0x71); // purple
         }
         ThemeName::OneDarkPro => {
-            t.mode_plan = Color::Rgb(0xc6, 0x78, 0xdd); // purple
+            // 同上:secondary 即官方紫 #c678dd,mode_plan 走统一混色
             t.user_bg = Color::Rgb(0x31, 0x37, 0x3b); // selection
             t.border_idle = Color::Rgb(0x3e, 0x44, 0x51);
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xd1, 0x9a, 0x66); // orange
             t.popup_border = Color::Rgb(0x5c, 0x63, 0x70); // comment
-            t.usage_input = Color::Rgb(0x61, 0xaf, 0xef); // blue
-            t.usage_cache = Color::Rgb(0xc6, 0x78, 0xdd); // purple
         }
         ThemeName::SolarizedDark => {
             t.mode_plan = Color::Rgb(0xd3, 0x36, 0x82); // magenta
             t.user_bg = Color::Rgb(0x07, 0x36, 0x42); // base02
             t.border_idle = Color::Rgb(0x58, 0x6e, 0x75); // base01
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xcb, 0x4b, 0x16); // orange
             t.popup_border = Color::Rgb(0x58, 0x6e, 0x75); // base01
-            t.usage_input = Color::Rgb(0x26, 0x8b, 0xd2); // blue
-            t.usage_cache = Color::Rgb(0x6c, 0x71, 0xc4); // violet
         }
         ThemeName::SolarizedLight => {
             t.mode_plan = Color::Rgb(0xd3, 0x36, 0x82); // magenta
             t.user_bg = Color::Rgb(0xee, 0xe8, 0xd5); // base2
             t.border_idle = Color::Rgb(0x93, 0xa1, 0xa1); // base1
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xcb, 0x4b, 0x16); // orange
             t.popup_border = Color::Rgb(0x93, 0xa1, 0xa1); // base1
-            t.usage_input = Color::Rgb(0x26, 0x8b, 0xd2); // blue
-            t.usage_cache = Color::Rgb(0x6c, 0x71, 0xc4); // violet
         }
         ThemeName::MonokaiPro => {
             t.mode_plan = Color::Rgb(0xf9, 0x26, 0x72); // pink/red
             t.user_bg = Color::Rgb(0x41, 0x41, 0x41); // dim selection
             t.border_idle = Color::Rgb(0x52, 0x52, 0x52);
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xfc, 0x98, 0x67); // orange
             t.popup_border = Color::Rgb(0x7a, 0x76, 0x6f); // comment
-            t.usage_input = Color::Rgb(0x78, 0xdc, 0xe2); // cyan
-            t.usage_cache = Color::Rgb(0xab, 0x9d, 0xf2); // purple
         }
         ThemeName::Kanagawa => {
             t.user_bg = Color::Rgb(0x2d, 0x4f, 0x67); // waveBlue1
             t.border_idle = Color::Rgb(0x22, 0x32, 0x44); // waveBlue0
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xff, 0x9e, 0x3b); // surimiOrange
             t.popup_border = Color::Rgb(0x2d, 0x4f, 0x67); // waveBlue1
-            t.usage_input = Color::Rgb(0x7f, 0xb4, 0xca); // crystalBlue
-            t.usage_cache = Color::Rgb(0x95, 0x7f, 0xb8); // oniViolet
         }
         ThemeName::Everforest => {
             t.user_bg = Color::Rgb(0x3a, 0x45, 0x3f); // bg1
             t.border_idle = Color::Rgb(0x4d, 0x58, 0x50); // bg3
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xe6, 0x98, 0x75); // orange
             t.popup_border = Color::Rgb(0x4d, 0x58, 0x50); // bg3
-            t.usage_input = Color::Rgb(0x7f, 0xbb, 0xb3); // aqua
-            t.usage_cache = Color::Rgb(0xdf, 0x69, 0x87); // red
         }
         ThemeName::Cyberpunk => {
             t.user_bg = Color::Rgb(0x21, 0x22, 0x33);
             t.border_idle = Color::Rgb(0x33, 0x34, 0x4c);
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xf7, 0xfd, 0x39); // neon yellow
             t.popup_border = Color::Rgb(0x51, 0x54, 0x70);
-            t.usage_input = Color::Rgb(0x00, 0xd9, 0xff); // neon cyan
-            t.usage_cache = Color::Rgb(0xff, 0x2b, 0xd5); // neon pink
         }
         ThemeName::MidnightCommander => {
             t.user_bg = Color::Rgb(0x2b, 0x2b, 0x33);
             t.border_idle = Color::Rgb(0x3f, 0x3f, 0x48);
             t.md_code_block_border = t.border_idle;
-            t.md_code = Color::Rgb(0xb2, 0x6b, 0x00);
             t.popup_border = Color::Rgb(0x5f, 0x5f, 0x6b);
-            t.usage_input = Color::Rgb(0x6b, 0xa9, 0xe0);
-            t.usage_cache = Color::Rgb(0xb2, 0x8c, 0xd0);
         }
         _ => {}
     }
@@ -331,10 +307,49 @@ mod tests {
     #[test]
     fn curated_overrides_apply() {
         let t = from_name(ThemeName::TokyoNight);
-        assert_eq!(t.md_code, Color::Rgb(0xff, 0x9e, 0x64));
+        assert_eq!(t.user_bg, Color::Rgb(0x33, 0x34, 0x38));
         assert_eq!(t.border_idle, Color::Rgb(0x3b, 0x42, 0x61));
+        assert_eq!(t.mode_plan, Color::Rgb(0xff, 0x79, 0xc6));
         let mocha = from_name(ThemeName::CatppuccinMocha);
         assert_eq!(mocha.user_bg, Color::Rgb(0x31, 0x32, 0x44));
+    }
+
+    #[test]
+    fn semantic_scheme_is_unified() {
+        // 语义色相全局钉死:绿=主色、灰=统一弱文字、蓝=信息主色、蓝紫=信息
+        // 第二色阶、紫=扩展活跃、黄=警示;防止后续微调重新污染语义映射
+        for &name in ThemeName::all() {
+            let t = from_name(name);
+            // 绿系:选中项/cwd/行内代码与 success 同源
+            assert_eq!(t.accent, t.success, "{name}: accent 应为绿主色");
+            assert_eq!(t.footer_cwd, t.success, "{name}: cwd 应为绿主色");
+            assert_eq!(t.md_code, t.success, "{name}: 行内代码应为绿主色");
+            // 灰系:弱文字与 thinking 统一
+            assert_eq!(t.muted, t.thinking, "{name}: muted 应与 thinking 同灰");
+            assert_eq!(t.dim, t.thinking, "{name}: dim 应与 thinking 同灰");
+            assert_eq!(t.tool_output, t.thinking, "{name}: 工具输出应与 thinking 同灰");
+            // 蓝系:信息主色
+            assert_eq!(t.md_link, t.tool_title, "{name}: 链接应为信息主色");
+            assert_eq!(t.usage_input, t.tool_title, "{name}: ↑prompt 应为信息主色");
+            // 蓝紫:信息第二色阶,与主色可区分
+            assert_eq!(t.usage_ctx, t.usage_reasoning, "{name}: ctx/reasoning 应同阶");
+            assert_ne!(t.usage_ctx, t.usage_input, "{name}: ctx 与 ↑prompt 应可区分");
+            // 紫系:扩展活跃,且与信息主色可区分
+            assert_eq!(t.subagent, t.spinner, "{name}: subagent 应为紫");
+            assert_eq!(t.usage_cache, t.spinner, "{name}: cache 应为紫");
+            assert_ne!(t.subagent, t.usage_input, "{name}: 紫系与信息主色应可区分");
+            // 黄系:警示
+            assert_eq!(t.usage_cost, t.warning, "{name}: $cost 应为黄");
+            // 粉(模式)与紫(扩展)可区分
+            assert_ne!(t.mode_plan, t.subagent, "{name}: plan 粉与 subagent 紫应可区分");
+            // token 段渲染四色两两可区分
+            let token_hues = [t.usage_input, t.usage_output, t.usage_ctx, t.usage_cost];
+            for (i, &a) in token_hues.iter().enumerate() {
+                for &b in &token_hues[i + 1..] {
+                    assert_ne!(a, b, "{name}: token 段四色出现重合");
+                }
+            }
+        }
     }
 
     #[test]

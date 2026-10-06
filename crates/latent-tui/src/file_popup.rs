@@ -18,7 +18,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::text::truncate_line;
+use crate::popup;
 use crate::theme::Theme;
 use crate::width::display_width;
 
@@ -187,12 +187,8 @@ impl FilePopup {
         // 内容量:两侧边框各占 2 列
         let inner_w = width.saturating_sub(4).max(1);
 
-        let border = Style::new().fg(theme.popup_border);
         let dir_style = Style::new().fg(theme.accent);
-        let mut lines = vec![Line::from(Span::styled(
-            format!("╭{}", "─".repeat(width.saturating_sub(2))),
-            border,
-        ))];
+        let mut content = Vec::with_capacity(displays.len());
         for (row, display) in displays.iter().enumerate() {
             let entry = &window[row];
             let is_selected = start + row == self.selected;
@@ -207,22 +203,14 @@ impl FilePopup {
             let pad = path_w.saturating_sub(display_width(display));
             let used = 2 + display_width(marker) + display_width(display) + pad;
             let trailing = " ".repeat(inner_w.saturating_sub(used));
-            lines.push(Line::from(vec![
-                Span::styled("│ ".to_string(), border),
+            content.push(Line::from(vec![
                 Span::styled(marker.to_string(), path_style),
                 Span::styled(display.clone(), path_style),
                 Span::raw(" ".repeat(pad)),
                 Span::raw(trailing),
-                Span::styled(" │".to_string(), border),
             ]));
         }
-        lines.push(Line::from(Span::styled(
-            format!("╰{}", "─".repeat(width.saturating_sub(2))),
-            border,
-        )));
-        lines.into_iter()
-            .map(|line| truncate_line(line, width))
-            .collect()
+        popup::frame(content, width, theme)
     }
 
     fn clamp_selected(&mut self) {

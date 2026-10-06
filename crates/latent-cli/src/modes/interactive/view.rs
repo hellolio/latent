@@ -209,15 +209,15 @@ pub fn viewport(
     let mut lines: Vec<UiLine> = Vec::new();
     let mut cursor: Option<(u16, u16)> = None;
 
-    // 0. 「添加模型」表单信息区:标题 + 字段清单(全部字段恒显示,已配置
-    //    的显示内容、未配置的留空)+ 当前问题行;选择列表/编辑器作为
-    //    "具体配置选项"紧随其后。api 协议选择的选择器 prompt 即问题行,
-    //    激活时跳过问题行避免重复。
+    // 0. 「添加模型」表单信息面板:圆角外框(与选择器面板同款)内含标题 +
+    //    字段清单(全部字段恒显示,已配置的显示内容、未配置的留空)+
+    //    当前问题行;选择列表/编辑器作为"具体配置选项"紧随其后。api 协议
+    //    选择的选择器 prompt 即问题行,激活时跳过问题行避免重复。
     if let Some(form) = &state.model_form {
-        lines.push(Line::from(Span::styled(
+        let mut content: Vec<UiLine> = vec![Line::from(Span::styled(
             "模型信息",
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
-        )));
+        ))];
         // 键名一律灰色;值按字段着色区分(provider/api/baseUrl/apiKey/model 各一色)
         let value_colors = [
             theme.assistant_text,
@@ -239,15 +239,16 @@ pub fn viewport(
                 spans.push(Span::styled(value.to_string(), Style::new().fg(color)));
             }
         }
-        lines.push(Line::from(spans));
+        content.push(Line::from(spans));
         if state.select.is_none() {
             // 字段行与问题行之间空一行
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled(
+            content.push(Line::raw(""));
+            content.push(Line::from(Span::styled(
                 form.question(),
                 Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
             )));
         }
+        lines.extend(latent_tui::popup::frame(content, width, theme));
     }
 
     // 1. 预览区:选择列表 > 正文流式 > thinking > 工具命令卡片 + 实时
@@ -260,11 +261,18 @@ pub fn viewport(
     let mut preview_window = 0usize;
     let mut preview_full_len = 0usize;
     if let Some(select) = &state.select {
-        preview.push(Line::from(Span::styled(
-            select.prompt.clone(),
-            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
-        )));
-        preview.extend(latent_tui::SelectList::render(&select.list, width, theme));
+        // 圆角外框面板(与 / 命令弹窗同款),与上方已滚走的转录内容视觉
+        // 分离;prompt 按行拆分(审批弹窗 prompt 含 \n,单行直排会破坏帧
+        // 行对齐),超宽行折到内宽
+        let prompt_style = Style::new().fg(theme.accent).add_modifier(Modifier::BOLD);
+        let inner_w = width.saturating_sub(4).max(1);
+        let mut content: Vec<UiLine> = Vec::new();
+        for row in select.prompt.lines() {
+            let line = Line::from(Span::styled(row.to_string(), prompt_style));
+            content.extend(latent_tui::text::wrap_line(&line, inner_w));
+        }
+        content.extend(latent_tui::SelectList::render(&select.list, inner_w, theme));
+        preview.extend(latent_tui::popup::frame(content, width, theme));
     } else if !state.stream_text.is_empty() {
         // 全量折行读自增量缓存(append-only 时仅重折最后一个未完成源行,
         // 长回复不再逐帧 O(n) 重算)。尾窗 = 全量行尾切 preview_cap,预览
@@ -823,6 +831,92 @@ mod tests {
         let frame = viewport(&st, None, 4, 6, 8);
         assert_eq!(frame.preview_window, 0);
         assert!(frame.scroll_extra.is_empty());
+    }
+
+    #[test]
+    fn viewport_select_renders_framed_panel() {
+        // 选择器面板带圆角外框(与 / 命令弹窗同款):prompt 与选项都在框内,
+        // 与上方已滚走的转录内容视觉分离
+        let mut st = state();
+        st.select = Some(SelectRequest {
+            prompt: "设置(Enter 切换 · Esc 关闭)".into(),
+            list: latent_tui::SelectList::new(vec!["全屏渲染".into(), "常规滚动".into()]),
+            kind: SelectKind::Thinking,
+        });
+        let frame = viewport(&st, None, 4, 6, 8);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        assert!(texts[0].starts_with('╭'), "{texts:?}");
+        assert!(texts[0].ends_with('╮'));
+        assert!(texts.iter().any(|t| t.starts_with("│ 设置(Enter")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("│ ❯ 全屏渲染")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("│   常规滚动")), "{texts:?}");
+        assert!(
+            texts.iter().any(|t| t.starts_with("╰──") && t.ends_with('╯')),
+            "{texts:?}"
+        );
+        // 模态不并入滚动视口(边框行也不计入)
+        assert_eq!(frame.preview_window, 0);
+        assert!(frame.scroll_extra.is_empty());
+    }
+
+    #[test]
+    fn viewport_select_splits_and_wraps_multiline_prompt() {
+        // 审批弹窗 prompt 含 \n:拆成多个框内行,不再单行直排破坏帧行对齐;
+        // 超宽行折到内宽(80 宽 → 内宽 76)
+        let mut st = state();
+        st.select = Some(SelectRequest {
+            prompt: format!(
+                "审批 bash · 需要批准\nrm -rf /tmp/dir\n{}\n{}",
+                "x".repeat(120),
+                "y".repeat(200)
+            ),
+            list: latent_tui::SelectList::new(vec!["批准一次".into()]),
+            kind: SelectKind::Thinking,
+        });
+        let frame = viewport(&st, None, 4, 6, 8);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        assert!(texts.iter().any(|t| t.starts_with("│ 审批 bash")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("│ rm -rf")), "{texts:?}");
+        // 120 个 x 折成 2 行、200 个 y 折成 3 行:均为独立框内行
+        assert_eq!(texts.iter().filter(|t| t.starts_with("│ xx")).count(), 2, "{texts:?}");
+        assert_eq!(texts.iter().filter(|t| t.starts_with("│ yy")).count(), 3, "{texts:?}");
+        // 任何框内行都不再含字面换行
+        assert!(!texts.iter().any(|t| t.contains('\n')), "{texts:?}");
+    }
+
+    #[test]
+    fn viewport_model_form_renders_framed_panel() {
+        // 「添加模型」表单信息面板同样带圆角外框;选择列表未激活时问题行
+        // 也在框内
+        let mut st = state();
+        st.model_form = Some(ModelForm::new());
+        let frame = viewport(&st, None, 4, 6, 8);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        assert!(texts[0].starts_with('╭'), "{texts:?}");
+        assert!(texts.iter().any(|t| t.starts_with("│ 模型信息")), "{texts:?}");
+        assert!(
+            texts.iter().any(|t| t.starts_with("│ 添加模型 · 写入位置")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with("╰──") && t.ends_with('╯')),
+            "{texts:?}"
+        );
+
+        // 选择列表激活:问题行让位,呈现「表单面板 + 选择器面板」两块堆叠
+        st.select = Some(SelectRequest {
+            prompt: "添加模型 · api 协议".into(),
+            list: latent_tui::SelectList::new(vec!["openai-completions".into()]),
+            kind: SelectKind::ModelApiChoice,
+        });
+        let frame = viewport(&st, None, 4, 6, 8);
+        let texts: Vec<String> = frame.lines.iter().map(line_text).collect();
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with('╭')).count(),
+            2,
+            "两块独立面板: {texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.contains("写入位置")), "{texts:?}");
     }
 
     #[test]

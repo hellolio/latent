@@ -34,7 +34,7 @@ pub struct FooterData {
     pub thinking: String,
     /// auto-compact 开启标记(ctx% 后缀 `(auto)`)
     pub auto_compact: bool,
-    /// 会话模式标记(13 文档 §10.3:plan 黄 / confirm 默认 / full-access 红)
+    /// 会话模式标记(plan 粉 / confirm 默认 / full-access 红)
     pub mode: Option<String>,
     /// ctrl+o 全局展开态(第一行追加 `· expanded` 提示)
     pub expanded: bool,
@@ -53,7 +53,7 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
         Style::new().fg(theme.footer_cwd),
     )];
     if let Some(branch) = &data.git_branch {
-        first.push(Span::styled(format!(" ({branch})"), Style::new().fg(theme.success)));
+        first.push(Span::styled(format!(" ({branch})"), Style::new().fg(theme.warning)));
     }
     if data.expanded {
         first.push(Span::styled(" · expanded", dim));
@@ -377,13 +377,13 @@ mod tests {
         assert!(first.starts_with("~/work (main)"), "{first}");
         assert!(first.ends_with("(auto)"), "{first}");
         assert_eq!(display_width(&first), 100);
-        // git 分支绿色(success)
+        // git 分支黄色(warning),与绿主色 cwd 区分
         let branch_span = out[0]
             .spans
             .iter()
             .find(|s| s.content.contains("(main)"))
             .unwrap_or_else(|| panic!("分支应出现在第一行"));
-        assert_eq!(branch_span.style.fg, Some(theme().success));
+        assert_eq!(branch_span.style.fg, Some(theme().warning));
     }
 
     #[test]
