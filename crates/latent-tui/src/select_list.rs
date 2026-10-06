@@ -16,16 +16,23 @@ impl SelectList {
         }
     }
 
+    /// 循环导航:首项 ↑ 环绕到末项,末项 ↓ 环绕回首项;空列表不动。
     pub fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
+        if self.options.is_empty() {
+            return;
         }
+        self.selected = if self.selected == 0 {
+            self.options.len() - 1
+        } else {
+            self.selected - 1
+        };
     }
 
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.options.len() {
-            self.selected += 1;
+        if self.options.is_empty() {
+            return;
         }
+        self.selected = (self.selected + 1) % self.options.len();
     }
 
     pub fn selected_option(&self) -> Option<&String> {
@@ -71,13 +78,14 @@ mod tests {
         assert_eq!(line_text(&lines[1]), "  b");
         list.move_down();
         assert_eq!(list.selected_option().map(String::as_str), Some("b"));
-        list.move_down();
-        list.move_down(); // 到底不再下移
+        list.move_down(); // 到底
+        assert_eq!(list.selected_option().map(String::as_str), Some("c"));
+        list.move_down(); // 末项继续 ↓ 环绕回首项
+        assert_eq!(list.selected_option().map(String::as_str), Some("a"));
+        list.move_up(); // 首项 ↑ 环绕到末项
         assert_eq!(list.selected_option().map(String::as_str), Some("c"));
         list.move_up();
-        list.move_up();
-        list.move_up(); // 到顶不再上移
-        assert_eq!(list.selected_option().map(String::as_str), Some("a"));
+        assert_eq!(list.selected_option().map(String::as_str), Some("b"));
     }
 
     #[test]

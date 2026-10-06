@@ -157,13 +157,13 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/editor.rs` | 多行编辑器（缓冲按 `Vec<Vec<char>>` 避免多字节索引问题）：undo、kill-ring、词导航、↑/↓ 历史；`token_before_cursor`/`replace_token_before_cursor` 供 `@` 弹窗做光标 token 检测与替换 |
 | `src/view.rs`（modes/interactive 内） | 尾部帧组装纯函数：实时预览（流式活跃时按屏高给预算，工具命令卡片全显不设限；`ViewportFrame` 同时携带 `preview_window` 尾窗行数与 `scroll_extra` 预览全量行——仅非 follow 帧构建，供全屏滚动视口）→ 状态行（仅 busy，紧贴输出）→ 两行间隔 → 补全弹窗 → 编辑器 → footer；全帧差分下尾部高度逐帧自由变化 |
 | `src/markdown.rs` | Markdown 渲染（标题/列表/围栏代码块 syntect 高亮/GFM 表格/行内样式） |
-| `src/command_popup.rs` | 斜杠命令补全弹窗（前缀>子串>模糊打分；`/mode` 展开变体子项） |
-| `src/file_popup.rs` | `@` 文件选择弹窗（pi @ autocomplete 对应）：光标 token 触发、目录 `/` 下钻直接子项、文件名前缀>子串>路径子串>模糊打分；文件补全带尾随空格退场、目录保持下钻；`base`（工作目录）注入后**选中补全绝对全路径**（手输原样，过滤前自动剥离 base 前缀）；候选集由上层注入（不感知文件系统） |
+| `src/command_popup.rs` | 斜杠命令补全弹窗（前缀>子串>模糊打分；`/mode` 展开变体子项；↑/↓ 循环导航） |
+| `src/file_popup.rs` | `@` 文件选择弹窗（pi @ autocomplete 对应）：光标 token 触发、目录 `/` 下钻直接子项、文件名前缀>子串>路径子串>模糊打分（↑/↓ 循环导航）；文件补全带尾随空格退场、目录保持下钻；`base`（工作目录）注入后**选中补全绝对全路径**（手输原样，过滤前自动剥离 base 前缀）；候选集由上层注入（不感知文件系统） |
 | `src/tool_card.rs` | 工具调用卡片：命令本身完整折行（不随 ctrl+o 变化），输出折叠保留前 4 行 + `ctrl+o to expand`；状态色背景块（无外框，上下各一行同色内边距；成功绿/失败红为压暗低饱和色调，运行中中性）；Pending 卡片标题用旋转字符（实时预览逐帧动画，定稿转录行帧间不可变保持静态 ⏺） |
 | `src/footer.rs` | 两行状态栏：上=左 cwd+git 分支 + 右 token 段（↑prompt 含缓存明细 U/R 与命中率 / ↓out / ctx% 变色 / $cost）；下=左 agent:main(或当前子 agent)│模式标记（plan 黄、full-access 红）+ 右 model·thinking |
 | `src/theme/` | 语义主题：ratatui-themes 映射 + 逐主题微调（Tokyo Night/Catppuccin/Dracula…），16 色降级 ANSI |
 | `src/popup.rs` | 弹窗圆角外框绘制（补全弹窗/选择器面板共用）：内容行截断内宽 + 补空格对齐右边框，边框色 `popup_border`、背景透明 |
-| `src/highlight.rs` / `text.rs` / `width.rs` / `key.rs` / `loader.rs` / `select_list.rs` / `header.rs` | syntect 高亮单例 / span 感知折行截断 / 零依赖 CJK 宽度表 / 按键语义归一（含鼠标滚轮/左键手势 `Mouse`（携带 Shift 修饰）、Ctrl+X 复制在事件循环层拦截）/ spinner / 单选列表 / 启动横幅 |
+| `src/highlight.rs` / `text.rs` / `width.rs` / `key.rs` / `loader.rs` / `select_list.rs` / `header.rs` | syntect 高亮单例 / span 感知折行截断 / 零依赖 CJK 宽度表 / 按键语义归一（含鼠标滚轮/左键手势 `Mouse`（携带 Shift 修饰）、Ctrl+X 复制在事件循环层拦截）/ spinner / 单选列表（↑/↓ 循环导航，选择器/审批弹窗共用） / 启动横幅 |
 
 ### crates/latent-cli — L4 可执行壳（bin: latent）
 

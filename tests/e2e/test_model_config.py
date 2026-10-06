@@ -88,9 +88,8 @@ def test_model_editor_entry_reloads_config(tmp_path):
         app.wait_ready()
         app.sendline("/model")
         app.expect_text("选择模型")
-        # 一路 Down 到末位「编辑 models.json」条目(选择列表移动饱和)
-        for _ in range(20):
-            app.send_key("down")
+        # 末位「编辑 models.json」条目:选择列表循环导航,首项 ↑ 环绕到末项
+        app.send_key("up")
         time.sleep(0.2)
         app.send_key("enter")
         # 编辑器退出后:重载提示 + 选择器重开,新候选在列

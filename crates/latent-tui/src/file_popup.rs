@@ -123,14 +123,23 @@ impl FilePopup {
         &self.matches
     }
 
+    /// 循环导航:首项 ↑ 环绕到末项,末项 ↓ 环绕回首项;空列表不动。
     pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        if self.matches.is_empty() {
+            return;
+        }
+        self.selected = if self.selected == 0 {
+            self.matches.len() - 1
+        } else {
+            self.selected - 1
+        };
     }
 
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.matches.len() {
-            self.selected += 1;
+        if self.matches.is_empty() {
+            return;
         }
+        self.selected = (self.selected + 1) % self.matches.len();
     }
 
     pub fn selected_entry(&self) -> Option<&FileEntry> {
@@ -445,15 +454,18 @@ mod tests {
     }
 
     #[test]
-    fn navigation_clamps_at_edges() {
+    fn navigation_wraps_at_edges() {
         let mut p = sample();
         p.sync(Some("@"));
+        let last = p.match_count() - 1;
         p.move_up();
-        assert_eq!(p.selected, 0);
-        for _ in 0..20 {
+        assert_eq!(p.selected, last, "首项 ↑ 环绕到末项");
+        p.move_down();
+        assert_eq!(p.selected, 0, "末项 ↓ 环绕回首项");
+        for _ in 0..=last {
             p.move_down();
         }
-        assert_eq!(p.selected, p.match_count() - 1);
+        assert_eq!(p.selected, 0, "下移整圈后回到原地");
     }
 
     #[test]

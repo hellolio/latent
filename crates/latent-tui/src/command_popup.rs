@@ -98,14 +98,23 @@ impl CommandPopup {
         self.matches.len()
     }
 
+    /// 循环导航:首项 ↑ 环绕到末项,末项 ↓ 环绕回首项;空列表不动。
     pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        if self.matches.is_empty() {
+            return;
+        }
+        self.selected = if self.selected == 0 {
+            self.matches.len() - 1
+        } else {
+            self.selected - 1
+        };
     }
 
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.matches.len() {
-            self.selected += 1;
+        if self.matches.is_empty() {
+            return;
         }
+        self.selected = (self.selected + 1) % self.matches.len();
     }
 
     pub fn selected_entry(&self) -> Option<&CommandEntry> {
@@ -294,15 +303,14 @@ mod tests {
     }
 
     #[test]
-    fn navigation_clamps_at_edges() {
+    fn navigation_wraps_at_edges() {
         let mut p = popup();
         p.sync("/m");
-        p.move_up();
-        assert_eq!(p.selected, 0);
-        p.move_down();
         p.move_down();
         assert_eq!(p.selected, 1);
-        p.move_down();
+        p.move_down(); // 末项继续 ↓ 环绕回首项
+        assert_eq!(p.selected, 0);
+        p.move_up(); // 首项 ↑ 环绕到末项
         assert_eq!(p.selected, 1);
     }
 
