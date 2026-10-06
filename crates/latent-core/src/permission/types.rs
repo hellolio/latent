@@ -206,6 +206,9 @@ pub struct SandboxConfig {
 /// 会话模式 → 沙箱策略(13 文档 §2.1 收敛映射)。Plan 的 ReadOnly 沙箱
 /// 放开网络:Plan 模式允许联网查询命令(curl/ping/dns 查询),只读约束
 /// 只针对文件系统。
+/// 模式 → 沙箱策略。Plan 的 ReadOnly 是 OS 层兜底(装配层 spawn 钩子消费);
+/// Confirm 的 WorkspaceWrite 仅用于可写根标注(审批理由),**不做 OS 包装** ——
+/// Confirm 的闸门是逐命令人审,批准后不被沙箱二次拦截;FullAccess 无任何闸门。
 pub fn policy_for_mode(mode: SessionMode, sandbox: &SandboxConfig) -> SandboxPolicy {
     match mode {
         SessionMode::Plan => SandboxPolicy::ReadOnly {

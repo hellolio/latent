@@ -610,6 +610,103 @@ async fn set_mode_appends_mode_section_and_dedupes() {
     assert!(persisted.iter().all(|m| matches!(m, AgentMessage::ModeSection { .. })));
 }
 
+/// 挂起式 provider:stream 等门放行,制造"流式中"窗口。
+struct GatedProvider {
+    model: Model,
+    rx: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl latent_ai::Provider for GatedProvider {
+    async fn stream(
+        &self,
+        _model: &Model,
+        _ctx: latent_ai::TranscriptContext,
+        _opts: latent_ai::StreamOptions,
+    ) -> latent_ai::AssistantMessageEventStream {
+        let rx = self.rx.lock().unwrap().take();
+        let model = self.model.clone();
+        Box::pin(async_stream::stream! {
+            if let Some(rx) = rx {
+                let _ = rx.await;
+            }
+            yield latent_ai::AssistantMessageEvent::Done(Box::new(latent_ai::assistant_message(
+                &model,
+                vec![latent_ai::ContentBlock::text("done")],
+                latent_ai::StopReason::Stop,
+            )));
+        })
+    }
+}
+
+/// 流式期间 set_mode:引擎已切档但模式节 append 被跳过(agent busy);
+/// turn 正常结束后按当前模式补追加 —— 模型在下一 turn 能看到退出提示词。
+#[tokio::test]
+async fn mode_switch_while_streaming_heals_section_at_turn_end() {
+    let m = model();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let provider = Arc::new(GatedProvider {
+        model: m.clone(),
+        rx: Mutex::new(Some(rx)),
+    });
+    let session = Arc::new(
+        create_agent_session(AgentSessionConfig {
+            provider,
+            model: m,
+            hooks: Arc::new(PassthroughHooks),
+            ui: Arc::new(NoopUi),
+            extensions: latent_core::ExtensionRegistry::default(),
+            tools: vec![],
+            active_tool_names: None,
+            system_prompt: SystemPromptOptions::default(),
+            limits: latent_agent::TurnLimits::default(),
+            stream_options: Default::default(),
+            subscribers: None,
+            session_sink: None,
+            seed_messages: Vec::new(),
+            compactor: None,
+            permission: None,
+        })
+        .await
+        .unwrap(),
+    );
+
+    session.set_mode(SessionMode::Plan).await.unwrap();
+    let runner = {
+        let session = session.clone();
+        tokio::spawn(async move { session.prompt("hi").await })
+    };
+    for _ in 0..500 {
+        if session.agent().is_streaming() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(session.agent().is_streaming(), "流应已开始");
+
+    // 流式中切档:节点 append 被跳过(stderr 提示),引擎已切档
+    session.set_mode(SessionMode::FullAccess).await.unwrap();
+    assert_eq!(session.mode(), SessionMode::FullAccess);
+    tx.send(()).unwrap();
+    runner.await.unwrap().unwrap();
+
+    // turn 结束后补追加:最后一条 ModeSection = 新模式的退出提示词
+    let last = session
+        .agent()
+        .messages()
+        .into_iter()
+        .rev()
+        .find_map(|message| match message {
+            AgentMessage::ModeSection { content, .. } => Some(content),
+            _ => None,
+        })
+        .expect("转录应含模式节");
+    assert!(
+        last.contains("exiting Plan mode"),
+        "turn 结束应补齐退出 Plan 的模式节,实际 {last}"
+    );
+}
+
 /// 压缩会吞掉切点之前的模式节点:compact 后若转录中无当前模式节点则补追加。
 #[tokio::test]
 async fn compact_reappends_current_mode_section() {

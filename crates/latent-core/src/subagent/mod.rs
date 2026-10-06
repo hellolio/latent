@@ -18,6 +18,6 @@ pub mod tool;
 pub use defs::{discover_agent_defs, parse_agent_def, AgentDef};
 pub use registry::{RunState, SubagentRegistry, MAX_ACTIVE_ASYNC, MAX_RUN_HISTORY};
 pub use runner::{run_child, ChildOutcome, ChildSpec, RunGuard, RunStatus, MAX_OUTPUT_CHARS};
-pub use factory::SubagentSessionFactory;
+pub use factory::{SubagentSessionFactory, ToolPoolFactory};
 pub use store::{ChildStore, ChildStoreFactory};
 pub use tool::{SubagentDeps, SubagentTool, DEFAULT_TIMEOUT_MS, MAX_SYNC_CONCURRENCY, TOOL_NAME};

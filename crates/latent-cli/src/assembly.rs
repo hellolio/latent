@@ -792,7 +792,8 @@ type SandboxFactory = Arc<
 /// 沙箱包装钩子(13 文档 §7.6):按当前模式取 SandboxPolicy 包装 shell 命令。
 /// 只做纯包装,不拒绝 —— 拒绝是权限引擎的事;平台无沙箱时原样返回
 /// (Confirm 已升级为逐命令审批,Plan 由三态判定兜底 —— 判定通过即执行,
-/// 降级矩阵 §7.5)。
+/// 降级矩阵 §7.5)。仅 Plan 模式包装:Confirm 的闸门是逐命令人审,批准后
+/// 不被 OS 沙箱二次拦截;FullAccess 无任何闸门。
 struct SandboxSpawnHook {
     engine: Arc<PermissionEngine>,
     cwd: std::path::PathBuf,
@@ -801,13 +802,16 @@ struct SandboxSpawnHook {
 }
 
 impl SandboxSpawnHook {
-    /// 当前模式的沙箱实例。`Ok(None)` = 该模式无需包装(无沙箱平台降级 /
-    /// FullAccess);`Err` = 策略要求沙箱但构造失败 —— 调用方**拒绝执行,
+    /// 当前模式的沙箱实例。`Ok(None)` = 该模式无需包装(Confirm/FullAccess /
+    /// 无沙箱平台降级);`Err` = 策略要求沙箱但构造失败 —— 调用方**拒绝执行,
     /// 绝不静默裸跑**,失败结果不缓存(下条命令重试构造)。
     fn sandbox_for_current_mode(
         &self,
     ) -> Result<Option<Arc<dyn latent_sandbox::Sandbox>>, String> {
         let mode = self.engine.mode();
+        if !matches!(mode, SessionMode::Plan) {
+            return Ok(None);
+        }
         if !self.engine.sandbox_available() {
             return Ok(None);
         }
@@ -1050,30 +1054,46 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     let sandbox_factory: SandboxFactory = Arc::new(move |policy, helper_exe| {
         latent_sandbox::create_sandbox(availability, policy, helper_exe)
     });
-    let sandbox_hook: Arc<dyn latent_tools::ShellSpawnHook> = Arc::new(SandboxSpawnHook {
-        engine: engine.clone(),
-        cwd: cwd.clone(),
-        sandbox_cache: Mutex::new(HashMap::new()),
-        factory: sandbox_factory,
-    });
-    let spawn_hook: Arc<dyn latent_tools::ShellSpawnHook> = match external_spawn_hook {
-        Some(external) => Arc::new(ChainedSpawnHook {
-            first: Some(external),
-            second: sandbox_hook,
-        }),
-        None => sandbox_hook,
+    // spawn 钩子按引擎现做:主会话绑主引擎;/subagent 平行会话的每个工具池绑
+    // 各自的子会话引擎 —— 此前共享主会话工具实例,子会话 bash 的沙箱包装钉死
+    // 在主会话模式上(主 Plan + 子 FullAccess → 命令仍被 ReadOnly 沙箱拒绝)
+    let make_spawn_hook: Arc<
+        dyn Fn(Arc<PermissionEngine>) -> Arc<dyn latent_tools::ShellSpawnHook> + Send + Sync,
+    > = {
+        let cwd = cwd.clone();
+        let sandbox_factory = sandbox_factory.clone();
+        let external = external_spawn_hook.clone();
+        Arc::new(move |engine: Arc<PermissionEngine>| {
+            let sandbox_hook: Arc<dyn latent_tools::ShellSpawnHook> = Arc::new(SandboxSpawnHook {
+                engine,
+                cwd: cwd.clone(),
+                sandbox_cache: Mutex::new(HashMap::new()),
+                factory: sandbox_factory.clone(),
+            });
+            match &external {
+                Some(external) => Arc::new(ChainedSpawnHook {
+                    first: Some(external.clone()),
+                    second: sandbox_hook,
+                }),
+                None => sandbox_hook,
+            }
+        })
     };
-    let shell = latent_tools::ShellSpawnOptions {
+    let shell_template = latent_tools::ShellSpawnOptions {
         session_env: Some(session_env_fn(
             session_cell.clone(),
             manager_holder.clone(),
         )),
         command_prefix: load_shell_command_prefix(),
-        spawn_hook: Some(spawn_hook),
+        spawn_hook: None,
         timeouts: load_shell_timeout_policy(),
         background_notifier: Some(Arc::new(ShellBackgroundNotifier {
             agent: shell_bg_cell.clone(),
         })),
+    };
+    let shell = latent_tools::ShellSpawnOptions {
+        spawn_hook: Some(make_spawn_hook(engine.clone())),
+        ..shell_template.clone()
     };
 
     // 内置工具 + 扩展注册工具(McpTool,名字带扩展前缀)
@@ -1093,7 +1113,29 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     let mut tools = latent_tools::create_tools_at_with_shell_and_limits(&cwd, shell, tool_output_limits)
         .all()
         .to_vec();
-    tools.extend(extension_tools);
+    tools.extend(extension_tools.iter().cloned());
+
+    // /subagent 平行会话工具池工厂:每会话按其引擎现建完整池(白名单/缺省集
+    // 由工厂挑选),shell 沙箱钩子绑子会话引擎;扩展工具(MCP)无会话态,共享实例
+    let factory_tool_pool: latent_core::ToolPoolFactory = {
+        let cwd = cwd.clone();
+        let template = shell_template;
+        let limits = tool_output_limits;
+        let extension_tools = extension_tools;
+        let make_spawn_hook = make_spawn_hook.clone();
+        Arc::new(move |engine: Arc<PermissionEngine>| {
+            let shell = latent_tools::ShellSpawnOptions {
+                spawn_hook: Some(make_spawn_hook(engine)),
+                ..template.clone()
+            };
+            let mut pool =
+                latent_tools::create_tools_at_with_shell_and_limits(&cwd, shell, limits)
+                    .all()
+                    .to_vec();
+            pool.extend(extension_tools.iter().cloned());
+            pool
+        })
+    };
 
     // 重试装饰器(pi 的 retryAssistantCall 注入点)+ AutoRetry 事件面
     let retry_hooks = latent_core::create_session_retry_hooks(subscribers.clone());
@@ -1356,7 +1398,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             cwd: cwd.clone(),
             sandbox_available,
             default_tools: read_only_tool_set,
-            tool_pool: tools,
+            tool_pool_factory: factory_tool_pool,
             resolve_model: factory_resolve_model,
             child_store_factory,
         })),
@@ -2364,6 +2406,58 @@ mod tests {
             !called.load(std::sync::atomic::Ordering::SeqCst),
             "工厂不应被调用"
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_hook_skips_wrapping_in_confirm_mode() {
+        // Confirm 的闸门是逐命令人审:批准后的命令不被 OS 沙箱二次拦截
+        // (此前 Confirm 用 WorkspaceWrite 包装,越界路径人批了仍被拒)
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = called.clone();
+        let hook = sandbox_hook(
+            SessionMode::Confirm,
+            Arc::new(move |_policy, _helper| {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(Arc::new(FakeSandbox) as Arc<dyn latent_sandbox::Sandbox>))
+            }),
+        );
+        let rewritten = latent_tools::ShellSpawnHook::rewrite(&hook, "make install".into())
+            .await
+            .unwrap();
+        assert_eq!(rewritten, "make install", "Confirm 不做沙箱包装");
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "工厂不应被调用"
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_hook_follows_mode_switch() {
+        // 模式切档对包装即时生效:Plan 包装,切 FullAccess 后同一钩子不再包装
+        let engine = Arc::new(PermissionEngine::new(
+            SessionMode::Plan,
+            SandboxConfig::default(),
+            ApprovalRules::default(),
+            std::env::temp_dir(),
+            true,
+        ));
+        let hook = SandboxSpawnHook {
+            engine: engine.clone(),
+            cwd: std::env::temp_dir(),
+            sandbox_cache: Mutex::new(HashMap::new()),
+            factory: Arc::new(|_policy, _helper| {
+                Ok(Some(Arc::new(FakeSandbox) as Arc<dyn latent_sandbox::Sandbox>))
+            }),
+        };
+        let wrapped = latent_tools::ShellSpawnHook::rewrite(&hook, "ls".into())
+            .await
+            .unwrap();
+        assert_eq!(wrapped, "WRAPPED[ls]");
+        engine.set_mode(SessionMode::FullAccess);
+        let bare = latent_tools::ShellSpawnHook::rewrite(&hook, "ls".into())
+            .await
+            .unwrap();
+        assert_eq!(bare, "ls", "切档后同一条命令不再包装");
     }
 
     #[cfg(target_os = "macos")]

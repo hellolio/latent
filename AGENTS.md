@@ -106,14 +106,14 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 
 | 文件 | 说明 |
 |---|---|
-| `src/session.rs` | 业务核 `AgentSession`：prompt/steer/follow_up、模式切换、激活工具集切换、overflow 恢复（`run_with_recovery`）与自动压缩（`maybe_auto_compact`）、`SessionSink`/`ContextCompactor` trait、事件翻译层 `SessionBridge` |
+| `src/session.rs` | 业务核 `AgentSession`：prompt/steer/follow_up、模式切换、激活工具集切换、overflow 恢复（`run_with_recovery`）与自动压缩（`maybe_auto_compact`）、`SessionSink`/`ContextCompactor` trait、事件翻译层 `SessionBridge`；EndTurn 后补追加流式切档被跳过的模式节（转录已有模式节才补） |
 | `src/system_prompt.rs` | 系统提示词命名 sections 机制（preamble/tools/rules/project_context/env/addendum）；env 节含工作目录与当前本地时间，rules 节支持 system-prompt.md `<rules>` 标记块自定义追加；提示词不持久化，恢复时按配置重组 |
 | `src/model.rs` | `ModelResolver`：`provider/model` spec 解析、内置默认模型表、/model 候选清单 |
 | `src/config.rs` | models.json/settings.json 配置体系：全局数据目录（见 `src/paths.rs`）先读、项目 `.latent` 逐字段覆盖合并；apiKey 按环境变量名解析 |
 | `src/paths.rs` | 用户数据目录解析唯一权威：`LATENT_HOME` 环境变量 → 旧版 `~/.latent`（存在即沿用）→ 默认 `~/.config/latent`；入口层解析后作参数下传，纯函数面不读环境 |
 | `src/retry.rs` | provider 重试薄装配（`RetryHooks` 上报 AutoRetryStart/End 事件；quota 类不重试） |
 | `src/permission/types.rs` | `SessionMode`（Plan/Confirm/FullAccess，默认 Plan，Shift+Tab 循环）、`ToolRiskClass` 静态分类、`Verdict`（Allow/Ask/Deny）、沙箱策略映射 |
-| `src/permission/engine.rs` | `PermissionEngine` 判定引擎：FullAccess 全放 → 会话级审批缓存 → 按风险类分模式判定；可写根 = cwd + TMPDIR + /tmp + 配置 |
+| `src/permission/engine.rs` | `PermissionEngine` 判定引擎：FullAccess 全放 → 会话级审批缓存 → 按风险类分模式判定；可写根 = cwd + TMPDIR + /tmp + 配置。OS 沙箱仅 Plan 包装（Confirm 闸门 = 逐命令人审、批准后不被沙箱二次拦截；FullAccess 无闸门） |
 | `src/permission/hooks.rs` | 审批流（before_tool_call 最外层装饰器）：Ask 时 await UI 应答；通道关闭 = Deny 不 fail-open。模式节不经 hooks：`apply_mode` 把当前模式提示词作为持久 `ModeSection` 消息 append 进转录（位置永久固定，append-only 保 KV 缓存前缀；压缩/溢出恢复后经 `ensure_mode_node` 补追加） |
 | `src/permission/shell.rs` | shell 命令三态判定（只读/联网查询/明确写/未知，1400+ 行纯函数）：mini shell lexer、内置只读前缀表 + 明确写前缀表 + 联网查询前缀表、按 `;|&&` 分段校验、awk/sed/find/git 专用安全解析器 |
 | `src/permission/interp.rs` | awk/sed 脚本词法分析：拒绝管道/system/重定向等写副作用 |
@@ -125,7 +125,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | `src/subagent/defs.rs` | `AgentDef` 发现：`.latent/agents/*.md`（项目优先），frontmatter name/description/model/tools，正文即 system prompt |
 | `src/subagent/runner.rs` | `run_child`：run/parent_cancel/stop/timeout select 竞速；进度节流；默认超时 30min |
 | `src/subagent/registry.rs` | `SubagentRegistry`：8 位单调 id、后台 run 上限 16、`spawn_supervisor`（wait_idle → 打字门控 → follow_up 预算内合并通知唤醒父会话，panic 防护 + 诊断；通知抑制按 run 标记，abort_all 不泄漏进新登记的运行；pending_notices 供 print/json 退出等待）、stop/list/abort_all、run_state（TUI 卡片翻转依据） |
-| `src/subagent/factory.rs` | `/subagent` 平行会话工厂：独立 PermissionEngine、系统提示词被定义 md 整体替换、可选落盘 |
+| `src/subagent/factory.rs` | `/subagent` 平行会话工厂：独立 PermissionEngine、系统提示词被定义 md 整体替换、可选落盘；工具池经 `ToolPoolFactory` 按会话现建（shell 沙箱钩子绑本会话引擎，模式切档即时生效） |
 | `src/subagent/tool.rs` | `SubagentTool`：同步排队（信号量 4）、后台审批默认 Deny（fail-closed）、`action:"list"/"stop"` |
 | `src/subagent/store.rs` | 子会话 JSONL 落盘（`ChildStoreFactory`，条目格式与主会话一致） |
 | `src/skills/mod.rs` + `defs.rs` + `tool.rs` | 技能系统：`.latent/skills/*/SKILL.md`（项目优先）发现；唯一出口是 `load_skill` 工具 description（不注入系统提示词）；调用时才读全文 |
@@ -170,7 +170,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | 文件 | 说明 |
 |---|---|
 | `src/main.rs` | CLI 入口：flag 解析（--mode/--mock/--provider/--model/--theme/--continue|-c|-r [序号]/-l|--list/--session-mode/--plan/--yolo/--sandbox-*/--mcp-mock-server）、模式自动判定（两端 TTY → interactive 否则 print）、装配分支 |
-| `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子 + LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.latent/settings.json` 优先） |
+| `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子（仅 Plan 包装）+ LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.latent/settings.json` 优先） |
 | `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；两者退出前经 `wait_background_subagents`（assembly）等后台 subagent 全部结算并投递，结果不随进程丢失；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
 | `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent（无参打开 agent+off 选择器）/session（list/info）/fullscreen（[on\|off] 切换全屏渲染模式）/quit；带变体命令裸调用只提示用法，部分输入回车展开变体选择页、方向键选定后回车执行；未识别 `/xxx` 本地警告不发给模型 |
 | `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记、`StreamWrapCache` 流式文本增量折行缓存（append-only 时仅重折最后一个未完成源行，流式预览全量行的数据源）、`sync_mention_popup` @ 文件弹窗同步（cwd 采集候选 + 检索忽略剪枝 + 注入补全根（选中补全全路径）+ `/`/`!` 让位）、`subagent_run_cards` 异步卡片 (runId, transcript 下标) 绑定）、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、`@` 文件弹窗 ↑/↓/Tab/Enter/Esc 补全经编辑器 token 替换落文本、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局数据目录 settings.json）、/model 选择器+添加模型表单）、异步 subagent 卡片 runId 绑定与结算翻色（`flush_settled_subagent_cards`：pending → 绿/红，全文重绘至多一次）、打字门控回写（`sync_wake_gate`：编辑器非空 → supervisor 唤醒延迟）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`，选择器/审批/扩展 confirm 等模态选择列表与「添加模型」表单信息区为圆角外框面板（`popup::frame`），选择器 prompt 按 `\n` 拆行、超宽折行）、bash 净化（`bash.rs`，latent 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |

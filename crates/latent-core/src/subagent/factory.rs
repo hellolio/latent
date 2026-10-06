@@ -17,6 +17,10 @@ use crate::session::{create_agent_session, AgentSession, SessionSharedSubscriber
 
 use super::defs::{discover_agent_defs, AgentDef};
 
+/// 工具池工厂签名:入参 = 本会话的权限引擎(工具内的沙箱包装钩子按它取模式)。
+pub type ToolPoolFactory =
+    Arc<dyn Fn(Arc<PermissionEngine>) -> Vec<Arc<dyn Tool>> + Send + Sync>;
+
 /// 平行会话工厂:字段全部装配期注入(与 task 工具共用同一套依赖)。
 pub struct SubagentSessionFactory {
     pub provider: Arc<dyn latent_ai::Provider>,
@@ -27,10 +31,13 @@ pub struct SubagentSessionFactory {
     pub rules: ApprovalRules,
     pub cwd: PathBuf,
     pub sandbox_available: bool,
-    /// 白名单缺省集(装配层注入的只读集)
+    /// 白名单缺省集(装配层注入的只读集;不含 shell,可跨会话共享)
     pub default_tools: Vec<Arc<dyn Tool>>,
-    /// 白名单候选池(与主会话同一份)
-    pub tool_pool: Vec<Arc<dyn Tool>>,
+    /// 会话工具池工厂:每个平行会话现场构建工具实例,shell 沙箱包装钩子绑定
+    /// **本会话**引擎 —— 模式切档(含退出 Plan)对沙箱即时生效。不可共享主
+    /// 会话工具实例:那会把子会话 bash 钉死在主会话模式上(主 Plan + 子
+    /// FullAccess → 命令仍被主引擎的 ReadOnly 沙箱拒绝)。
+    pub tool_pool_factory: ToolPoolFactory,
     pub resolve_model: super::tool::ModelResolveFn,
     /// 子会话落盘工厂(可选;tag = agent 名;None = 纯内存)
     pub child_store_factory: Option<super::store::ChildStoreFactory>,
@@ -55,20 +62,6 @@ impl SubagentSessionFactory {
         fallback_model: Model,
         subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>>,
     ) -> Result<Arc<AgentSession>, String> {
-        let tools = match &def.tools {
-            Some(names) => names
-                .iter()
-                // 防嵌套:平行会话不装 subagent 工具本身
-                .filter(|name| name.as_str() != super::tool::TOOL_NAME)
-                .filter_map(|name| {
-                    self.tool_pool
-                        .iter()
-                        .find(|tool| tool.name() == name)
-                        .cloned()
-                })
-                .collect::<Vec<_>>(),
-            None => self.default_tools.clone(),
-        };
         let model = match &def.model {
             Some(spec) => (self.resolve_model)(spec)?,
             None => fallback_model,
@@ -83,6 +76,22 @@ impl SubagentSessionFactory {
             self.cwd.clone(),
             self.sandbox_available,
         ));
+        // 工具池按本会话现建:shell 沙箱钩子绑定本会话引擎,模式切档即时生效
+        let tool_pool = (self.tool_pool_factory)(engine.clone());
+        let tools = match &def.tools {
+            Some(names) => names
+                .iter()
+                // 防嵌套:平行会话不装 subagent 工具本身
+                .filter(|name| name.as_str() != super::tool::TOOL_NAME)
+                .filter_map(|name| {
+                    tool_pool
+                        .iter()
+                        .find(|tool| tool.name() == name)
+                        .cloned()
+                })
+                .collect::<Vec<_>>(),
+            None => self.default_tools.clone(),
+        };
         let hooks: Arc<dyn LoopHooks> = Arc::new(ApprovalHooks::new(
             Arc::new(PassthroughHooks),
             engine.clone(),
@@ -171,6 +180,7 @@ impl Tool for StubTool {
 mod tests {
     use super::*;
     use crate::permission::SandboxConfig;
+    use crate::SessionMode;
     use latent_ai::{ScriptedProvider, ScriptedTurn};
 
     fn model() -> Model {
@@ -283,7 +293,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             sandbox_available: true,
             default_tools: vec![],
-            tool_pool: vec![],
+            tool_pool_factory: Arc::new(|_engine| vec![]),
             resolve_model: Arc::new(|spec: &str| Ok(Model::minimal(spec, "mock", "mock"))),
             child_store_factory: Some(Arc::new(move |tag: &str| {
                 let manager = latent_session::create_session_in_dir(
@@ -355,7 +365,9 @@ mod tests {
             cwd: std::env::temp_dir(),
             sandbox_available: true,
             default_tools: vec![read_tool.clone()],
-            tool_pool: vec![read_tool.clone(), write_tool.clone()],
+            tool_pool_factory: Arc::new(move |_engine| {
+                vec![read_tool.clone(), write_tool.clone()]
+            }),
             resolve_model: Arc::new(|spec: &str| {
                 if spec == "mock/child" {
                     Ok(Model::minimal("child", "mock", "mock"))
@@ -402,6 +414,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session2.agent().state_snapshot().model.unwrap().id, "child");
+    }
+
+    /// 工具池工厂收到的是**子会话自己的引擎**:子会话切档后,工厂捕获的
+    /// 引擎模式同步变化(沙箱包装钩子据此即时生效,不钉死在主会话模式)。
+    #[tokio::test]
+    async fn tool_pool_factory_receives_child_engine() {
+        let provider = Arc::new(ScriptedProvider::new(
+            &model(),
+            vec![ScriptedTurn::text(&model(), "ok")],
+        ));
+        let captured: Arc<Mutex<Vec<Arc<PermissionEngine>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        let factory = SubagentSessionFactory {
+            provider,
+            approval_ui: default_async_approval_ui(HeadlessApproval::Deny),
+            engine: Arc::new(PermissionEngine::new(
+                SessionMode::Plan,
+                SandboxConfig::default(),
+                ApprovalRules::default(),
+                std::env::temp_dir(),
+                true,
+            )),
+            sandbox: SandboxConfig::default(),
+            rules: ApprovalRules::default(),
+            cwd: std::env::temp_dir(),
+            sandbox_available: true,
+            default_tools: vec![],
+            tool_pool_factory: Arc::new(move |engine: Arc<PermissionEngine>| {
+                sink.lock().unwrap().push(engine);
+                vec![]
+            }),
+            resolve_model: Arc::new(|spec: &str| Ok(Model::minimal(spec, "mock", "mock"))),
+            child_store_factory: None,
+        };
+
+        let child = factory
+            .create(&def("reviewer", "body", None), model(), Arc::new(Mutex::new(Vec::new())))
+            .await
+            .unwrap();
+        child.set_mode(SessionMode::FullAccess).await.unwrap();
+
+        let engines = captured.lock().unwrap();
+        assert_eq!(engines.len(), 1, "工具池工厂每会话调用一次");
+        assert_eq!(
+            engines[0].mode(),
+            SessionMode::FullAccess,
+            "工具池拿到的是子会话引擎(随子会话切档),而非主会话引擎"
+        );
     }
 
 }

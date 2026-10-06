@@ -789,6 +789,18 @@ impl AgentSession {
             }
         }
         if let RunStop::EndTurn = &stop {
+            // 流式期间 set_mode 的模式节 append 会被跳过(agent busy,引擎已
+            // 切档):turn 结束后按当前模式补追加 —— 否则下一 turn 模型仍看
+            // 到旧模式节(如退出 Plan 的提示词缺失)。仅在转录本就使用模式节
+            // 时补(生产会话建会话即应用模式),从未应用过模式的会话不凭空注入
+            if self
+                .agent
+                .messages()
+                .iter()
+                .any(|message| matches!(message, AgentMessage::ModeSection { .. }))
+            {
+                self.ensure_mode_node().await;
+            }
             self.maybe_auto_compact().await;
         }
         Ok(stop)

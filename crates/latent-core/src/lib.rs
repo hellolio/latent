@@ -46,8 +46,8 @@ pub use skills::{discover_skill_defs, parse_skill_def, LoadSkillDeps, LoadSkillT
 pub use subagent::{
     discover_agent_defs, run_child, AgentDef, ChildOutcome, ChildSpec, RunGuard, RunState,
     RunStatus, ChildStore, ChildStoreFactory, SubagentDeps, SubagentRegistry,
-    SubagentSessionFactory, SubagentTool, DEFAULT_TIMEOUT_MS, MAX_ACTIVE_ASYNC, MAX_OUTPUT_CHARS,
-    MAX_RUN_HISTORY, MAX_SYNC_CONCURRENCY, TOOL_NAME,
+    SubagentSessionFactory, SubagentTool, ToolPoolFactory, DEFAULT_TIMEOUT_MS, MAX_ACTIVE_ASYNC,
+    MAX_OUTPUT_CHARS, MAX_RUN_HISTORY, MAX_SYNC_CONCURRENCY, TOOL_NAME,
 };
 pub use system_prompt::{
     build_system_prompt_sections, build_system_prompt_state, sections_to_text,
