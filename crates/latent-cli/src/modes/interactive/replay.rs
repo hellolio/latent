@@ -8,8 +8,10 @@ use super::handlers::InteractiveCtx;
 use super::state::{InteractiveState, ToolStatus, TranscriptItem};
 
 /// 回放当前转录(压缩感知的当前分支上下文)并初始化 ctx 估计。
+/// 回放**当前会话**(主会话或平行子 agent 会话 —— /session 恢复按各自
+/// 谱系进行,子会话恢复后回放的是子会话的转录)。
 pub fn replay_history(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
-    let messages = ctx.session.main().agent().messages();
+    let messages = ctx.session.current().agent().messages();
     for message in &messages {
         state.commit_many(replay_message(message, &state.theme));
     }
@@ -20,19 +22,22 @@ pub fn replay_history(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
     }) {
         state.context_tokens = tokens;
     }
-    if let Some(manager) = ctx.current_manager() {
-        let compactions = manager
-            .branch_entries()
-            .iter()
-            .filter(|entry| matches!(entry, latent_session::Entry::Compaction { .. }))
-            .count();
-        if compactions > 0 {
-            state.commit(TranscriptItem::Line(ratatui::text::Line::from(
-                ratatui::text::Span::styled(
-                    format!("Session compacted {compactions} times"),
-                    ratatui::style::Style::new().fg(state.theme.dim),
-                ),
-            )));
+    // 压缩计数只对主谱系有意义(子会话未装配 compactor)
+    if ctx.session.is_main() {
+        if let Some(manager) = ctx.current_manager() {
+            let compactions = manager
+                .branch_entries()
+                .iter()
+                .filter(|entry| matches!(entry, latent_session::Entry::Compaction { .. }))
+                .count();
+            if compactions > 0 {
+                state.commit(TranscriptItem::Line(ratatui::text::Line::from(
+                    ratatui::text::Span::styled(
+                        format!("Session compacted {compactions} times"),
+                        ratatui::style::Style::new().fg(state.theme.dim),
+                    ),
+                )));
+            }
         }
     }
     state.commit(TranscriptItem::Blank);

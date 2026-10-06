@@ -25,7 +25,8 @@ pub use entry::{
 };
 pub use manager::{
     create_session, create_session_in_dir, create_session_with, find_latest_session_file,
-    list_session_files, project_prefix, SessionError, SessionManager, SessionSummary,
+    list_session_files, list_session_files_with_tag, project_prefix, SessionError, SessionManager,
+    SessionSummary,
 };
 pub use projection::{
     build_context_entries, build_session_context, build_session_path, build_session_projection,

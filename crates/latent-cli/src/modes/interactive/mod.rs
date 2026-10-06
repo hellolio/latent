@@ -101,6 +101,7 @@ pub async fn run_interactive_mode(
         compaction_config,
         subagent_registry,
         subagent_factory,
+        child_stores,
         ..
     } = built;
     let (theme, theme_name) = resolve_theme(theme_override.as_deref());
@@ -179,6 +180,7 @@ pub async fn run_interactive_mode(
     let ctx = InteractiveCtx {
         session: &router,
         subagent_factory: subagent_factory.as_ref(),
+        child_stores: Some(&child_stores),
         manager_holder: Some(&manager_holder),
         resolver: &resolver,
         compaction_config: &compaction_config,

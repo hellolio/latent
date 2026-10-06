@@ -27,12 +27,12 @@ latent 以流式方式驱动大语言模型，并行执行工具调用，支持�
 ```bash
 git clone https://github.com/hellolio/latent.git
 cd latent
-cargo build --release -p latent-cli
+cargo build --release -p latent
 # 产物在 target/release/latent，可复制到 PATH：
 cp target/release/latent /usr/local/bin/
 ```
 
-> 没有 API key 也能先体验：`cargo run -p latent-cli -- --mock "你好"` 会用内置 mock provider 走通全链路。
+> 没有 API key 也能先体验：`cargo run -p latent -- --mock "你好"` 会用内置 mock provider 走通全链路。
 
 ---
 
@@ -199,8 +199,9 @@ API key 从环境变量读取，`--model` 缺省时使用各 provider 默认模�
 ## 开发
 
 ```bash
-cargo clean && cargo build --release -p latent && cp target/release/latent ~/.local/bin/
-cargo build --release -p latent-cli         # 构建
+# rm 后再 cp:原地覆盖已签名的可执行文件会被 macOS 内核间歇性 SIGKILL(killed)
+cargo clean && cargo build --release -p latent && rm -f ~/.local/bin/latent && cp target/release/latent ~/.local/bin/
+cargo build --release -p latent         # 构建
 cargo test --workspace                   # 运行全部测试
 cargo clippy --workspace --all-targets   # lint（要求零警告）
 ```

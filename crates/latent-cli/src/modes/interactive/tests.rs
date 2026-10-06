@@ -62,6 +62,7 @@ fn ctx_of<'a>(
     InteractiveCtx {
         session: router,
         subagent_factory: None,
+        child_stores: None,
         manager_holder: Some(&built.manager_holder),
         resolver,
         compaction_config: &built.compaction_config,
@@ -1679,6 +1680,136 @@ async fn switch_resume_session_restores_messages_and_reuses_file() {
             message: latent_agent::AgentMessage::User { content, .. },
             ..
         } if content == "新消息"
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 子会话谱系独立:/session list 与恢复只作用于本会话的 tag 文件,恢复把
+/// 子会话自己的 holder 重定向到历史文件 —— 主会话文件与全局 holder 不受影响。
+#[tokio::test]
+async fn child_session_resume_scopes_to_child_lineage() {
+    let dir = std::env::temp_dir().join(format!(
+        "latent_child_lineage_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let built = built_session_with_store(crate::assembly::SessionStore::New { dir: dir.clone() }).await;
+    let cwd = std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    // scout 谱系的历史文件(第一条 user 消息)
+    let history_file = {
+        let manager =
+            latent_session::create_session_in_dir(&dir, &cwd, None, Some("scout")).unwrap();
+        let path = manager.file_path().unwrap().to_path_buf();
+        manager
+            .append_message(latent_agent::AgentMessage::user("历史问题"))
+            .unwrap();
+        path
+    };
+
+    // 工厂创建 scout 平行会话:文件落在同一项目目录,holder 登记进注册表
+    let factory = built.subagent_factory.as_ref().unwrap();
+    let created = factory
+        .create(
+            &latent_core::AgentDef {
+                name: "scout".into(),
+                description: String::new(),
+                model: None,
+                tools: None,
+                system_prompt: "scout prompt".into(),
+            },
+            built.session.agent().state_snapshot().model.unwrap(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        )
+        .await
+        .unwrap();
+    let holder = built
+        .child_stores
+        .lock()
+        .unwrap()
+        .get("scout")
+        .cloned()
+        .expect("子会话 holder 应已登记");
+    let child_file = holder.get().unwrap().file_path().unwrap().to_path_buf();
+    assert!(child_file.file_name().unwrap().to_string_lossy().contains("__scout__"));
+    // 模拟子会话内的一轮落盘
+    holder
+        .get()
+        .unwrap()
+        .append_message(latent_agent::AgentMessage::user("子会话问题"))
+        .unwrap();
+
+    // 谱系互不可见:主列表只有主会话文件;scout 列表含历史文件 + 当前文件
+    let mains = latent_session::list_session_files(&dir, Some(&cwd));
+    assert_eq!(mains.len(), 1, "主谱系不应出现 scout 文件");
+    let scouts = latent_session::list_session_files_with_tag(&dir, Some(&cwd), "scout");
+    assert_eq!(scouts.len(), 2, "{:?}", scouts.iter().map(|s| s.path.clone()).collect::<Vec<_>>());
+
+    // 在子会话上恢复自己的历史文件:holder 重定向,后续写入进历史文件
+    crate::assembly::switch_resume_session(&created, &holder, &history_file)
+        .await
+        .unwrap();
+    assert!(created.agent().messages().iter().any(
+        |message| matches!(message, latent_agent::AgentMessage::User { content, .. } if content == "历史问题")
+    ));
+    holder
+        .get()
+        .unwrap()
+        .append_message(latent_agent::AgentMessage::user("恢复后问题"))
+        .unwrap();
+
+    let history_last = {
+        let reloaded =
+            latent_session::create_session_with(Some(&history_file), &cwd, None).unwrap();
+        reloaded.entries().last().unwrap().clone()
+    };
+    assert!(matches!(
+        history_last,
+        latent_session::Entry::Message {
+            message: latent_agent::AgentMessage::User { ref content, .. },
+            ..
+        } if content == "恢复后问题"
+    ));
+    // 子会话旧文件原样保留(append-only,不被恢复污染)
+    let child_last = {
+        let reloaded = latent_session::create_session_with(Some(&child_file), &cwd, None).unwrap();
+        reloaded.entries().last().unwrap().clone()
+    };
+    assert!(matches!(
+        child_last,
+        latent_session::Entry::Message {
+            message: latent_agent::AgentMessage::User { ref content, .. },
+            ..
+        } if content == "子会话问题"
+    ));
+
+    // /new(子会话):同谱系开新文件(tag 保持 scout),后续写入进新文件
+    let new_file = crate::assembly::switch_new_session(&created, &holder, Some("scout"))
+        .await
+        .unwrap()
+        .expect("文件会话应产生新文件");
+    assert!(new_file.file_name().unwrap().to_string_lossy().contains("__scout__"));
+    assert_ne!(new_file, child_file, "/new 应开新文件而非原地 reset");
+    holder
+        .get()
+        .unwrap()
+        .append_message(latent_agent::AgentMessage::user("新会话消息"))
+        .unwrap();
+    let new_last = {
+        let reloaded = latent_session::create_session_with(Some(&new_file), &cwd, None).unwrap();
+        reloaded.entries().last().unwrap().clone()
+    };
+    assert!(matches!(
+        new_last,
+        latent_session::Entry::Message {
+            message: latent_agent::AgentMessage::User { ref content, .. },
+            ..
+        } if content == "新会话消息"
     ));
 
     let _ = std::fs::remove_dir_all(&dir);

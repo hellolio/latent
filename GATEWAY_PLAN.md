@@ -2,6 +2,7 @@
 
 > 状态：**待开发**。本文档是自包含的开发指南：目标读者是将独立实施本计划的 agent / 工程师，无需本计划的产生过程上下文。
 > 写作日期：2026-10-07。上游基线：**OpenClaw main @ `6693bb96`（package version `2026.9.8`，核实于 2026-10-06）**。
+> 修订（评审后）：自消息防环（§2.3/§2.6/坑 3）；凭据解析器下沉 latent-channel（§2.1/§4.2、偏离 10）；群策略单一定义点（§4.2）；群会话命令 owner-only（§4.7/§5.1、偏离 11）；审批全局单例 + 投递失败即 Deny（§4.9/§5.2）；控制面 operator 身份、pairing 方法、资源上限（§4.10/§4.12/§5.3/§5.4）；事件泵背压（§4.5）；隔离断言改 grep 计数（§1）；行号改为符号锚点（§3）。
 
 ---
 
@@ -48,9 +49,11 @@ L3  latent-gateway      # 引擎 + bin：依赖 latent-runtime + latent-channel
 - **编译隔离验收（每阶段必跑）**：
 
 ```bash
-cargo tree -p latent-channel -i latent-core   # 输出为空：channel 不认识 agent
-cargo tree -p latent        -i latent-channel # 输出为空：CLI 不含聊天栈
-cargo tree -p latent-gateway -i latent-tui    # 输出为空：gateway 不含 TUI
+# 不用 `cargo tree -i`：目标包不在图中时 cargo 以报错退出而非空输出，验收脚本会误报。
+# 断言 = 树输出中不含目标 crate（命令替换为空 → test -z 通过）。
+test -z "$(cargo tree -p latent-channel | grep -E 'latent-(core|ai|agent|session|tools|web|sandbox|tui|runtime|gateway)')"  # channel 不认识任何业务 crate
+test -z "$(cargo tree -p latent          | grep -E 'latent-(channel|gateway)')"                                            # CLI 不含聊天栈
+test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                                                             # gateway 不含 TUI
 ```
 
 ---
@@ -71,6 +74,7 @@ crates/latent-channel/
     debounce.rs          # 入站防抖合并
     chunk.rs             # 出站长文分段
     error.rs             # ChannelError（thiserror）
+    credential.rs        # 凭据三来源解析（明文/$ENV/!shell）——L1 自包含副本，§8 偏离 10
     telegram/            # #[cfg(feature = "telegram")]
     qq/                  # #[cfg(feature = "qq")]
     wecom/               # #[cfg(feature = "wecom")]
@@ -154,6 +158,9 @@ pub enum Segment {
     Reply { message_id: String },   // 引用回复
 }
 
+/// 自消息防环（硬规则）：渠道归一化层必须丢弃 sender == 平台自身账号的事件
+/// （QQ：OneBot 会上报机器人自己的发言，user_id == self_id；不丢则私聊"恒 to_me"
+/// 直接死循环）。在渠道源头丢弃，不给 InboundMessage 加字段——防环是渠道责任。
 pub struct InboundMessage {
     pub platform: &'static str,
     pub chat: ChatRef,
@@ -186,6 +193,10 @@ pub enum ChannelStatus {
 pub enum ChannelError {
     ChatNotFound, NotInGroup, RateLimited { retry_after_ms: u64 },
     Unsupported, DeliveryFailed(String),
+    // 生命周期/配置错误与出站失败共用同一类型化错误面（§9：thiserror 向上传播，
+    // 禁止 Result<_, String>）
+    Config(String),      // 配置缺失/非法（含凭据解析失败）→ 渠道拒绝启动
+    Startup(String),     // 连接/握手失败 → 宿主据此决定重试或 Status::Failed
 }
 ```
 
@@ -201,11 +212,13 @@ pub trait ChannelPlugin: Send + Sync {
     /// **panic 边界（硬要求）**：实现内部必须捕获自身任务 panic（tokio::spawn
     /// 的 JoinError 或 catch_unwind），降级为 Status::Failed 发给宿主，
     /// 绝不允许 panic 击穿 gateway 进程——对齐仓库"错误吞掉+诊断"原则。
-    async fn start(&self, tx: mpsc::Sender<ChannelEvent>) -> Result<ChannelHandle, String>;
+    async fn start(&self, tx: mpsc::Sender<ChannelEvent>) -> Result<ChannelHandle, ChannelError>;
 
     /// 渠道配置注入（gateway 按渠道 id 分发原始 JSON，各渠道自己反序列化自己的
     /// Config struct——gateway 不认识任何具体渠道）。
-    fn apply_config(&self, raw: &serde_json::Value) -> Result<(), String>;
+    /// 错误一律类型化 ChannelError（§9）；插件实现自持内部可变性
+    /// （Arc<Inner> + RwLock<Config>），trait 方法走 &self。
+    fn apply_config(&self, raw: &serde_json::Value) -> Result<(), ChannelError>;
 }
 
 #[derive(Clone)]
@@ -241,7 +254,7 @@ impl ChannelHandle {
 - **窗口在首条到达时固定，后续消息不得顺延**；最大等待 = `debounceMs × 5`（`MAX_DEBOUNCE_WINDOW_MULTIPLIER`）。
 - 跟踪键上限 **2048**（`DEFAULT_MAX_TRACKED_KEYS`），超限丢最旧。
 - 命令消息（`/` 开头）与带 At 的消息**立即冲刷缓冲不等待**（对齐 `shouldDebounceTextInbound` 只防抖纯文本）。
-- flush 产出合并文本（段间 `\n`）。
+- flush 产出合并文本（段间 `\n`）；合并产物的 `message_id` 用**合成新键**（`debounce:{首条message_id}`），不复用首条 id——首条 id 已在入口 claim，复用会撞去重表。
 
 **chunk.rs**（上游：`src/auto-reply/chunk.ts`——常量逐个核实）
 
@@ -252,7 +265,7 @@ impl ChannelHandle {
 ### 2.6 渠道实现要点（详细协议见 §6 对照表）
 
 - **telegram/**（feature `telegram`）：Bot API **getUpdates 长轮询**（不引 SDK，reqwest 直连；OpenClaw 的 telegram 同样默认长轮询）。配置 `botToken`（`$ENV` 来源）、`textChunkLimit`（默认 4000）、`dmPolicy`、`textChunkLimit` 等。发送 `sendMessage`，`reply_to_message_id` 实现 Reply 段。typing 用 `sendChatAction`。
-- **qq/**（feature `qq`）：**OneBot 11 协议 + 反向 WebSocket**（NapCat 是 WS **客户端**，gateway 是服务端——gateway 无需公网 IP）。axum 起 WS 端点，`Authorization: Bearer <accessToken>` 校验；事件按 `post_type` 分发，action 请求带 `echo` 字段 + oneshot 表关联响应；`meta_event.heartbeat` 判活。收：`message.private` / `message.group`（text/at/face/reply/image 段）；发：`send_private_msg` / `send_group_msg`。
+- **qq/**（feature `qq`）：**OneBot 11 协议 + 反向 WebSocket**（NapCat 是 WS **客户端**，gateway 是服务端——gateway 无需公网 IP）。axum 起 WS 端点，`Authorization: Bearer <accessToken>` 校验；事件按 `post_type` 分发，action 请求带 `echo` 字段 + oneshot 表关联响应；`meta_event.heartbeat` 判活。收：`message.private` / `message.group`（text/at/face/reply/image 段），**收侧先丢自消息（`user_id == self_id`，含机器人自身发言的上报——防回声死循环，§2.3）**；发：`send_private_msg` / `send_group_msg`。
 - **wecom/**（feature `wecom`）：**企业微信智能机器人 WS 长连接**（官方文档 `developer.work.weixin.qq.com/document/path/101463`）。BotId + Secret 换 ticket → wss 主动外连（无需公网 IP/域名备案）。实现前**必须逐字读官方文档**核对握手/回调/回复协议——本计划未核实到字节级。
 - **mock/**（feature `mock`）：内存版 ChannelPlugin——`start` 返回可编程 handle（测试注入 InboundMessage、断言 Outbound），gateway 集成测试的基础设施。
 
@@ -266,7 +279,7 @@ impl ChannelHandle {
 
 | 迁移项 | 现位置 | 说明 |
 |---|---|---|
-| `assembly.rs` **全量**（含 `#[cfg(test)]`） | `crates/latent-cli/src/assembly.rs`（2393 行） | 纯业务核装配，import 只涉及 latent-* 与 std/tokio/futures/serde |
+| `assembly.rs` **全量**（含 `#[cfg(test)]`） | `crates/latent-cli/src/assembly.rs`（修订时 2505 行；随仓库演进漂移，实施时按符号定位） | 纯业务核装配，import 只涉及 latent-* 与 std/tokio/futures/serde |
 | `resolve_provider_and_model` | `main.rs:437` | provider/models.json 解析 |
 | `resolve_session_store` | `main.rs:348` | `-c`/`-r` 会话存储解析 |
 | `print_session_list` | `main.rs:387` | `-l` 列表 |
@@ -279,16 +292,16 @@ impl ChannelHandle {
 
 `assembly.rs` 全文件仅 2 处 `crate::` 引用，都是 `crate::modes::rpc::RpcApprovalUi`：
 
-- **`assembly.rs:347`**（`BuiltSession.rpc_approval` 字段）与 **`assembly.rs:520`**（`BuildOptions.rpc_approval` 字段）。
+- **`assembly.rs:347`**（`BuiltSession.rpc_approval` 字段）与 **`assembly.rs:530` 附近**（`BuildOptions.rpc_approval` 字段；行号随编辑漂移，按 `rpc_approval` 符号搜索）。
 
 改法（三处联动）：
 
-1. 从 `BuiltSession` / `BuildOptions` **删除** `rpc_approval` 字段；`build_session` 的解构（:920 附近）与 `Ok(BuiltSession {..})`（:1348 附近）、`run_session` 的 `rpc_approval: None`（:1403）同步删除。
+1. 从 `BuiltSession` / `BuildOptions` **删除** `rpc_approval` 字段；`build_session` 的解构（:934 附近）与 `Ok(BuiltSession {..})`（:1408 附近）、`run_session` 的 `rpc_approval: None`（:1464）同步删除（行号随编辑漂移，按符号搜索）。
 2. `modes/print_mode.rs` 的 `build_bare_session(..., rpc_approval: Option<Arc<crate::modes::rpc::RpcApprovalUi>>, ...)`（:47）删掉该参数。
 3. `modes/rpc.rs` 的 `run_rpc_mode(built, reader, writer)`（:273）**增加参数** `approval: Arc<RpcApprovalUi>`（原实现从 `built.rpc_approval` 取，:278-283）。
 4. `main.rs` RPC 分支（:296-317）：`build_bare_session(..., approval_ui = Some(rpc_approval.clone()), ...)`，然后 `run_rpc_mode(built, rpc_approval, stdin, writer)`。
 
-> **顺带修复一个现存缺陷**：当前 main.rs RPC 分支传 `approval_ui = None`，而 `build_session` 对 None 的兜底是 `HeadlessApprovalUi(Deny)`（assembly.rs:971）——即 Confirm 模式下 RPC 会话的工具审批被静默自动拒绝，`RpcApprovalUi` 从未参与审批决策（只做应答路由；`tests/modes.rs:979` 的回路测试是直接调 trait 方法，没覆盖装配链路）。改动 4 同时修复此问题：approval_ui 与路由句柄指向同一实例。**修复后补一个装配链路的审批回路集成测试**（build_bare_session → ApprovalUi.request_approval 收到上行 → resolve → 决策生效）。
+> **顺带修复一个现存缺陷**：当前 main.rs RPC 分支传 `approval_ui = None`，而 `build_session` 对 None 的兜底是 `HeadlessApprovalUi(Deny)`（assembly.rs:971）——即 Confirm 模式下 RPC 会话的工具审批被静默自动拒绝，`RpcApprovalUi` 从未参与审批决策（只做应答路由；`tests/modes.rs` 的 `rpc_approval_backchannel_roundtrip` 是直接调 trait 方法，没覆盖装配链路）。改动 4 同时修复此问题：approval_ui 与路由句柄指向同一实例。**修复后补一个装配链路的审批回路集成测试**（build_bare_session → ApprovalUi.request_approval 收到上行 → resolve → 决策生效）。
 
 ### 3.3 根 Cargo.toml 变更（阶段 1 一起做）
 
@@ -338,7 +351,7 @@ crates/latent-gateway/
     approval.rs          # ChatApprovalUi
     pairing.rs           # DM 配对
     state.rs             # <数据目录>/gateway/state.json
-    gateway/             # WS 控制面（阶段 4）
+    gateway/             # WS 控制面（阶段 2 最小骨架；阶段 4 完整方法表）
       server.rs auth.rs methods/ events.rs
 ```
 
@@ -384,8 +397,10 @@ telegram = ["latent-channel/telegram"]
       "botToken": "$TELEGRAM_BOT_TOKEN",
       "textChunkLimit": 4000,
       "dmPolicy": "pairing"          // pairing|allowlist|open|disabled
-    },
-    "defaults": { "groupPolicy": "allowlist", "groupAllowFrom": [] }
+    }
+    // 群策略（groupPolicy/groupAllowFrom/requireMention/mentionPatterns/
+    // unmentionedInbound）唯一在 messages.groupChat 定义；channels 节不设同名键——
+    // 单一定义点，防止双源默认不一致造成 fail-open。
   },
   "bindings": [],                    // 结构预留：(channel, accountId, peer) → agentId；MVP 全路由 main
   "session": {
@@ -415,7 +430,7 @@ telegram = ["latent-channel/telegram"]
 }
 ```
 
-校验规则（对齐 OpenClaw `docs/gateway/configuration.md`）：未知键/坏类型/非法值 → **拒绝启动，进程退出码 78**；凭据支持三来源：明文 / `$ENV_VAR` / `!shell 命令`（复用 latent-web `credential.rs` 的既有解析器）；启动时对危险配置打 stderr 警告（不阻断）：`dmPolicy: open`、群 allowlist 为空、token 走明文等。
+校验规则（对齐 OpenClaw `docs/gateway/configuration.md`）：未知键/坏类型/非法值 → **拒绝启动，进程退出码 78**；凭据三来源：明文 / `$ENV_VAR` / `!shell 命令`，解析统一走 `latent-channel::credential`（L1 自包含副本，语义/单测对齐 latent-web `credential.rs`——§8 偏离 10；`gateway.auth.token` 同样用它，避免第三份实现）；**`!shell` 来源仅全局配置接受**——项目级 `.latent/gateway.json` 出现 `!shell` → 拒绝启动（恶意 repo 可借 gateway 启动执行任意命令；`$ENV`/明文项目级不受限）；启动时对危险配置打 stderr 警告（不阻断）：`dmPolicy: open`、群 allowlist 为空、token 走明文等。
 
 ### 4.3 routing/session_key.rs
 
@@ -466,7 +481,7 @@ dispatch_inbound_message(msg: InboundMessage):
   7. 执行 run：envelope 包装 → session.prompt() → 事件泵收集 → reply_dispatcher 投递
 ```
 
-**事件泵**：每个 BuiltSession 挂一个 `SessionSubscriber`，把 `AgentSessionEvent` 推进该会话的 mpsc（**订阅者只推 channel，绝不在回调里做慢 IO**——core 的事件分发是串行 await 的）。泵的语义：
+**事件泵**：每个 BuiltSession 挂一个 `SessionSubscriber`，把 `AgentSessionEvent` 推进该会话的 mpsc（**订阅者只推 channel，绝不在回调里做慢 IO**——core 的事件分发是串行 await 的）。通道**有界（256）**：满时进度类事件（ToolExecutionStart 节流进度、AutoRetryStart）直接丢弃；**final 消息（Text delta/MessageEnd）、审批、AgentSettled 宁可阻塞 pump 也不丢**——出站慢拖慢会话可接受，丢审批/丢 final 不可接受（fail-closed）。泵的语义：
 
 - 最终回复 = 累计 `MessageDelta::Text`，以 assistant `MessageEnd` 为权威定稿；`AgentSettled` = run 结束信号。
 - 进度通知：`ToolExecutionStart` 节流（默认 30s 一条「仍在工作…」）；`AutoRetryStart` 可选通知。
@@ -510,6 +525,8 @@ dispatch_inbound_message(msg: InboundMessage):
 
 owner 判定：`commands.ownerAllowFrom` 里含 `"<channel>:<user_id>"`。非 owner 发特权命令 → 拒绝并提示（不暴露命令存在与否的区分，统一回复「该命令仅 owner 可用」）。
 
+**会话级修改命令的归属规则（§8 偏离 11，比上游严）**：groupScope=per-group 的群会话是**全群共享**的单会话——`/new` `/reset` `/compact` `/stop` `/model` `/thinking` `/mode`（含 plan/confirm）`/queue` `/activation` 在**群聊会话中一律仅 owner**（任何群成员都能清空全群上下文/换模型/杀 run 是现实骚扰面）；`/status` `/help` 所有人。私聊会话是触发者个人会话，上表「触发者」权限原样适用。`full-access` 无论私聊群聊均仅 owner（§5.1）；confirm→plan 降档也按 owner-only 实现，不做两套判定。
+
 ### 4.8 auto_reply/reply_dispatcher.rs（出站保序）
 
 上游：`src/auto-reply/reply/reply-dispatcher.ts`——语义逐条对照：
@@ -524,13 +541,13 @@ owner 判定：`commands.ownerAllowFrom` 里含 `"<channel>:<user_id>"`。非 ow
 ### 4.9 approval.rs（ChatApprovalUi）
 
 ```rust
-pub struct ChatApprovalUi { /* owner 聊天句柄 + pending: Mutex<HashMap<u64, oneshot::Sender<ApprovalDecision>>> */ }
+pub struct ChatApprovalUi { /* gateway 全局唯一实例：owner 聊天句柄 + pending: Mutex<HashMap<u64, oneshot::Sender<ApprovalDecision>>>，id 全局自增 */ }
 
 #[async_trait]
 impl latent_core::ApprovalUi for ChatApprovalUi {
     async fn request_approval(&self, request: ApprovalRequest) -> Option<ApprovalDecision> {
         // 1. 发消息到 owner：「⏳ 需要批准 [{tool_name}] {detail}\n/approve {id} allow-once|allow-always|deny」
-        //    （id 用 request.tool_call_id 的短哈希或自增号，建立映射）
+        //    （id 一律全局自增号；禁止短哈希——跨会话碰撞会把批准路由到错误请求）
         // 2. 等 oneshot，超时 120s → None
         // 3. None = Deny（core 的 ApprovalHooks 语义，fail-closed）
     }
@@ -538,7 +555,8 @@ impl latent_core::ApprovalUi for ChatApprovalUi {
 ```
 
 - 模板是 `modes/rpc.rs` 的 `RpcApprovalUi`（id → oneshot 路由 + close_all 全部落 Deny）——**照抄其结构**。
-- 经 `BuildOptions.approval_ui` 注入（接缝既有，勿改 core）。
+- **gateway 启动时创建唯一实例**，clone 注入每个 build_session 的 `BuildOptions.approval_ui`（接缝既有，勿改 core）。审批请求发到 owner 的 DM（另一个会话），`/approve` 在全局命令层查这**同一张** pending 表完成跨会话路由——单例表就是这条回路；绝不允许按会话各建实例（id 碰撞 → 批准误路由）。
+- 审批消息**发送失败**（渠道断开/发送错误）→ 立即 `resolve(id, Deny)` + 诊断，不挂 120s（与 close_all 同语义，fail-closed）。
 - `/approve` 命令 → 查 pending 表 → `resolve(id, decision)`；`allow-always` → `ApprovalDecision::ApproveForSession`。
 - 渠道断开/重启 → `close_all()`：所有未决审批落 Deny。
 
@@ -547,7 +565,7 @@ impl latent_core::ApprovalUi for ChatApprovalUi {
 上游：docs `channels/pairing.md`（语义逐项核实）。
 
 - dmPolicy 默认 `pairing`：陌生人私聊 → 生成 **8 位码（大写，剔除 0O1I）**，回复「配对码 XXXX，1 小时内有效」；**每渠道账户 pending 上限 3**，超限拒绝。
-- 批准：`latent-gateway pairing approve <channel> <CODE>`（CLI 子命令，落 state.json）；批准**只授 DM 访问**，永不授群访问（上游同款 fail-closed）。
+- 批准：`latent-gateway pairing approve <channel> <CODE>`（CLI 子命令）——**实现为控制面薄客户端**（connect → `pairing.approve`；token 读 `$LATENT_GATEWAY_TOKEN`/gateway.json），由 **daemon 单一写者**落 state.json；**禁止 CLI 直接写 state.json**（daemon 同时持有并原子重写该文件，双写者互相丢更新）。批准**只授 DM 访问**，永不授群访问（上游同款 fail-closed）。
 - `allowlist`：`channels.<id>.allowFrom` 显式列表；`open`：仅当列表含 `"*"` 才真公开；`disabled`：拒绝所有 DM。
 
 ### 4.11 state.rs
@@ -562,9 +580,9 @@ impl latent_core::ApprovalUi for ChatApprovalUi {
 }
 ```
 
-去重表/幂等表**仅在内存**（进程内 Map + 过期；重启后重放风险与上游一致，接受）。
+state.json 的**唯一写者是 daemon 进程**（CLI 子命令经控制面请求变更，§4.10，杜绝双写者丢更新）；去重表/幂等表**仅在内存**（进程内 Map + 过期；重启后重放风险与上游一致，接受）。
 
-### 4.12 gateway/（WS 控制面，阶段 4）
+### 4.12 gateway/（WS 控制面：阶段 2 最小骨架 connect/health/pairing.*，阶段 4 完整方法表）
 
 上游协议（docs `gateway/protocol/*.md` + `packages/gateway-protocol/src/schema.ts`）——**帧格式逐字对齐**：
 
@@ -581,11 +599,12 @@ MVP 方法表（对齐上游 `core-descriptors.ts` 的命名；实现放 `gatewa
 |---|---|
 | `connect` | 握手：params 带 `client{id,version}`、`auth.token`、`role:"operator"`、`scopes`；成功回 `hello-ok`（含 server 版本、策略上限、当前状态快照） |
 | `health` / `status` | 存活 / 运行态（uptime、渠道状态、会话数） |
-| `chat.send` | 投递一条消息——**与渠道入站走同一 dispatch 管线**（`sessionKey` 直指目标会话；带幂等键） |
+| `chat.send` | 投递一条消息——**与渠道入站走同一 dispatch 管线**（`sessionKey` 直指目标会话；带幂等键）。**sender 身份由服务端固定为 operator（params 无 sender 字段）**：不匹配 `ownerAllowFrom`、不受 dmPolicy 放行——控制面调用者不能伪造渠道身份冒充 owner 应答审批/切 full-access（§5.4） |
 | `chat.abort` | 中止指定会话活跃 run（带 runId 则精确取消） |
 | `chat.history` | 拉指定会话最近消息 |
 | `sessions.list` / `sessions.reset` | 列出活跃会话 / 重置（= /new） |
 | `channels.status` | 渠道连接状态（`--probe` 深探活） |
+| `pairing.list` / `pairing.approve` | 列出/批准配对请求（daemon 单一写者落 state.json；`latent-gateway pairing` 子命令的薄客户端目标，§4.10） |
 | `config.get` | 读当前生效配置（redact 凭据） |
 
 事件（上游 `GATEWAY_EVENTS` 的子集）：`agent`（run 进度/最终回复）、`chat`（入站回执）、`session.message` / `session.typing` / `session.approval`、`channels`（状态变化）、`health`、`shutdown`。
@@ -599,24 +618,29 @@ MVP 方法表（对齐上游 `core-descriptors.ts` 的命名；实现放 `gatewa
 ### 5.1 权限天花板（防远程提权）
 
 - 聊天端 `/mode full-access` **仅 owner 白名单可执行**；非 owner 一律拒绝。这是硬要求：群 allowlist 只挡"哪个群"，不挡群内哪个人——若不设天花板，任何群成员都能拿走机器的完全控制权。
-- plan/confirm 切换允许触发者使用（作用于自己触发的会话）。
+- plan/confirm 切换：私聊会话触发者可用；**群聊会话仅 owner**（群会话全群共享，见 §4.7 会话归属规则）。
 
 ### 5.2 审批应答权
 
 - `/approve` **仅 owner 可应答**；非 owner 发 `/approve` 无效并提示。
 - 审批请求默认投递到 owner 可达的聊天（有 owner 的 DM 渠道 → 发 owner 私聊；否则在触发会话内等待，但仍只接受 owner 应答）。
 - 超时 120s / 渠道断开 → `None` → **Deny**（fail-closed，与 core 的 ApprovalUi 语义一致）。
+- 审批消息**发送失败**（渠道断开/发送错误）→ 立即 Deny + 诊断，不等 120s。
+- ChatApprovalUi 为 gateway 全局单例（§4.9）：id 全局唯一，`/approve` 跨会话路由到发起会话的 oneshot——不存在按会话分表后的 id 碰撞误路由。
 
 ### 5.3 渠道端点
 
 - QQ 反向 WS：`reverseWsHost` 默认 **127.0.0.1**（配置可改但文档强警告）；`accessToken` **必填**，缺失/为空 → 该渠道拒绝启动（不是警告）；校验用 `Authorization: Bearer` Header（**不用 query 参数**——query 会进访问日志）。
 - 出站连接（telegram/wecom）凭据走 `$ENV`/`!shell` 三来源，避免明文落盘；项目级 `.latent/gateway.json` 文档提醒加入 `.gitignore`。
+- **资源上限（反向 WS 与控制面统一）**：单帧/单消息最大 **1 MiB**（超限断连）；单端点并发连接 ≤ **8**；auth/握手失败按来源指数退避（连续 5 次失败 → 60s 冷却）；token 比较用常数时间实现；hello-ok 回传 maxPayload/maxBufferedBytes/tickIntervalMs（对齐上游策略上限）。
 
 ### 5.4 控制面
 
 - `gateway.auth.token` 未配置 → **拒绝启动**（错误信息指明如何配置）；建议自动生成强随机值并打印一次的选项可做（阶段 5）。
 - 默认绑定 `127.0.0.1:18789`。
 - 本机信任边界声明（写入文档）：控制面端口对本机所有进程开放，本机恶意进程不在防御模型内（与 OpenClaw 相同的定位——"一个 Gateway 一个信任边界"）。
+
+- `chat.send` 注入消息的 sender 身份由服务端固定为 operator（§4.12），params 不携带 sender 字段——即使「本机恶意进程不在防御模型内」，也不给本机进程伪造 owner 身份（应答审批/切 full-access）的接口面；CLI/桌面端未来都从这个口进，防线从 MVP 就长在协议上。
 
 ### 5.5 其他
 
@@ -662,7 +686,7 @@ OpenClaw 仓库 <https://github.com/openclaw/openclaw>（MIT）。路径基于 m
 
 1. 去重 claim 必须**先于 ACK**（否则客户端重试造成双跑）。
 2. 防抖窗口在首条到达时固定（maxWait = debounceMs×5），后续消息**不得**顺延窗口。
-3. OneBot 11：action 响应用 `echo` 字段关联（oneshot 表）；`meta_event.heartbeat` 判活；多 NapCat 实例按 `self_id` 路由；token 走 Header 不走 query。
+3. OneBot 11：action 响应用 `echo` 字段关联（oneshot 表）；`meta_event.heartbeat` 判活；多 NapCat 实例按 `self_id` 路由；token 走 Header 不走 query；**NapCat 会上报机器人自己的发言（user_id==self_id），归一化先丢自消息，否则私聊恒 to_me 直接死循环**（§2.3/§2.6）。
 4. Telegram：`getUpdates` 带 `timeout` 长轮询；`offset = last_update_id + 1`；**两个轮询进程会 409 Conflict**（重启竞速时注意）；botToken 从 `$ENV` 读。
 5. 一个会话同时只能有一个 run（run_lock）；`PromptOutcome::Started` 与 `Enqueued` 必须区分上报。
 6. 订阅者回调里做慢 IO 会阻塞整个会话的事件分发——只推 channel。
@@ -677,13 +701,13 @@ OpenClaw 仓库 <https://github.com/openclaw/openclaw>（MIT）。路径基于 m
 
 ### 阶段 1：latent-runtime 抽取 + 构建体系（约 1 天，行为不变）
 
-产出：`crates/latent-runtime`（§3 全部迁移项）、根 Cargo.toml 变更（§3.3）、latent-cli re-export 兼容层、RPC 审批装配链路修复（§3.2 末）及其回归测试。
+产出：`crates/latent-runtime`（§3 全部迁移项）、根 Cargo.toml 变更（§3.3）、latent-cli re-export 兼容层、RPC 审批装配链路修复（§3.2 末）及其回归测试；AGENTS.md **增量同步**（目录索引加 latent-runtime、依赖图 L 层说明——文档随结构走，不拖到阶段 5）。
 验收：现有全部测试不改动语义即通过；`cargo run -p latent-cli -- --mock "你好"` 行为不变；`cargo tree -p latent-runtime -i ratatui` 为空。
 
 ### 阶段 2：latent-channel 宿主层 + latent-gateway 核心（约 2-3 天）
 
-产出：latent-channel（types/plugin/typing/mention_gating/debounce/chunk/error + mock feature，单测覆盖每个机制的常量语义）；latent-gateway（config/session_key/state/agents/auto_reply/approval/pairing + daemon 骨架，main 默认分支）。
-集成测试（mock 渠道 + ScriptedProvider，全离线）：端到端消息→回复；steer/followup/collect/interrupt 四模式；cap 20 溢出处置；防抖合并与 ×5 封顶；chunk 三模式与 fence；session key 四档 dmScope + 群 key + unknown 兜底；envelope 格式；/new /compact /stop /status /model；群 allowlist + requireMention 拒绝路径；pairing 全流程（发码→过期→批准→放行→pending 上限）；审批三应答 + 超时 Deny + close_all 全 Deny；message-id 去重；重启后会话恢复（state.json）。
+产出：latent-channel（types/plugin/typing/mention_gating/debounce/chunk/error/credential + mock feature，单测覆盖每个机制的常量语义）；latent-gateway（config/session_key/state/agents/auto_reply/approval/pairing + daemon 骨架，main 默认分支）；**最小控制面**（server+auth，仅 connect/health/pairing.list/pairing.approve 四方法——pairing 批准必须走 daemon 单一写者，等不到阶段 4，见 §4.10/§4.12）。
+集成测试（mock 渠道 + ScriptedProvider，全离线）：端到端消息→回复；steer/followup/collect/interrupt 四模式；cap 20 溢出处置；防抖合并与 ×5 封顶；chunk 三模式与 fence；session key 四档 dmScope + 群 key + unknown 兜底；envelope 格式；/new /compact /stop /status /model；群 allowlist + requireMention 拒绝路径；pairing 全流程（发码→过期→批准→放行→pending 上限）；审批三应答 + 超时 Deny + close_all 全 Deny；message-id 去重；重启后会话恢复（state.json）；自消息回声（user_id==self_id）在渠道源头被丢；防抖 flush 产物 message_id 为合成新键；双会话并发审批 id 全局唯一且 `/approve` 路由到正确会话；群会话非 owner 发 `/new` `/model` `/mode` 被拒；事件泵有界通道满时进度类丢、final/审批类不丢。
 
 ### 阶段 3：三个渠道（约 3-4 天，相互独立，顺序 telegram → qq → wecom）
 
@@ -692,13 +716,13 @@ OpenClaw 仓库 <https://github.com/openclaw/openclaw>（MIT）。路径基于 m
 
 ### 阶段 4：控制面 WS + bin 子命令（约 1-2 天）
 
-产出：gateway/server+auth+methods+events（§4.12）；`latent-gateway pairing list/approve`、`channels status [--probe]`、`status` 子命令。
-验收：协议帧集成测试（connect 首帧强制、token 错误拒绝、chat.send 走同一管线、事件 seq 单调）。
+产出：gateway 完整方法表（server/methods/events，§4.12——connect/health/pairing.* 骨架已在阶段 2）；`latent-gateway pairing list/approve`（控制面薄客户端）、`channels status [--probe]`、`status` 子命令。
+验收：协议帧集成测试（connect 首帧强制、token 错误拒绝、chat.send 走同一管线、事件 seq 单调；chat.send 携带 sender 字段的 params 被拒、注入消息身份固定 operator 且不匹配 ownerAllowFrom；单帧超 1 MiB 断连；auth 连续失败进入冷却）。
 
 ### 阶段 5：打磨 + 文档（约 1-2 天）
 
-产出：block_streaming（§4.8 参数）；/queue 会话命令；session reset 策略（daily/idle）；daemon 安装脚本（launchd/systemd，label `ai.latent.gateway`）；`AGENTS.md` 更新（目录索引加三 crate、依赖图、gateway.json 配置节、"参考 OpenClaw 上游"一节 + §8 偏离记录全文）；README 特性表。
-安全用例（并入阶段 2/4 测试，验收时复查）：非 owner 切 full-access 被拒；非 owner /approve 无效；无 token 渠道/控制面拒绝启动；未授权 WS 连接被断；陌生人 DM 走 pairing；非白名单群消息丢弃；danger 配置启动警告出现。
+产出：block_streaming（§4.8 参数）；/queue 会话命令；session reset 策略（daily/idle）；daemon 安装脚本（launchd/systemd，label `ai.latent.gateway`）；`AGENTS.md` 更新（目录索引补 latent-channel/latent-gateway（latent-runtime 已在阶段 1 同步）、gateway.json 配置节、"参考 OpenClaw 上游"一节 + §8 偏离记录全文）；README 特性表。
+安全用例（并入阶段 2/4 测试，验收时复查）：非 owner 切 full-access 被拒；非 owner /approve 无效；无 token 渠道/控制面拒绝启动；未授权 WS 连接被断；陌生人 DM 走 pairing；非白名单群消息丢弃；danger 配置启动警告出现；项目级 gateway.json 含 `!shell` 凭据来源 → 拒绝启动；chat.send 冒充 owner 身份应答审批被拒。
 
 ---
 
@@ -710,9 +734,11 @@ OpenClaw 仓库 <https://github.com/openclaw/openclaw>（MIT）。路径基于 m
 4. **steer 注入时序**：latent 主循环在 turn 间隙消费 steering；bash 等长工具执行期间 steer 排队（上游可在工具执行中途注入）。不强改主循环时序。
 5. **QQ（OneBot 11/NapCat）与企微渠道**为 OpenClaw 所无，按其 ChannelPlugin 接口语义新写；NapCat 是外部部署组件（docker 配置文档随渠道交付）。
 6. **安全模型更严**：full-access 切换与审批应答均 owner-only（上游审批走 operator scope 体系）；目的：聊天暴露面大于终端，防群内横向提权。
-7. **控制面**为上游数百方法的小子集；token 单角色，无 connect.challenge/设备配对（MVP）。
+7. **控制面**为上游数百方法的小子集；token 单角色，无 connect.challenge/设备配对（MVP）；`chat.send` 注入消息固定 operator 身份（§4.12/§5.4）。
 8. **配置**为 serde JSON（无 JSON5/$include）；时间戳毫秒整数（仓库既有约定）。
 9. **重启不恢复在途 run**（无上游 restart recovery/tombstone 机制），转录保留；去重/幂等表仅内存。
+10. **凭据解析器**：latent-channel 内置自包含副本（明文/`$ENV`/`!shell`，语义对齐 latent-web `credential.rs`，单测锁行为）——L1「零内部依赖」硬规则优先于去重；`!shell` 来源仅全局配置接受（§4.2）。
+11. **群会话命令收紧**：会话级修改命令在群聊会话中仅 owner（上游为触发者可用）——偏离 6 的延伸，群会话全群共享（§4.7/§5.1）。
 
 ---
 
@@ -750,4 +776,4 @@ OpenClaw 仓库 <https://github.com/openclaw/openclaw>（MIT）。路径基于 m
 - 会话存储：`SessionStore::{Memory, New{dir}, Resume{file}}`；`latent_session::list_session_files`。
 - 事件：`AgentSessionEvent::{Agent(AgentEvent), AgentSettled, QueueUpdate, AutoRetryStart/End, ApprovalRequested, ApprovalResolved}`；最终回复 = Text delta 累计 + assistant `MessageEnd` 定稿。
 - slash 解析参考：`latent-runtime::slash::parse`（迁移后）。
-- 凭据三来源解析器：`latent-web::credential`（gateway.json 的 `$ENV`/`!shell` 复用其思路或抽到 latent-core；注意依赖方向——若 latent-gateway 直接依赖 latent-web 亦可，它在 L2）。
+- 凭据三来源解析器：`latent-channel::credential`（L1 自包含副本，§8 偏离 10；渠道配置与 `gateway.auth.token` 统一走它）。latent-web `credential.rs` 只作语义参照——可共享测试向量，不可共享依赖。

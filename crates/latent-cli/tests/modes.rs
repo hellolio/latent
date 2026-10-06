@@ -518,10 +518,11 @@ async fn switch_new_session_starts_fresh_file_and_keeps_old() {
     let old_lines = old_content.lines().count();
 
     // /new:新文件建立,转录清空
-    let new_file = latent::assembly::switch_new_session(&built.session, &built.manager_holder)
-        .await
-        .unwrap()
-        .expect("文件会话应产生新文件");
+    let new_file =
+        latent::assembly::switch_new_session(&built.session, &built.manager_holder, None)
+            .await
+            .unwrap()
+            .expect("文件会话应产生新文件");
     assert_ne!(new_file, old_file, "应切换到新的 session 文件");
     assert!(new_file.exists());
     let fresh_messages = built.session.agent().messages();

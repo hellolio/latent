@@ -349,7 +349,15 @@ pub struct BuiltSession {
     pub subagent_registry: Option<Arc<latent_core::SubagentRegistry>>,
     /// /subagent 平行会话工厂(与主会话同源依赖;None = 未装配)
     pub subagent_factory: Option<Arc<latent_core::SubagentSessionFactory>>,
+    /// 子会话落盘句柄注册表(tag → 私有 holder):子会话的 /session list 与
+    /// 切换在**本会话谱系**内操作,与主会话的全局 holder 互不影响
+    pub child_stores: ChildStoreRegistry,
 }
+
+/// 子会话落盘句柄注册表(tag = agent 名/run id → 该谱系"当前文件"句柄)。
+/// 每个子会话的 sink 动态从自己的 holder 取 manager,/session 切换、/new 经
+/// `holder.set` 重定向到新文件 —— 与主会话的全局 holder 完全独立。
+pub type ChildStoreRegistry = Arc<Mutex<HashMap<String, SessionManagerHolder>>>;
 
 /// 可切换的会话存储句柄(内部 `Arc<RwLock<Option<Arc<SessionManager>>>>`)。
 #[derive(Clone, Default)]
@@ -375,10 +383,12 @@ impl SessionManagerHolder {
 /// (sink/compactor/LATENT_* 环境)切过去。旧文件不做任何操作 —— append-only
 /// 语义下它天然处于已保存状态。模型/思考级别作为设置态 entry 写入新文件,
 /// 保持新会话自描述。流式期间调用方须先行拒绝。返回新 session 文件路径
-/// (内存会话为 None)。
+/// (内存会话为 None)。`tag` 供平行子 agent 会话传 agent 名(新文件保持
+/// `<时间>__<tag>__<id>` 命名,留在本会话谱系内;主会话传 None)。
 pub async fn switch_new_session(
     session: &AgentSession,
     holder: &SessionManagerHolder,
+    tag: Option<&str>,
 ) -> Result<Option<std::path::PathBuf>, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let old = holder.get();
@@ -394,7 +404,7 @@ pub async fn switch_new_session(
                     dir,
                     &cwd.display().to_string(),
                     parent_session.as_deref(),
-                    None,
+                    tag,
                 )
                 .map_err(|e| e.to_string())?
                 .into()
@@ -1219,7 +1229,10 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // 子会话落盘工厂:与主会话同一套 latent-session 机制(消息/usage/快照 entry
     // 完全一致),文件名 `<时间>__<tag>__<id>.jsonl`(tag = run id / agent 名,
     // 落在 `<dir>/<项目前缀>/` 项目目录下);
-    // 纯内存会话不落盘。contextSnapshot 开启时子会话同样记录真实上下文
+    // 纯内存会话不落盘。contextSnapshot 开启时子会话同样记录真实上下文。
+    // 每个子会话的私有 holder(tag → holder)登记进注册表:/session list 与
+    // 切换在子会话谱系内操作时据此取句柄,与主会话的全局 holder 互不影响
+    let child_stores: ChildStoreRegistry = Arc::new(Mutex::new(HashMap::new()));
     let child_store_factory: Option<latent_core::ChildStoreFactory> = match &session_store {
         SessionStore::Memory => None,
         _ => {
@@ -1233,6 +1246,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             };
             let project = cwd.display().to_string();
             let snapshot_enabled = context_snapshot.unwrap_or(false);
+            let registry = child_stores.clone();
             Some(Arc::new(move |tag: &str| {
                 let manager: Arc<latent_session::SessionManager> = latent_session::create_session_in_dir(
                     &dir,
@@ -1242,9 +1256,13 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
                 )
                 .map_err(|e| e.to_string())?
                 .into();
-                let sink: Arc<dyn latent_core::SessionSink> = Arc::new(SessionManagerSink(
-                    SessionManagerHolder::new(Some(manager.clone())),
-                ));
+                let holder = SessionManagerHolder::new(Some(manager.clone()));
+                registry
+                    .lock()
+                    .unwrap()
+                    .insert(tag.to_string(), holder.clone());
+                let sink: Arc<dyn latent_core::SessionSink> =
+                    Arc::new(SessionManagerSink(holder));
                 let mut stream_options = latent_ai::StreamOptions::default();
                 if snapshot_enabled {
                     let snapshot_manager = manager.clone();
@@ -1389,6 +1407,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         compaction_config: compaction,
         rpc_approval,
         subagent_registry: Some(subagent_tool.registry()),
+        child_stores,
         subagent_factory: Some(Arc::new(latent_core::SubagentSessionFactory {
             provider: provider.clone(),
             approval_ui: approval_ui_for_factory,

@@ -71,6 +71,9 @@ pub struct InteractiveCtx<'a> {
     pub session: &'a SessionRouter,
     /// /subagent 平行会话工厂(与主会话同源依赖;None = 未装配)
     pub subagent_factory: Option<&'a Arc<latent_core::SubagentSessionFactory>>,
+    /// 子会话落盘句柄注册表(tag → 私有 holder):/session list 与切换在
+    /// 子会话谱系内操作用;None = 未装配(测试/纯内存)
+    pub child_stores: Option<&'a crate::assembly::ChildStoreRegistry>,
     /// None = 内存会话(无 SessionManager);经 holder 读取当前值(/new 可切换)
     pub manager_holder: Option<&'a crate::assembly::SessionManagerHolder>,
     /// `/model` 的候选与解析(models.json + 内置 provider 默认表)。
@@ -868,20 +871,53 @@ pub async fn execute_command(
                 ));
                 return false;
             }
-            // 平行子 agent 会话:纯内存,无文件,新建 = 清空其转录
+            // 平行子 agent 会话:有落盘句柄时在**本会话谱系**内开新文件(tag =
+            // agent 名,旧文件原样保留可 /session 切回)——原地 reset 会让同一
+            // 文件里混进两段会话;纯内存会话才直接清空转录
             if !ctx.session.is_main() {
-                let _ = ctx.session.current().agent().reset();
-                state.reset_for_new_session();
-                refresh_footer(ctx, state);
-                // ephemeral:reset 已触发全文重绘,转录重渲染 + 待提交合并
-                // 会把 commit_line 的条目画两遍
-                state.commit_ephemeral(plain_dim(
-                    &format!(
-                        "new session (subagent {} 内存会话,无文件)",
-                        ctx.session.active_agent().as_deref().unwrap_or("?")
-                    ),
-                    &state.theme,
-                ));
+                let name = ctx.session.active_agent().unwrap_or_default();
+                let holder = ctx
+                    .child_stores
+                    .and_then(|registry| registry.lock().unwrap().get(&name).cloned());
+                match holder {
+                    Some(holder) => {
+                        match crate::assembly::switch_new_session(
+                            &ctx.session.current(),
+                            &holder,
+                            Some(&name),
+                        )
+                        .await
+                        {
+                            Ok(path) => {
+                                state.reset_for_new_session();
+                                refresh_footer(ctx, state);
+                                let message = match &path {
+                                    Some(path) => format!(
+                                        "new session started: {}(subagent {name})",
+                                        path.display()
+                                    ),
+                                    None => "new session started".to_string(),
+                                };
+                                state.commit_ephemeral(plain_dim(&message, &state.theme));
+                            }
+                            Err(error) => {
+                                state.commit_ephemeral(view::error_line(
+                                    &format!("新建会话失败: {error}"),
+                                    &state.theme,
+                                ));
+                            }
+                        }
+                    }
+                    None => {
+                        let _ = ctx.session.current().agent().reset();
+                        state.reset_for_new_session();
+                        refresh_footer(ctx, state);
+                        state.commit_ephemeral(plain_dim(
+                            &format!("new session (subagent {name} 内存会话,无文件)"),
+                            &state.theme,
+                        ));
+                    }
+                }
                 return false;
             }
             // 旧会话的后台 subagent 一并终止(抑制完成通知,不唤醒新会话)
@@ -889,30 +925,32 @@ pub async fn execute_command(
                 registry.abort_all();
             }
             match ctx.manager_holder {
-                Some(holder) => match crate::assembly::switch_new_session(&ctx.session.current(), holder)
-                    .await
-                {
-                    Ok(path) => {
-                        // 清空转录区/用量,底部提示新会话(旧会话原样保留在原文件)
-                        state.reset_for_new_session();
-                        refresh_footer(ctx, state);
-                        let message = match &path {
-                            Some(path) => {
-                                format!("new session started: {}", path.display())
-                            }
-                            None => "new session started".to_string(),
-                        };
-                        // ephemeral:reset 已触发全文重绘,转录重渲染 + 待提交
-                        // 合并会把 commit_line 的条目画两遍
-                        state.commit_ephemeral(plain_dim(&message, &state.theme));
+                Some(holder) => {
+                    match crate::assembly::switch_new_session(&ctx.session.current(), holder, None)
+                        .await
+                    {
+                        Ok(path) => {
+                            // 清空转录区/用量,底部提示新会话(旧会话原样保留在原文件)
+                            state.reset_for_new_session();
+                            refresh_footer(ctx, state);
+                            let message = match &path {
+                                Some(path) => {
+                                    format!("new session started: {}", path.display())
+                                }
+                                None => "new session started".to_string(),
+                            };
+                            // ephemeral:reset 已触发全文重绘,转录重渲染 + 待提交
+                            // 合并会把 commit_line 的条目画两遍
+                            state.commit_ephemeral(plain_dim(&message, &state.theme));
+                        }
+                        Err(error) => {
+                            state.commit_ephemeral(view::error_line(
+                                &format!("新建会话失败: {error}"),
+                                &state.theme,
+                            ));
+                        }
                     }
-                    Err(error) => {
-                        state.commit_ephemeral(view::error_line(
-                            &format!("新建会话失败: {error}"),
-                            &state.theme,
-                        ));
-                    }
-                },
+                }
                 None => {
                     state.commit_ephemeral(warning_line_theme(
                         "当前无会话存储,无法新建会话",
@@ -1278,9 +1316,10 @@ fn open_theme_selector(state: &mut InteractiveState) {
     });
 }
 
-/// /session 无参数:弹出当前项目的历史会话列表(mtime 倒序)供切换。
-/// 候选目录 = 当前会话文件所在目录(同一项目前缀),cwd 过滤与 `--continue`
-/// 一致;当前会话在列表中预选中。
+/// /session list:弹出本谱系的历史会话列表(mtime 倒序)供切换。主会话列
+/// 主谱系(无 tag 文件);平行子 agent 会话列**自己的**谱系(tag = agent 名)
+/// —— 两边互相不可见,恢复也只重定向本谱系的落盘句柄。候选目录 = 当前会话
+/// 文件所在目录(同一项目前缀),cwd 过滤与 `--continue` 一致;当前会话预选中。
 async fn open_session_selector(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
     // 流式期间切换会让进行中的 run 写入错误的 session 文件
     if ctx.session.current().agent().is_streaming() {
@@ -1290,22 +1329,45 @@ async fn open_session_selector(ctx: &InteractiveCtx<'_>, state: &mut Interactive
         ));
         return;
     }
-    if !ctx.session.is_main() {
-        state.commit_ephemeral(warning_line_theme(
-            "子 agent 平行会话无历史文件;/subagent off 回主会话后再切换",
-            &state.theme,
-        ));
-        return;
-    }
-    let Some(manager) = ctx.current_manager() else {
-        state.commit_ephemeral(warning_line_theme(
-            "当前无会话存储,无法切换历史会话",
-            &state.theme,
-        ));
-        return;
+    let agent = ctx.session.active_agent();
+    let (lineage_tag, current_file) = if let Some(name) = &agent {
+        // 子会话谱系:holder 注册表里取本会话的落盘句柄(纯内存会话无存储)
+        let Some(registry) = ctx.child_stores else {
+            state.commit_ephemeral(warning_line_theme(
+                "当前无会话存储,无法切换历史会话",
+                &state.theme,
+            ));
+            return;
+        };
+        let Some(holder) = registry.lock().unwrap().get(name).cloned() else {
+            state.commit_ephemeral(warning_line_theme(
+                "当前无会话存储,无法切换历史会话",
+                &state.theme,
+            ));
+            return;
+        };
+        (
+            Some(name.clone()),
+            holder.get().and_then(|manager| manager.file_path().map(|p| p.to_path_buf())),
+        )
+    } else {
+        // 主谱系:全局 holder
+        match ctx.current_manager() {
+            Some(manager) => (
+                None,
+                manager.file_path().map(|path| path.to_path_buf()),
+            ),
+            None => {
+                state.commit_ephemeral(warning_line_theme(
+                    "当前无会话存储,无法切换历史会话",
+                    &state.theme,
+                ));
+                return;
+            }
+        }
     };
-    let Some(dir) = manager
-        .file_path()
+    let Some(dir) = current_file
+        .as_ref()
         .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
     else {
         state.commit_ephemeral(warning_line_theme(
@@ -1317,22 +1379,25 @@ async fn open_session_selector(ctx: &InteractiveCtx<'_>, state: &mut Interactive
     let cwd = std::env::current_dir()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let files = latent_session::list_session_files(&dir, Some(&cwd));
+    let files = match &lineage_tag {
+        Some(tag) => latent_session::list_session_files_with_tag(&dir, Some(&cwd), tag),
+        None => latent_session::list_session_files(&dir, Some(&cwd)),
+    };
     if files.is_empty() {
-        state.commit_ephemeral(warning_line_theme(
-            "没有历史会话(当前目录下还没有已保存的会话文件)",
-            &state.theme,
-        ));
+        let message = match &lineage_tag {
+            Some(tag) => format!("没有 {tag} 的历史会话"),
+            None => "没有历史会话(当前目录下还没有已保存的会话文件)".to_string(),
+        };
+        state.commit_ephemeral(warning_line_theme(&message, &state.theme));
         return;
     }
-    let current = manager.file_path().map(|path| path.to_path_buf());
     let mut list = SelectList::new(
         files
             .iter()
             .map(|summary| format!("{}  {}", summary.local_time(), summary.preview))
             .collect(),
     );
-    if let Some(index) = files.iter().position(|summary| Some(&summary.path) == current.as_ref()) {
+    if let Some(index) = files.iter().position(|summary| Some(&summary.path) == current_file.as_ref()) {
         list.selected = index;
     }
     state.select = Some(SelectRequest {
@@ -1342,32 +1407,63 @@ async fn open_session_selector(ctx: &InteractiveCtx<'_>, state: &mut Interactive
     });
 }
 
-/// Enter 选定历史会话:终止旧会话的后台 subagent(抑制完成通知)→ 切
-/// manager/重建上下文(assembly)→ 清空转录区并回放历史 → footer 刷新。
+/// Enter 选定历史会话:恢复**本谱系**的历史文件 —— 主会话走全局 holder(先
+/// 终止旧会话的后台 subagent);平行子 agent 会话走自己的 holder(不碰主会话
+/// 上下文与后台运行)。恢复 = 切 manager/重建上下文(assembly)→ 清空转录区
+/// 并回放历史 → footer 刷新。
 async fn switch_to_session(
     ctx: &InteractiveCtx<'_>,
     state: &mut InteractiveState,
     file: &std::path::Path,
 ) {
-    let Some(holder) = ctx.manager_holder else {
-        state.commit_ephemeral(warning_line_theme(
-            "当前无会话存储,无法切换历史会话",
-            &state.theme,
-        ));
-        return;
+    let agent = ctx.session.active_agent();
+    let holder = if let Some(name) = &agent {
+        // 子会话谱系:重定向自己的 holder,sink 动态取 manager 后续写入新文件
+        let Some(registry) = ctx.child_stores else {
+            state.commit_ephemeral(warning_line_theme(
+                "当前无会话存储,无法切换历史会话",
+                &state.theme,
+            ));
+            return;
+        };
+        match registry.lock().unwrap().get(name).cloned() {
+            Some(holder) => holder,
+            None => {
+                state.commit_ephemeral(warning_line_theme(
+                    "当前无会话存储,无法切换历史会话",
+                    &state.theme,
+                ));
+                return;
+            }
+        }
+    } else {
+        // 主谱系:旧会话的后台 subagent 一并终止(抑制完成通知)
+        if let Some(registry) = ctx.subagent_registry {
+            registry.abort_all();
+        }
+        match ctx.manager_holder {
+            Some(holder) => holder.clone(),
+            None => {
+                state.commit_ephemeral(warning_line_theme(
+                    "当前无会话存储,无法切换历史会话",
+                    &state.theme,
+                ));
+                return;
+            }
+        }
     };
-    if let Some(registry) = ctx.subagent_registry {
-        registry.abort_all();
-    }
-    match crate::assembly::switch_resume_session(&ctx.session.current(), holder, file).await {
+    match crate::assembly::switch_resume_session(&ctx.session.current(), &holder, file).await {
         Ok(path) => {
             // 清空转录区/用量后回放历史(replay 与启动恢复同源)
             state.reset_for_new_session();
             replay::replay_history(ctx, state);
             refresh_footer(ctx, state);
-            let message = match &path {
-                Some(path) => format!("resumed session: {}", path.display()),
-                None => "resumed session".to_string(),
+            let message = match (&path, &agent) {
+                (Some(path), Some(name)) => {
+                    format!("resumed session: {}(subagent {name})", path.display())
+                }
+                (Some(path), None) => format!("resumed session: {}", path.display()),
+                (None, _) => "resumed session".to_string(),
             };
             // ephemeral:reset 已触发全文重绘,转录重渲染 + 待提交合并会把
             // commit_line 的条目画两遍

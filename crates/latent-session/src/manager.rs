@@ -236,6 +236,32 @@ impl SessionSummary {
 /// 按修改时间倒序列出候选会话文件(最新在前;`--continue`/`-l`/TUI
 /// 会话切换共用同一候选集与排序)。扫描与过滤规则同 `find_latest_session_file`。
 pub fn list_session_files(dir: impl AsRef<Path>, cwd: Option<&str>) -> Vec<SessionSummary> {
+    list_session_files_lineage(dir, cwd, Lineage::Main)
+}
+
+/// 指定 tag 的子会话谱系列表(平行子 agent 会话的 `/session` 切换):只收
+/// `<时间>__<tag>__<id>.jsonl` 且 tag 段匹配的文件;其余规则(项目 cwd 过滤、
+/// 首条消息预览、按修改时间倒序)与 [`list_session_files`] 一致。
+pub fn list_session_files_with_tag(
+    dir: impl AsRef<Path>,
+    cwd: Option<&str>,
+    tag: &str,
+) -> Vec<SessionSummary> {
+    list_session_files_lineage(dir, cwd, Lineage::Tag(tag))
+}
+
+/// 谱系筛选:主会话(排除带 tag 的子会话文件)或指定 tag 的子会话谱系。
+#[derive(Clone, Copy)]
+enum Lineage<'a> {
+    Main,
+    Tag(&'a str),
+}
+
+fn list_session_files_lineage(
+    dir: impl AsRef<Path>,
+    cwd: Option<&str>,
+    lineage: Lineage<'_>,
+) -> Vec<SessionSummary> {
     let dir = dir.as_ref();
     let mut candidates: Vec<SessionSummary> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -247,29 +273,49 @@ pub fn list_session_files(dir: impl AsRef<Path>, cwd: Option<&str>) -> Vec<Sessi
             // 新版式:项目子目录;读不了的子目录跳过
             if let Ok(subs) = std::fs::read_dir(&path) {
                 for sub in subs.flatten() {
-                    consider_session_file(&sub.path(), cwd, &mut candidates);
+                    consider_session_file(&sub.path(), cwd, lineage, &mut candidates);
                 }
             }
         } else {
-            consider_session_file(&path, cwd, &mut candidates);
+            consider_session_file(&path, cwd, lineage, &mut candidates);
         }
     }
     candidates.sort_by_key(|summary| std::cmp::Reverse(summary.modified));
     candidates
 }
 
-/// 单个候选文件的 --continue 判定(收进倒序列表)。
-fn consider_session_file(path: &Path, cwd: Option<&str>, out: &mut Vec<SessionSummary>) {
+/// 单个候选文件的收录判定。
+fn consider_session_file(
+    path: &Path,
+    cwd: Option<&str>,
+    lineage: Lineage<'_>,
+    out: &mut Vec<SessionSummary>,
+) {
     if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
         return;
     }
-    // 带 tag 的子会话文件(文件名含两段 `__`)不参与 --continue 选取
-    if path
+    // 文件名段:`<时间>__<session-id>`(主)或 `<时间>__<tag>__<id>`(子会话)
+    let segments: Vec<&str> = path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.matches("__").count() >= 2)
-    {
-        return;
+        .map(|stem| stem.split("__").collect())
+        .unwrap_or_default();
+    match lineage {
+        Lineage::Main => {
+            // 带 tag 的子会话文件不参与 --continue 选取
+            if segments.len() >= 3 {
+                return;
+            }
+        }
+        Lineage::Tag(want) => {
+            // tag 段匹配才收;文件名里的 tag 经 sanitize,查询侧同样净化;
+            // tag 本身可含 `_`,用中段重组还原(严格 3 段)
+            if segments.len() != 3
+                || segments[1..segments.len() - 1].join("__") != sanitize_session_tag(want)
+            {
+                return;
+            }
+        }
     }
     let Ok(modified) = path.metadata().and_then(|meta| meta.modified()) else {
         return;

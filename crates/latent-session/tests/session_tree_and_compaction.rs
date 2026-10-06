@@ -4,9 +4,10 @@ use latent_agent::{AgentMessage, AssistantMessage, ContentBlock, CustomMessage, 
 use latent_session::compaction::SummarizationRequest;
 use latent_session::{
     build_context_entries, build_session_projection, create_fixed_summarizer, create_session,
-    create_session_with, estimate_context_tokens, estimate_tokens, find_cut_point, run_compaction,
-    serialize_conversation, should_compact, CompactionOutcome, CompactionSettings,
-    ContextReplacement, Entry, SummarizationResponse, Summarizer, DEFAULT_COMPACTION_SETTINGS,
+    create_session_in_dir, create_session_with, estimate_context_tokens, estimate_tokens,
+    find_cut_point, run_compaction, serialize_conversation, should_compact, CompactionOutcome,
+    CompactionSettings, ContextReplacement, Entry, SummarizationResponse, Summarizer,
+    DEFAULT_COMPACTION_SETTINGS,
 };
 
 fn assistant(text: &str, total_tokens: u64, stop: StopReason) -> AgentMessage {
@@ -1076,6 +1077,55 @@ fn list_session_files_preview_is_truncated() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].preview.chars().count(), 80, "预览截 80 字符");
     assert!(list[0].preview.ends_with('…') || list[0].preview.chars().count() < 200);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn list_session_files_with_tag_scopes_to_subagent_lineage() {
+    let dir = std::env::temp_dir().join(format!("latent_session_tag_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 主会话 + 两个谱系:scout 两条消息,reviewer 仅 header
+    let main = create_session_in_dir(&dir, "/tmp/proj", None, None).unwrap();
+    main.append_message(AgentMessage::user("主会话问题")).unwrap();
+    let scout = create_session_in_dir(&dir, "/tmp/proj", None, Some("scout")).unwrap();
+    scout
+        .append_message(AgentMessage::user("侦查任务一\n后续行"))
+        .unwrap();
+    let _reviewer = create_session_in_dir(&dir, "/tmp/proj", None, Some("reviewer")).unwrap();
+
+    // scout 谱系:只含 scout 文件,预览照常
+    let list = latent_session::list_session_files_with_tag(&dir, Some("/tmp/proj"), "scout");
+    assert_eq!(list.len(), 1, "{:?}", list.iter().map(|s| s.path.clone()).collect::<Vec<_>>());
+    assert!(list[0]
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .contains("__scout__"));
+    assert_eq!(list[0].preview, "侦查任务一");
+
+    // 其他 tag / 全部列表互不可见
+    assert!(
+        latent_session::list_session_files_with_tag(&dir, Some("/tmp/proj"), "reviewer").len() == 1
+    );
+    assert!(
+        latent_session::list_session_files_with_tag(&dir, Some("/tmp/proj"), "nobody").is_empty()
+    );
+    let mains = latent_session::list_session_files(&dir, Some("/tmp/proj"));
+    assert_eq!(mains.len(), 1, "主谱系列表不应出现任何 tag 子会话文件");
+    assert!(!mains[0]
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .contains("__scout__"));
+
+    // cwd 过滤对 tag 谱系同样生效
+    assert!(latent_session::list_session_files_with_tag(&dir, Some("/tmp/other"), "scout")
+        .is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
