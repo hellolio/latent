@@ -35,7 +35,6 @@ async fn build_with(provider: Arc<ScriptedProvider>) -> latent::assembly::BuiltS
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
     })
     .await
     .expect("build_session")
@@ -211,7 +210,9 @@ async fn rpc_mode_dispatches_commands_and_streams_events() {
     // duplex 流模拟真实编辑器客户端:prompt 后等 agent_settled 事件,
     // 再发依赖 run 结果的查询命令(与 pi rpc-client 的使用方式一致)
     let (mut client, server) = tokio::io::duplex(4096);
-    let server_task = tokio::spawn(modes::rpc::run_rpc_mode(built, server, writer));
+    let approval = Arc::new(modes::rpc::RpcApprovalUi::new(writer.clone()));
+    let server_task =
+        tokio::spawn(modes::rpc::run_rpc_mode(built, approval, server, writer));
 
     use tokio::io::AsyncWriteExt;
     client
@@ -346,8 +347,9 @@ async fn rpc_mode_supports_steer_during_run() {
         "\n",
     )
     .as_bytes();
+    let approval = Arc::new(modes::rpc::RpcApprovalUi::new(writer.clone()));
 
-    modes::rpc::run_rpc_mode(built, input, writer)
+    modes::rpc::run_rpc_mode(built, approval, input, writer)
         .await
         .expect("rpc run");
 
@@ -602,7 +604,6 @@ async fn build_with_tools(
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
     })
     .await
     .expect("build_session")
@@ -860,7 +861,6 @@ async fn active_tools_narrows_installed_set() {
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
     })
     .await
     {
@@ -1063,7 +1063,6 @@ async fn bash_command_executes_through_sandbox_hook_in_confirm_mode() {
         approval_ui: Some(Arc::new(latent_core::HeadlessApprovalUi {
             policy: latent_core::HeadlessApproval::AutoApprove,
         })),
-        rpc_approval: None,
     })
     .await
     .expect("build_session");
@@ -1110,7 +1109,6 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
     })
     .await
     .expect("build_session");
@@ -1150,7 +1148,6 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
     })
     .await
     .expect("resume");
@@ -1183,7 +1180,6 @@ async fn session_mode_persists_as_mode_change_entry_and_resumes() {
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
     })
     .await
     .expect("fresh");
@@ -1237,4 +1233,109 @@ async fn web_tools_active_by_default() {
     assert!(built.session.tool("web_access").is_none());
     assert!(built.session.tool("web_search").is_some());
     assert!(active.iter().any(|name| name == "subagent"));
+}
+
+// 装配链路审批回路回归(修复:此前 main.rs RPC 分支 approval_ui=None,
+// Confirm 模式下工具审批被 HeadlessApprovalUi 静默 Deny,RpcApprovalUi 只做
+// 路由从不参与决策 —— 现 approval_ui 与路由句柄指向同一实例)。
+// 用写命令(touch)触发 Confirm 人审:echo 等只读命令引擎直接放行不弹审批。
+#[tokio::test]
+async fn rpc_approval_wired_through_assembly() {
+    let m = test_model();
+    let command = format!("touch {}/latent-ap-test", std::env::temp_dir().display());
+    let first = latent_ai::assistant_message(
+        &m,
+        vec![ContentBlock::ToolCall {
+            id: "call-ap".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": command }),
+        }],
+        latent_ai::StopReason::ToolUse,
+    );
+    let provider = scripted_provider(vec![
+        ScriptedTurn::new(first),
+        ScriptedTurn::text(&m, "finished"),
+    ]);
+    let buffer = SharedAsyncVec::default();
+    let writer: modes::rpc::SharedRpcWriter = Arc::new(tokio::sync::Mutex::new(buffer.clone()));
+    let approval = Arc::new(modes::rpc::RpcApprovalUi::new(writer.clone()));
+
+    let built = modes::print_mode::build_bare_session(
+        provider,
+        test_model(),
+        Arc::new(latent_core::NoopUi),
+        Vec::new(),
+        latent::assembly::SessionStore::Memory,
+        Default::default(),
+        Some(approval.clone() as Arc<dyn latent_core::ApprovalUi>),
+        Some(latent_core::SessionMode::Confirm),
+    )
+    .await
+    .expect("build_bare_session");
+
+    let session = built.session.clone();
+    // 事件收集器(断言工具真实执行)
+    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let collector: latent_core::SessionSharedSubscriber = {
+        let events = events.clone();
+        Arc::new({
+            struct C(Arc<Mutex<Vec<String>>>);
+            #[async_trait::async_trait]
+            impl latent_core::SessionSubscriber for C {
+                async fn on_session_event(&self, event: &latent_core::AgentSessionEvent) {
+                    self.0.lock().unwrap().push(format!("{event:?}"));
+                }
+            }
+            C(events)
+        })
+    };
+    session.subscribe(collector);
+    let (outcome_tx, mut outcome_rx) = tokio::sync::oneshot::channel::<String>();
+    let run = tokio::spawn(async move {
+        let outcome = session.prompt("run it").await;
+        let _ = outcome_tx.send(format!("{outcome:?}"));
+        outcome
+    });
+
+    // 等 approval_request 经反向通道上行(5s 超时,prompt 结果一并诊断)
+    let wait = async {
+        loop {
+            let output = buffer.text();
+            if let Some(line) = output.lines().find(|l| l.contains("approval_request")) {
+                break serde_json::from_str::<serde_json::Value>(line).unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    };
+    let request = match tokio::time::timeout(std::time::Duration::from_secs(5), wait).await {
+        Ok(request) => request,
+        Err(_) => {
+            let outcome = outcome_rx.try_recv().unwrap_or_else(|_| "(pending)".into());
+            panic!(
+                "approval_request 未到达;buffer={:?} outcome={outcome} events={:?}",
+                buffer.text(),
+                events.lock().unwrap().join(" | ")
+            );
+        }
+    };
+    assert_eq!(request["request"]["toolName"], "bash");
+    let request_id = request["id"].as_u64().unwrap();
+
+    // 客户端应答 allow → 工具真实执行,run 正常收尾
+    assert!(approval.resolve(request_id, latent_core::ApprovalDecision::Approve).await);
+    let outcome = run.await.unwrap().expect("prompt ok");
+    let stop = format!("{outcome:?}");
+    assert!(
+        stop.contains("EndTurn"),
+        "run 应正常收尾: {stop}"
+    );
+    let all_events = events.lock().unwrap().join(" | ");
+    assert!(
+        all_events.contains("ToolExecutionEnd") && !all_events.contains("is_error: true"),
+        "bash 应真实执行(经批准): {all_events}"
+    );
+    assert!(
+        all_events.contains("ApprovalResolved"),
+        "审批决策应广播: {all_events}"
+    );
 }

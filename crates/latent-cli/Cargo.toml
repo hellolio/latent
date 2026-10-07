@@ -17,6 +17,7 @@ latent-agent.workspace = true
 latent-core.workspace = true
 latent-session.workspace = true
 latent-tools.workspace = true
+latent-runtime.workspace = true
 latent-web.workspace = true
 latent-tui.workspace = true
 latent-sandbox.workspace = true

@@ -44,7 +44,7 @@ async fn built_session_with_store(
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
+
     })
     .await
     .unwrap()
@@ -757,7 +757,7 @@ async fn replay_renders_thinking_blocks() {
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
+
     })
     .await
     .unwrap();
@@ -812,7 +812,7 @@ async fn replay_renders_user_assistant_toolcall_and_error() {
         approval: Default::default(),
         subagent_async_approval: Default::default(),
         approval_ui: None,
-        rpc_approval: None,
+
     })
     .await
     .unwrap();

@@ -1,0 +1,24 @@
+[package]
+name = "latent-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Assembly layer for the latent business core: build_session, settings resolution, slash parsing and shared event JSON mapping"
+
+[dependencies]
+latent-ai.workspace = true
+latent-agent.workspace = true
+latent-core.workspace = true
+latent-session.workspace = true
+latent-tools.workspace = true
+latent-web.workspace = true
+latent-sandbox.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio-util.workspace = true

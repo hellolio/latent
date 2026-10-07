@@ -1,8 +1,10 @@
 # latent-gateway 开发计划（OpenClaw 架构级复刻）
 
-> 状态：**待开发**。本文档是自包含的开发指南：目标读者是将独立实施本计划的 agent / 工程师，无需本计划的产生过程上下文。
+> 状态：**已实施（阶段 1-5 主体完成，2026-10-07）**。本文档是自包含的开发指南：目标读者是将独立实施本计划的 agent / 工程师，无需本计划的产生过程上下文。
+> 实施记录：`crates/latent-runtime`（阶段 1，含 RPC 审批装配链路修复与回归测试）、`crates/latent-channel`（阶段 2a 宿主层 + 阶段 3 三渠道与假平台服务器单测）、`crates/latent-gateway`（阶段 2b/4 引擎 + 控制面 + bin 子命令，e2e/control 集成测试全离线）。未做/后续：流式 block-streaming 参数面（§4.8 阶段 5 项）、session reset daily/idle 策略执行、daemon 安装脚本（launchd/systemd）、identityLinks、bindings 多 agent 路由、会话 LRU 回收、审批双渠道 owner 传输。
 > 写作日期：2026-10-07。上游基线：**OpenClaw main @ `6693bb96`（package version `2026.9.8`，核实于 2026-10-06）**。
 > 修订（评审后）：自消息防环（§2.3/§2.6/坑 3）；凭据解析器下沉 latent-channel（§2.1/§4.2、偏离 10）；群策略单一定义点（§4.2）；群会话命令 owner-only（§4.7/§5.1、偏离 11）；审批全局单例 + 投递失败即 Deny（§4.9/§5.2）；控制面 operator 身份、pairing 方法、资源上限（§4.10/§4.12/§5.3/§5.4）；事件泵背压（§4.5）；隔离断言改 grep 计数（§1）；行号改为符号锚点（§3）。
+> 修订（实施后）：按本次实施实录补充 **§10 实施坑清单**——每条均为本次真实踩到并已修复/绕过的问题，后续维护与二期实现前必读。
 
 ---
 
@@ -777,3 +779,59 @@ OpenClaw 仓库 <https://github.com/openclaw/openclaw>（MIT）。路径基于 m
 - 事件：`AgentSessionEvent::{Agent(AgentEvent), AgentSettled, QueueUpdate, AutoRetryStart/End, ApprovalRequested, ApprovalResolved}`；最终回复 = Text delta 累计 + assistant `MessageEnd` 定稿。
 - slash 解析参考：`latent-runtime::slash::parse`（迁移后）。
 - 凭据三来源解析器：`latent-channel::credential`（L1 自包含副本，§8 偏离 10；渠道配置与 `gateway.auth.token` 统一走它）。latent-web `credential.rs` 只作语义参照——可共享测试向量，不可共享依赖。
+
+---
+
+## §10 实施坑清单（2026-10-07 实施实录，维护/二期前必读）
+
+以下每条都是本次实施中**真实踩到并已修复**的问题，按"现象 → 根因 → 规约"记录。分五类：serde/Rust API、tokio 异步、axum/WS、测试写法、配置语义与工程流程。
+
+### A. serde / Rust API
+
+- **A1 枚举字段 camelCase 要 `rename_all_fields`**：`#[serde(rename_all = "camelCase")]` 标在 enum 上只改**变体名**（`Connected` → `connected`），不改 struct variant 里的字段（`account_id` 仍序列化为 `accountId` 失败）。要用 `#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]`。同时注意 enum 序列化是 externally tagged：`{"connected":{"accountId":…}}`，断言路径要写 `json["connected"]["accountId"]`。
+- **A2 `&'static str` 字段不能 derive `Deserialize`**：`serde_json::from_value` 产不出 `'static` 生命周期（borrow 活不过解析缓冲）。`InboundMessage.platform` 等"渠道 id 静态串"字段**只 derive `Serialize`**，消息一律在渠道归一化层 Rust 侧构造，不走反序列化。
+- **A3 带语义默认值的 `Default` 不能改成 `#[derive(Default)]`（本次最险）**：为消 clippy `derivable_impls` 把 5 个手写 Default 换成 derive，把 `GatewaySection.port=18789`、`bind="127.0.0.1"`、`SessionConfig.dmScope="per-channel-peer"` 等语义默认抹成了空值——空配置冒烟直接 78 退出才暴露。规约：**derive 只会取字段类型的 Default**；结构体上的 `#[serde(default)]` 只管"缺失字段回退到 `Default::default()`"，不定义默认值本身。凡手写 Default 里的值 ≠ 类型零值，clippy 警告用 `#[allow]` 压掉也不许改 derive。
+- **A4 struct 级 `rename_all` 没有全局开关**：enum 加了 `rename_all_fields` 不代表 struct 也生效——`ChatRef`/`Sender`/`InboundMessage`/`OutboundMessage` 每个都要单独 `#[serde(rename_all = "camelCase")]`，漏一个测试里 `json["chatType"]` 就是 Null（仓库 camelCase 约定靠逐类型声明）。另外错误面要同时给 `retry_after()`/`is_retryable()` 分类方法：出站重试判定别写散（reply_dispatcher 与渠道各自分类会漂移）。
+
+### B. tokio / 异步
+
+- **B1 mpsc 出站通道必须有消费者任务（最隐蔽的真 bug）**：wecom `establish()` 注册了 `outbound_tx` 却没人把 `outbound_rx` 转发到 WS sender——所有出站帧"发送返回 Ok"实际堵在 mpsc 里上不了线，靠 `sample` 抓挂死进程才定位。规约：**新建出站通道时同步写掉消费循环**；验收要有一条"帧到达对端"的端到端断言（tests/wecom.rs 的 delivered 循环）。
+- **B2 lazy future 不 spawn 就不执行**：`let task = handle.send(...)` 只是建了 Future；不等它、不 spawn 它，里面的 action 永远发不出去。本次在 qq/wecom 测试里各踩一次。规约：需要并发推进的异步调用一律 `tokio::spawn`；`tokio::join!` 两侧必须互相推进（见 D2）。
+- **B3 `#[tokio::test]` 默认 current_thread runtime**：spawn 的任务只在主任务 yield 时被轮询；测试里等待别用无 sleep 的忙等（占死线程），用 `tokio::time::sleep(…).await` 轮询即可让 spawn 任务有机会跑。
+- **B4 多连接替换场景的连接清理要用 `mpsc::Sender::same_channel`**：新 NapCat 连接顶掉旧连接时，旧连接退出回调不能无条件清注册表——先 `same_channel` 确认自己还是当前连接，否则会把新连接清掉。
+- **B5 `RefCell` 进 `tokio::spawn` = future 不 Send**：消费者任务里共享可变状态用 `std::sync::RwLock`/`Arc<…>`，别用 `RefCell`；std MutexGuard 同理不能跨 await（axum handler 里尤其常见，见 C4）。
+
+### C. axum / WS / HTTP
+
+- **C1 `axum::extract::ws` 需要 feature `"ws"`**（默认关）——`config.rs` 的 axum pin 写成 `{ version = "=0.8.9", features = ["ws"] }`。缺了是编译期报 `could not find ws in extract`。
+- **C2 axum 0.8 路径参数是 `{param}`**（0.7 是 `:param`）；部分段捕获 `/bot{token}/getMe` 可用。
+- **C3 `ConnectInfo<SocketAddr>` extractor 要求 `into_make_service_with_connect_info::<SocketAddr>()`**——只写 `axum::serve(listener, app)` 编译照过、**运行时 panic**。反向 WS 与控制面都要带。
+- **C4 handler 用 `|State(s), Json(b)| async move` 闭包时报 `Handler` 未满足**：多半是 async 块里 std MutexGuard 临时存活导致 future 不 Send。用命名 `async fn` + 提取器参数规避。
+- **C5 404 排查一步到位**：假服务器加 `.fallback(|uri| async move { eprintln!("404 未匹配: {uri}"); … })`——本次 telegram `api_url` 少了 method 前的斜杠（`/bottest-tokengetMe`）靠它秒定位，比猜路由/extractor 快得多。
+- **C6 官方文档抓取要留重试余量**：`developer.work.weixin.qq.com` 首次 WebFetch 超时、重试成功——wecom 协议帧（subscribe/callback/respond）务必核对到字段级再写，别按想象编。
+
+### D. 测试写法（挂死与死锁）
+
+- **D1 测试等待循环必须有界 + 超时诊断**：本次一个集成测试的无界 poll loop 把 `cargo test --workspace` 挂了 38 分钟。规约：所有"等待事件到达"的 loop 带 deadline，超时 panic 时**把现场一并打出来**（已收到的输出、目标 Future 的状态）。
+- **D2 `tokio::join!` 前的阻塞读取会自锁**：wecom 拒绝测试先在 join 外读订阅帧，而订阅帧要等 join 里的 start 被轮询才发出 → 永久互相等待。规约：需要交互的异步流程**先 spawn 再逐步驱动**。
+- **D3 假服务器 accept 不能早于客户端连接**：wecom 测试在渠道 `start()` 之前 `accept_async(stream).await`——accept 在等客户端握手，客户端在等 accept 返回 → 死锁。规约：**监听先起、accept/handshake 放在渠道 start() 之后**（或丢进 spawn 任务）。
+- **D4 测试间临时文件路径带唯一后缀**：`StateStore::in_memory()` 用固定路径时并发测试互相 rename/删除对方文件（ENOENT）。temp 路径拼 `process::id() + 纳秒时间戳`。
+- **D5 macOS `sample` 是挂死测试的最快定位手段**：对 hung 的测试二进制 `sample <pid> 2 -file …`，符号里直接带测试名与源码行号，一次定位；比加 print 重编译快一个量级。
+- **D6 长跑 cargo 的输出管道会吞提示**：`cargo test … | grep 过滤 | tail` 会把 `Blocking waiting for file lock`（见 F2）和进度全部缓冲，看起来像挂死。调试期直接重定向到文件再看。
+
+### E. 配置语义
+
+- **E1 命令拦截的分支结构**：`if let Some(cmd) = parse(text) { … }` 里塞"parse 返回 None 的警告分支"**永远不可达**——None 直接跳过整个块，`/nope` 会当普通消息发给模型。必须显式写 `match parse(text) { Some(cmd) => …, None if text.starts_with('/') => 警告, None => 进管线 }`。
+- **E2 只读命令在 Confirm 模式直接 Allow**（权限引擎三态判定：`echo` 等只读前缀不弹审批）——审批链路测试要用 `touch` 等"明确写"命令，否则根本不触发 `request_approval`，测试会得出"审批没接上"的错误结论。
+- **E3 队列模式要传到每个会话**：`messages.queue.mode` 只进了 Gateway 全局设置不够——`ChatSession` 的 `PendingQueue` 是工厂逐会话建的，工厂必须携带 `queue_settings`，否则 collect/followup 全按默认 steer 跑（测试会暴露成"缓冲数恒为 0"）。
+- **E4 防抖 flush 依赖常驻循环**：`enqueue` 只入缓冲 + notify，真正冲刷靠 `run_debounce_loop`——daemon 里要 spawn，测试 harness 里同样要 spawn（否则窗口期消息全部滞留，症状是"会话永远没被创建"）。
+- **E5 注册与登记单一事实来源**：`ChannelManager::attach` 若只启动不写 entries（登记留在 `start_enabled`），测试直接 attach 的渠道 `handle()` 恒为 None，报"渠道未连接,消息丢弃"。
+- **E6 回复目标双锁**：`ReplyDispatcher` 的 target 若 struct 持一把 `RwLock`、消费者任务 clone 又建一把，`set_target` 写前者和消费者读后者永不相遇——共享同一个 `Arc<RwLock<Option<ReplyTarget>>>`。
+- **E7 凭据物化必须同步写回 raw 配置（用户实测踩中）**：gateway 启动时把 `$ENV` 凭据解析进**类型化**配置，但 `start_enabled` 会再用 gateway.json 的 **raw Value** 覆盖插件配置（为保留未类型化键）——raw 里还是字面量 `"$TELEGRAM_BOT_TOKEN"`，覆盖后插件拿到的就是字面量，请求 URL 变成 `/bot$TELEGRAM_BOT_TOKEN/getMe` → Telegram 404 Not Found，而用户 curl 环境变量却是好的（首日排障一度误判为 token 错误）。规约：**凭据解析结果要同时写回类型化配置与 raw Value**（`config.rs::materialize_channel_credentials`）；凡"先解析、后 overlay"的配置流，overlay 之后必须复查解析值仍生效。
+
+### F. 工程流程
+
+- **F1 feature unification 注意两次**：`cargo build/test --workspace` 启用全部渠道 feature（qq/wecom/telegram/mock 全编译）——按渠道出二进制用 `cargo build -p latent-gateway --no-default-features --features qq`；反之 tokio 缺 feature（`net` 给 axum listener、`signal` 给 ctrl_c）要到编译/运行才炸，新用 IO/信号 API 时先看 workspace tokio features。
+- **F2 rust-analyzer 会间歇持有 target 目录锁**：长跑 `cargo test` 卡在 `Blocking waiting for file lock` 十几分钟不是挂死；等它、或临时把 IDE 检查关掉。别把锁等待提示从输出里滤掉（见 D6）。
+- **F3 改完测试确认二进制真的重建了**：锁等待期间跑的 `cargo test` 可能执行的是旧测试二进制（现象：修好的测试"仍然挂"）。touch 源文件再跑，或看 `target/debug/deps/<test>` 的 mtime。
+- **D 类问题的通用预防**：集成测试超时用 `--test-threads` 隔离 + 有界等待（D1）先行，挂死再用 sample（D5）——顺序别反。

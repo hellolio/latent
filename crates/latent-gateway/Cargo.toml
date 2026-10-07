@@ -1,0 +1,43 @@
+[package]
+name = "latent-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chat gateway daemon for latent: owns channel connections and agent sessions, auto-reply pipeline, chat approvals, pairing and a WebSocket control plane"
+
+[[bin]]
+name = "latent-gateway"
+path = "src/main.rs"
+
+[features]
+default = ["qq", "wecom", "telegram"]
+qq = ["latent-channel/qq"]
+wecom = ["latent-channel/wecom"]
+telegram = ["latent-channel/telegram"]
+# 测试/开发用内存渠道(集成测试经 dev-dependencies 启用后注入)
+mock = ["latent-channel/mock"]
+
+[dependencies]
+latent-ai.workspace = true
+latent-agent.workspace = true
+latent-channel.workspace = true
+latent-core.workspace = true
+latent-session.workspace = true
+latent-runtime.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+axum.workspace = true
+# envelope 的本地时间戳(HH:mm)
+chrono.workspace = true
+# 控制面薄客户端(pairing/status 子命令与集成测试)
+tokio-tungstenite.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+# 集成测试用 mock 渠道 + ScriptedProvider,全离线
+latent-channel = { workspace = true, features = ["mock"] }

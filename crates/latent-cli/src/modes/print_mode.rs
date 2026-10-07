@@ -44,7 +44,6 @@ pub async fn build_bare_session(
     session_store: SessionStore,
     settings: SessionSettings,
     approval_ui: Option<Arc<dyn latent_core::ApprovalUi>>,
-    rpc_approval: Option<Arc<crate::modes::rpc::RpcApprovalUi>>,
     session_mode_override: Option<latent_core::SessionMode>,
 ) -> Result<crate::assembly::BuiltSession, String> {
     build_session(BuildOptions {
@@ -66,7 +65,6 @@ pub async fn build_bare_session(
         approval: settings.approval,
         subagent_async_approval: settings.subagent_async_approval,
         approval_ui,
-        rpc_approval,
     })
     .await
 }

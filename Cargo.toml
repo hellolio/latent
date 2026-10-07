@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# 裸 cargo build/test 只编 CLI(bin 名 latent,用户向入口);--workspace 仍全量。
+# 注意:cargo test/test/clippy 提交门槛一律带 --workspace。
+default-members = ["crates/latent-cli"]
 members = [
     "crates/latent-ai",
     "crates/latent-agent",
@@ -10,6 +13,9 @@ members = [
     "crates/latent-tui",
     "crates/latent-sandbox",
     "crates/latent-cli",
+    "crates/latent-runtime",
+    "crates/latent-channel",
+    "crates/latent-gateway",
 ]
 
 [workspace.package]
@@ -29,13 +35,16 @@ latent-web = { path = "crates/latent-web", version = "0.1.0" }
 latent-core = { path = "crates/latent-core", version = "0.1.0" }
 latent-tui = { path = "crates/latent-tui", version = "0.1.0" }
 latent-sandbox = { path = "crates/latent-sandbox", version = "0.1.0" }
+latent-runtime = { path = "crates/latent-runtime", version = "0.1.0" }
+latent-channel = { path = "crates/latent-channel", version = "0.1.0" }
+latent-gateway = { path = "crates/latent-gateway", version = "0.1.0" }
 
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "process"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "process", "net", "signal"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v7", "serde"] }
 
@@ -57,6 +66,12 @@ chrono = "=0.4.42"
 # latent-tui(macOS)本地修饰键状态查询:Shift+Enter 兜底用,只读
 # CoreGraphics 事件源,无需辅助功能权限;键盘状态属供应链敏感面,钉死精确版本
 readkey = "=0.2.2"
+
+# 聊天网关(latent-channel/latent-gateway):axum 做 QQ 反向 WS 端点与控制面
+# HTTP/WS 服务端(取 crates.io 最新稳定 0.8.x 精确 pin);tokio-tungstenite
+# 做企微智能机器人 WS 长连接客户端
+tokio-tungstenite = "=0.30.0"
+axum = { version = "=0.8.9", features = ["ws"] }
 
 # latent-core 扩展机制(M5,07 §8):进程外 MCP 扩展,rmcp 钉死精确版本
 # (07 §8.7 风险条款:新 spec 支持为 beta → pin 精确版本 + in-memory 测试锁行为)

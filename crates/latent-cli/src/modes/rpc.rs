@@ -269,16 +269,17 @@ impl ApprovalUi for RpcApprovalUi {
 }
 
 /// rpc 模式入口:订阅事件流 → 读 stdin 命令循环。返回时进程退出码语义
-/// 交由 main 处理。
+/// 交由 main 处理。`approval` 是装配期注入的审批反向通道(与 approval_ui
+/// 同一实例;run_rpc_mode 负责把客户端的 approval_response 路由回它)。
 pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
     built: BuiltSession,
+    approval: Arc<RpcApprovalUi>,
     reader: R,
     writer: SharedRpcWriter,
 ) -> Result<(), String> {
     let BuiltSession {
         session,
         session_manager,
-        rpc_approval,
         ..
     } = built;
 
@@ -316,7 +317,7 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
             &session,
             session_manager.as_deref(),
             &ui,
-            rpc_approval.as_ref(),
+            Some(&approval),
             &writer,
             command_id,
             command,
@@ -329,9 +330,7 @@ pub async fn run_rpc_mode<R: tokio::io::AsyncRead + Unpin>(
     // stdin 关闭:先释放全部未决的 extension_ui / approval 请求(编辑器可能已
     // 断连,不释放则扩展 UI/审批调用永不返回,wait_idle 挂死),再等在途 run 结算
     ui.close_all().await;
-    if let Some(approval) = rpc_approval {
-        approval.close_all().await;
-    }
+    approval.close_all().await;
     for task in in_flight {
         let _ = task.await;
     }

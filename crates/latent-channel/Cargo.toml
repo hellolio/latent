@@ -1,0 +1,36 @@
+[package]
+name = "latent-channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure chat-channel domain for the latent gateway: unified message model, channel plugin trait, debounce/chunk/mention/typing mechanics and per-channel adapters behind features"
+
+[features]
+default = []
+mock = []
+# 渠道适配器按 feature 门控:出对应平台的二进制时用
+# `cargo build -p latent-gateway --no-default-features --features qq` 按需裁剪
+telegram = ["dep:reqwest"]
+qq = ["dep:axum", "dep:tokio-tungstenite"]
+wecom = ["dep:tokio-tungstenite"]
+
+[dependencies]
+# 硬规则:零 latent-* 依赖(L1 纯聊天域,依赖方向见 AGENTS.md/GATEWAY_PLAN §1)
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+regex.workspace = true
+reqwest = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+
+[dev-dependencies]
+# 假平台服务器单测:axum 起假 Bot API,tokio-tungstenite 起假 NapCat/企微服务端
+axum = { workspace = true, features = ["ws"] }
+tokio-tungstenite.workspace = true
+futures.workspace = true

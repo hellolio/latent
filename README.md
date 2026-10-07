@@ -17,6 +17,7 @@ latent 以流式方式驱动大语言模型，并行执行工具调用，支持�
 - **子代理与技能**：`.latent/agents/*.md` 定义子代理（独立系统提示词并行干活），`.latent/skills/*/SKILL.md` 定义可按需加载的技能。
 - **网页搜索与抓取**：内置 `web_search` / `fetch_content` 等四个联网工具，支持 Brave / Exa / Tavily / SearXNG / DuckDuckGo 多引擎路由，配置任一 key 即可用，没 key 也有免费引擎兜底。
 - **四种运行模式**：interactive（TUI）/ print（单次执行）/ json（事件流）/ rpc（编辑器集成），共享同一业务核。
+- **聊天网关（latent-gateway）**：常驻 daemon 把机器人接入 QQ（NapCat/OneBot 11 反向 WS）、企业微信智能机器人（WS 长连接）、Telegram（Bot API 长轮询）；每群/每人独立会话、四模式消息队列、@ 门与群白名单、DM 配对码、聊天命令（/new /mode /approve…）、工具审批转发 owner 私聊、WebSocket 控制面（`ws://127.0.0.1:18789/ws`），架构对齐 [OpenClaw](https://github.com/openclaw/openclaw)。
 
 ---
 
@@ -209,10 +210,10 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
 ### todo list
  - [x] .latentignore文件独立（gitignore 语法，全局数据目录 `.latentignore` + 项目 `.latentignore`，项目优先可反选）
  - [x] 子agent调用和显示优化
- - [ ] harness适配微信qq，如何保证长时间工作不中断，定时任务
+ - [x] mac沙箱好像不生效
+ - [x] harness适配微信qq，如何保证长时间工作不中断，定时任务（latent-gateway 聊天网关：QQ/企微/Telegram 渠道 + 常驻 daemon + 控制面，见 `GATEWAY_PLAN.md`）
  - [ ] jev决策小模型引入
  - [ ] 文件检索如何过滤噪音（启用小模型摘要？或者引入第三方库实现？阿里rg？）
- - [x] mac沙箱好像不生效
  - [ ] 无效模型清理
  - [ ] 实现一个扩展用于测试扩展功能（文件搜索加强？）
  - [ ] 实现可配置追加系统提示词（当前仅可替换）

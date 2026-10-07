@@ -10,6 +10,9 @@ cargo run -p latent -- --mock "你好"      # 无需 API key，mock provider 走
 cargo test --workspace                    # Rust 全部测试（硬门槛：全绿）
 cargo clippy --workspace --all-targets    # 硬门槛：零警告
 cargo build --bin latent && cd tests/e2e && pytest -v   # E2E 测试（见下文测试方针）
+cargo build -p latent-gateway             # 构建聊天网关 daemon（bin: latent-gateway；渠道 feature 转发）
+cargo test -p latent-gateway --test e2e --test control   # 网关引擎/控制面集成测试
+cargo test -p latent-channel --features qq,wecom,telegram # 渠道集成测试（假平台服务器，全离线）
 ```
 
 API key 从环境变量读取（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`ZAI_API_KEY` 等）；`--provider <id> [--model <id>]` 指定模型，`provider/model` spec 经 `latent-core/src/model.rs` 的 `ModelResolver` 解析。
@@ -21,18 +24,29 @@ API key 从环境变量读取（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`ZAI_AP
 ```
 L4  latent-cli ──── latent-tui ┐
 L3  latent-core ────────────┤  依赖下方全部
-L2  latent-agent ─ latent-session ─ latent-tools ─ latent-web ─ latent-sandbox ┘
-L1  latent-ai ──────────────────────────────────────┘  零内部依赖
+L2  latent-agent ─ latent-session ─ latent-tools ─ latent-web ─ latent-sandbox ─ latent-runtime ┘
+L1  latent-ai ─────────────────────────────────────────────────────────────────┘  零内部依赖
+
+聊天栈（GATEWAY_PLAN §1，与上面同仓并存）:
+L3  latent-gateway   # 引擎 + bin：仅依赖 latent-runtime + latent-channel
+L1  latent-channel   # 纯聊天域：零内部依赖（不 import 任何 latent-* crate）
 ```
 
-latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除任意一个，其余 crate 仍须零警告编译；可选能力一律经 trait 在装配期注入（装配点在 `crates/latent-cli/src/assembly.rs`）。
+latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除任意一个，其余 crate 仍须零警告编译；可选能力一律经 trait 在装配期注入（装配点在 `crates/latent-runtime/src/assembly.rs`，latent-cli 侧 re-export 保持 `latent::assembly::…` 路径兼容）。latent-cli **永不依赖** latent-channel / latent-gateway；渠道 crate 之间互不可见；渠道适配器在 latent-channel 内部按 feature 门控（`mock`/`telegram`/`qq`/`wecom`）。编译隔离验收：
+
+```bash
+test -z "$(cargo tree -p latent-channel | grep -E 'latent-(core|ai|agent|session|tools|web|sandbox|tui|runtime|gateway)')"  # channel 不认识任何业务 crate
+test -z "$(cargo tree -p latent          | grep -E 'latent-(channel|gateway)')"                                            # CLI 不含聊天栈
+test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                                                             # gateway 不含 TUI
+```
 
 ### 根目录
 
 | 路径 | 说明 |
 |---|---|
-| `Cargo.toml` | workspace 定义（9 个 crate）+ `[workspace.dependencies]`（外部依赖统一 pin 在此）+ `unsafe_code = "forbid"` lint |
+| `Cargo.toml` | workspace 定义（12 个 crate；`default-members = ["crates/latent-cli"]`，裸 `cargo build` 只编 CLI）+ `[workspace.dependencies]`（外部依赖统一 pin 在此）+ `unsafe_code = "forbid"` lint |
 | `README.md` | 用户向总览（特性、四模式、provider 表、工具表） |
+| `GATEWAY_PLAN.md` | latent-gateway 开发计划（OpenClaw 架构级复刻，自包含实施指南 + 偏离记录 §8） |
 | `crates/` | 全部源码，逐 crate 索引见下 |
 | `tests/e2e/` | Python E2E 测试（真 PTY + 本地 mock LLM），逐文件索引见"测试方针" |
 | `.latent/` | 项目级配置目录（settings.json / models.json / skills / agents / system-prompt.md） |
@@ -169,14 +183,62 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 
 | 文件 | 说明 |
 |---|---|
-| `src/main.rs` | CLI 入口：flag 解析（--mode/--mock/--provider/--model/--theme/--continue|-c|-r [序号]/-l|--list/--session-mode/--plan/--yolo/--sandbox-*/--mcp-mock-server）、模式自动判定（两端 TTY → interactive 否则 print）、装配分支 |
-| `src/assembly.rs` | **共享装配点** `build_session`：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子（仅 Plan 包装）+ LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.latent/settings.json` 优先） |
-| `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；两者退出前经 `wait_background_subagents`（assembly）等后台 subagent 全部结算并投递，结果不随进程丢失；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response 等命令，长命令异步执行保持 stdin 可响应） |
-| `src/modes/slash.rs` | 斜杠命令表：help/model/thinking/theme/compact/new/mode/subagent（无参打开 agent+off 选择器）/session（list/info;子会话内按自身 tag 谱系列举与恢复,与主会话互不可见）/fullscreen（[on\|off] 切换全屏渲染模式）/quit；带变体命令裸调用只提示用法，部分输入回车展开变体选择页、方向键选定后回车执行；未识别 `/xxx` 本地警告不发给模型 |
+| `src/main.rs` | CLI 入口：flag 解析（--mode/--mock/--provider/--model/--theme/--continue|-c|-r [序号]/-l|--list/--session-mode/--plan/--yolo/--sandbox-*/--mcp-mock-server）、模式自动判定（两端 TTY → interactive 否则 print）、装配分支；入口助手与 landlock helper 分发来自 `latent_runtime::bootstrap` |
+| `src/assembly.rs` | re-export `latent_runtime::assembly::*`（装配点已下沉 L2 装配层，路径兼容层） |
+| `src/modes/print_mode.rs` / `json.rs` / `rpc.rs` | 三种非交互模式：print 流式打 stdout；json 事件 JSONL（剥离流式 partial）；两者退出前经 `wait_background_subagents`（assembly）等后台 subagent 全部结算并投递，结果不随进程丢失；rpc stdio JSONL 协议（prompt/steer/abort/getState/setModel/extension_ui_response/approval_response 等命令，长命令异步执行保持 stdin 可响应；approval_ui 与路由句柄同实例注入装配） |
+| `src/modes/slash.rs` | re-export `latent_runtime::slash`（解析层下沉）+ `popup_entries()`（依赖 latent_tui::CommandEntry，interactive 专用） |
 | `src/modes/interactive/` | TUI 装配与事件循环（`mod.rs`，含 tuiMode/copyOnSelect/ctrlXCopy 读取与快捷键配置注入键盘线程（RwLock 共享,/setting 切换即时生效）、滚动请求与模式切换的消费、有选区时 Ctrl+X 复制拦截、toast 到期驱动重绘、/model 配置入口的挂起跑 $EDITOR + 热重载）、UI 状态机（`state.rs`，含添加模型表单、ScrollRequest/tui_mode_switch 挂起标记、`StreamWrapCache` 流式文本增量折行缓存（append-only 时仅重折最后一个未完成源行，流式预览全量行的数据源）、`sync_mention_popup` @ 文件弹窗同步（cwd 采集候选 + 检索忽略剪枝 + 注入补全根（选中补全全路径）+ `/`/`!` 让位）、`subagent_run_cards` 异步卡片 (runId, transcript 下标) 绑定）、事件处理与按键（`handlers.rs`：双击 Ctrl+C 500ms 退出、Shift+Tab 切模式、审批数字键 1 批准/2 本会话批准/3 拒绝/4 中止、`!`/`!!` bash 透传、`@` 文件弹窗 ↑/↓/Tab/Enter/Esc 补全经编辑器 token 替换落文本、全屏模式 PageUp/PageDown/Home/End/滚轮 → 滚动请求、/setting 选择器与应用（apply_setting_selection 切换并经 write_setting_field 写回全局数据目录 settings.json）、/model 选择器+添加模型表单）、异步 subagent 卡片 runId 绑定与结算翻色（`flush_settled_subagent_cards`：pending → 绿/红，全文重绘至多一次）、打字门控回写（`sync_wake_gate`：编辑器非空 → supervisor 唤醒延迟）、UI 事件通道（`events.rs`）、启动回放（`replay.rs`）、用量追踪（`usage.rs`）、视图渲染（`view.rs`，选择器/审批/扩展 confirm 等模态选择列表与「添加模型」表单信息区为圆角外框面板（`popup::frame`），选择器 prompt 按 `\n` 拆行、超宽折行）、bash 净化（`bash.rs`，latent 唯一内容净化路径，8000 字符截断）、装配级单测（`tests.rs`） |
 | `src/mcp_mock.rs` | mock MCP 扩展服务端（`latent --mcp-mock-server`）：订阅 tool_call 拦截危险 bash + 注册 echo 工具 + elicitation 确认，供扩展全链路验收 |
-| `tests/modes.rs` | 四模式集成测试（ScriptedProvider 不联网）：json 剥 partial、rpc 反向通道、LATENT_* 注入、Plan 只读 bash、JSONL 重建 == 内存 context、ModeChange 持久化等 |
+| `tests/modes.rs` | 四模式集成测试（ScriptedProvider 不联网）：json 剥 partial、rpc 反向通道、LATENT_* 注入、Plan 只读 bash、JSONL 重建 == 内存 context、ModeChange 持久化、**rpc 审批装配链路回归**（approval_ui 与路由句柄同实例） |
 | `tests/e2e_mcp_extension.rs` | 真实子进程 MCP 扩展端到端验收 |
+
+### crates/latent-runtime — L2 装配层（业务核共享装配点）
+
+| 文件 | 说明 |
+|---|---|
+| `src/assembly.rs` | **共享装配点** `build_session`（自 latent-cli 迁出，四种运行模式与聊天网关共用）：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子（仅 Plan 包装）+ LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；settings 解析（项目 `.latent/settings.json` 优先）；`switch_new_session`/`switch_resume_session` |
+| `src/bootstrap.rs` | 入口层共享助手：`resolve_provider_and_model`（mock + models.json 体系）、`resolve_session_store`（-c/-r）、`print_session_list`、`notify_legacy_data_dir`、`maybe_dispatch_landlock_helper`（**两个 bin 的 main 开头都必须调用**，否则 Linux 沙箱静默失效） |
+| `src/events.rs` | json/rpc/聊天网关共用的事件 → JSON 映射（剥离流式 partial） |
+| `src/slash.rs` | 斜杠命令解析层（`COMMANDS`/`SlashAction`/`parse`/`help_markdown`；TUI 的 `popup_entries()` 留在 latent-cli） |
+
+### crates/latent-channel — L1 纯聊天域（零内部依赖，feature 门控渠道）
+
+| 文件 | 说明 |
+|---|---|
+| `src/types.rs` | 统一消息模型：`ChatRef`/`Sender`/`Segment`（Text/At/Image/File/Reply）/`InboundMessage`（`to_me`/`reply_to_me` 由渠道归一化算好）/`OutboundMessage`/`ChannelEvent`/`ChannelStatus`；**防环是渠道责任**（归一化层丢弃自消息，不加字段） |
+| `src/plugin.rs` | `trait ChannelPlugin`（id/start/apply_config）+ `ChannelSender`（mpsc 命令通道，出站串行化）+ `ChannelHandle`（send/typing/status）+ `spawn_guarded` panic 边界（任务 panic → `Status::Failed`，绝不击穿 daemon） |
+| `src/debounce.rs` | 入站防抖合并：按 (platform, conversation, user) 缓冲；窗口首条固定不顺延（`MAX_DEBOUNCE_WINDOW_MULTIPLIER = 5` 上界）；键上限 2048；命令/At 消息立即冲刷；flush 产物 message_id = `debounce:{首条}`（合成新键防撞去重表） |
+| `src/chunk.rs` | 出站长文分段：`DEFAULT_CHUNK_LIMIT = 4000`；length 模式（括号外换行 → 空白 → 硬切）/ newline 模式（空行段落）；markdown 版闭合 code fence 续块重开 |
+| `src/mention_gating.rs` | @机器人判定（纯函数）：私聊恒 to_me；群聊 At == bot id ∨ reply_to_me ∨ mentionPatterns（大小写不敏感）；patterns 优先级 agent > groupChat > identity.name 派生 |
+| `src/typing.rs` | typing 指示器生命周期：keepalive 3000ms / TTL 60000ms / 连续失败 2 次停；typingMode 四档（message 默认 —— DM 与被 @ 群聊入站即发）；**无"typing 完成才发送"的门** |
+| `src/credential.rs` | 凭据三来源解析（明文/`$ENV`/`!shell`）L1 自包含副本（§8 偏离 10，语义/单测对齐 latent-web credential.rs）；`is_shell_source` 供项目级配置拒绝 `!shell` |
+| `src/error.rs` | `ChannelError`：出站分类（ChatNotFound/NotInGroup/RateLimited{retry_after_ms}/Unsupported/DeliveryFailed）+ 生命周期（Config/Startup）；`retry_after`/`is_retryable` |
+| `src/telegram/` | feature `telegram`：Bot API getUpdates 长轮询（reqwest 直连不引 SDK，`apiBase` 可指向本地假服务器）；getMe 自检 + bot 身份；sendMessage/reply_to_message_id/sendChatAction；429 → RateLimited |
+| `src/qq/` | feature `qq`：OneBot 11 反向 WebSocket（axum 服务端，NapCat 是客户端）；Bearer Header 常数时间校验（不走 query）+ 5 次失败 60s 冷却；echo oneshot 表关联 action 应答；meta_event 记 self_id；**user_id == self_id 自消息源头丢弃（防私聊恒 to_me 死循环）**；已发消息 id 表支撑 reply_to_me；单帧 1MiB/并发 ≤8 |
+| `src/wecom/` | feature `wecom`：企业微信智能机器人 WS 长连接（wss://openws.work.weixin.qq.com；`aibot_subscribe` 握手 → `aibot_msg_callback` 回调 → `aibot_send_msg` 推送；30s ping）；订阅被拒 → Failed 不再重试；断线退避重连 |
+| `src/mock.rs` | feature `mock`：内存假渠道（push_inbound 注入 / sent() 断言 / 可编程发送失败）——gateway 集成测试基础设施 |
+| `tests/telegram.rs` / `tests/qq.rs` / `tests/wecom.rs` | 假平台服务器集成测试：更新归一化与 @/reply 判定、出站协议帧、自消息防环、错误 token 拒绝、订阅拒绝 → Failed |
+
+### crates/latent-gateway — L3 聊天网关（引擎 + bin: latent-gateway）
+
+| 文件 | 说明 |
+|---|---|
+| `src/main.rs` | daemon 入口：默认前台跑 daemon；子命令 `pairing list/approve`、`channels status [--probe]`、`status`（**控制面薄客户端**，token 读 `$LATENT_GATEWAY_TOKEN`，禁止直写 state.json）；配置非法/缺 token → 退出码 78；workspace 非空则进程级切换 cwd；Ctrl-C 优雅停机（abort subagent + 渠道断开 + state 落盘） |
+| `src/config.rs` | gateway.json schema（全 deny_unknown_fields）+ 校验：未知键/坏类型/非法值 → `ConfigError` → 退出码 78；项目逐字段覆盖全局（Value 深合并）；**项目级 `!shell` 凭据来源拒绝启动**；危险配置 stderr 警告不阻断（dmPolicy open / 空 allowlist / 明文 token） |
+| `src/routing/session_key.rs` | session key 计算（对齐上游 `buildAgentPeerSessionKey`）：群 `agent:{agent}:{channel}:group:{id}`、私聊 dmScope 四档；空段 `"unknown"` 兜底；agent 默认 `main` |
+| `src/agents.rs` | `ChatSessionRegistry`（每 session key 一个 ChatSession，**惰性创建**）+ `SessionFactory`（provider/settings/MCP specs 全局解析一次共享；run_lock 同会话串行）+ `SessionEventPump`（订阅者只推 channel；assistant MessageEnd 权威定稿、AgentSettled 只发一次；进度 30s 节流 try_send 满即丢、final 阻塞不丢） |
+| `src/auto_reply/mod.rs` | dispatch 管线：去重 claim（**先于 ACK**）→ 授权（dmPolicy/groupPolicy/requireMention）→ 命令拦截 → 防抖 → session key → 队列处置 → execute_turn（envelope → prompt → pump 收集）；四模式队列（steer/followup/collect/interrupt）；`inject_operator_message`（chat.send，sender 固定 operator，忙则 steer）；命令权限天花板（full-access 恒 owner、群会话修改命令仅 owner） |
+| `src/auto_reply/queue.rs` | `QueueSettings`（steer/500ms/cap 20/summarize 默认）+ `PendingQueue`（collect 的网关自管缓冲；drop=new 回执拒绝、summarize 取过即清合成提示） |
+| `src/auto_reply/envelope.rs` | 入站包装：`[{channel} {chat_type}:{id} {sender} {HH:mm}] body`；头部字段方括号清洗防伪造层级 |
+| `src/auto_reply/commands.rs` | 聊天命令解析（/new /reset /compact /stop /status /model /thinking /mode /queue /activation /approve /help）；`/approve` id 与 decision 顺序可换、别名表；owner 判定 `<channel>:<userId>` |
+| `src/auto_reply/reply_dispatcher.rs` | 出站保序 sendChain（每会话单消费任务）：进度/最终回复串行；final 只发一次；长文 chunk 分段（首段不延迟）；`ReplySink::Channel / ControlPlane`（operator 会话回复上控制面事件线）；限速 retry_after 重试一次 |
+| `src/approval.rs` | `ChatApprovalUi` 全局单例（id 全局自增 + pending oneshot 表，`/approve` 跨会话路由）；审批消息发 owner DM；发送失败立即 Deny 不等 120s；超时/断开 → None = Deny（fail-closed） |
+| `src/pairing.rs` | DM 配对：8 位码（大写剔除 0O1I）1h 过期；每渠道 pending ≤ 3；`pairing|allowlist|open|disabled`（open 需列表含 `*`）；批准只授 DM |
+| `src/state.rs` | `<数据目录>/gateway/state.json`（原子写 tmp+rename；**唯一写者是 daemon**）：session key → 会话文件（重启 resume）+ pairing pending/approved |
+| `src/channels.rs` | 渠道工厂 `create_channel`（feature 门控，具体渠道类型唯一出现点）+ `ChannelManager`（attach/start_enabled/状态记录/每渠道转发任务补名） |
+| `src/control/` | WS 控制面（axum，帧格式对齐上游）：`server.rs`（首帧 connect 强制、单帧 1MiB 断连、并发 ≤8、事件 per-connection seq 单调）、`auth.rs`（token 常数时间比较 + 5 次失败 60s 冷却）、`methods/`（connect/health/status/chat.send/chat.abort/chat.history/sessions.list/sessions.reset/channels.status/pairing.list/pairing.approve/config.get redact）、`client.rs`（薄客户端：CLI 子命令与测试共用）、`events.rs`（agent/chat/channels/health/shutdown） |
+| `tests/e2e.rs` | 引擎集成测试（mock 渠道 + ScriptedProvider 全离线，15 例）：端到端回复、去重、群 allowlist + @ 门、聊天命令、群会话 owner-only、四模式队列、cap 溢出、pairing 全流程、审批往返 owner DM、/approve owner-only、state.json 重启恢复 |
+| `tests/control.rs` | 控制面集成测试（9 例）：握手 hello-ok、错误 token 拒绝、首帧强制 connect、chat.send 走同一管线、sender 字段拒绝、pairing 方法、事件 seq 单调、1MiB 断连、config redact |
 
 ### crates/latent-sandbox — 沙箱（零内部依赖）
 
@@ -207,6 +269,7 @@ latent-session / latent-tools / latent-tui / latent-web 为可选组件：移除
 | .latentignore | 项目 `<cwd>/.latentignore` / 全局 `<数据目录>/.latentignore` | AI 检索忽略规则（gitignore 语法，格式同 .gitignore）：grep/find/ls/@文件弹窗过滤 + 系统提示词规则。全局在前、项目在后拼接，gitignore 语义 last-match-wins——项目可用 `!` 反选全局规则。文件缺失静默跳过，坏行诊断后跳过；无任何规则 = 不做额外过滤（`.git` 由工具层恒排除，遍历仍自带 .gitignore 感知）。启动时读一次，中途修改不生效；不支持子目录级 `.latentignore` |
 | models.json | `.latent/models.json` / `<数据目录>/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：LATENT_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载 |
 | web-search.json | `.latent/web-search.json` / `<数据目录>/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
+| gateway.json | `.latent/gateway.json` / `<数据目录>/gateway.json` | 聊天网关配置（GATEWAY_PLAN §4.2）：`agents.defaults`（workspace/model/typingMode）、`gateway`（port 18789/bind 127.0.0.1/auth.token **必填**，缺失 → 退出码 78）、`channels`（qq/wecom/telegram/mock 各自 enabled/凭据/textChunkLimit/dmPolicy/allowFrom）、`session`（dmScope=per-channel-peer/groupScope=per-group/reset）、`messages`（queue: steer/500ms/cap 20/summarize + debounceMsByChannel；groupChat: requireMention/groupPolicy=allowlist/groupAllowFrom/mentionPatterns/unmentionedInbound —— **群策略唯一定义点**）、`commands.ownerAllowFrom`。全 deny_unknown_fields，未知键 → 退出码 78；**项目级配置拒绝 `!shell` 凭据来源** |
 | skills | `.latent/skills/<name>/SKILL.md` / `<数据目录>/skills/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |
 | agents | `.latent/agents/<name>.md` / `<数据目录>/agents/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
 | system-prompt.md | `.latent/system-prompt.md` / `<数据目录>/system-prompt.md` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
@@ -262,3 +325,7 @@ cd tests/e2e && pytest -v                   # 3. 运行（仅 macOS/Linux）
 ## 参考：pi 上游实现
 
 本项目参考 [pi 的官方仓库](https://github.com/earendil-works/pi)（TypeScript 实现）。当行为语义不确定时（主循环阶段机、会话树 entry 语义、compaction 切点、MCP 扩展事件集、RPC 命令、markdown 渲染等），以上游 pi 对应实现为准对齐；记录在案的偏离：时间戳用毫秒整数（pi 用 ISO 字符串）、压缩单请求、不追求会话文件逐字节兼容、latent 自有扩展 entry（tool_set_change/mode_change/context_ref）与权限/沙箱/子代理/web 搜索为 latent 新增能力。代码注释中偶见的「XX 文档 §N」编号是已移除的设计文档遗留，遇行为描述与代码冲突时以代码实际行为与本文件为准。
+
+## 参考：OpenClaw 上游实现（聊天网关）
+
+latent-gateway 是 [OpenClaw](https://github.com/openclaw/openclaw)（MIT，个人 AI 助手网关）的架构级复刻：常驻 Gateway 进程拥有所有聊天渠道连接与所有 agent 会话，暴露 WebSocket 控制面。**行为语义、常量、协议格式一律先查 OpenClaw 对应源文件**（对照表见 `GATEWAY_PLAN.md` §6：防抖窗口语义、分段断点、出站保序、echo 关联、去重先于 ACK 等坑位上游已解决，直接继承）；概念命名（session key、QueueSettings、mention gating、typingMode、pairing、hello-ok 等）照抄上游。已登记偏离见 `GATEWAY_PLAN.md` §8，要点：会话存储用 latent-session JSONL（上游 sqlite）、单 agent MVP、**安全模型更严**（full-access 切换与审批应答均 owner-only，群会话修改命令仅 owner）、`chat.send` 注入消息固定 operator 身份、QQ/企微渠道为按 ChannelPlugin 接口语义新写、凭据解析器在 latent-channel 内置 L1 自包含副本。
