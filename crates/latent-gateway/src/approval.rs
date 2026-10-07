@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use latent_core::{ApprovalDecision, ApprovalRequest, ApprovalUi};
+use latent_runtime::facade::{ApprovalDecision, ApprovalRequest, ApprovalUi};
 use tokio::sync::{oneshot, Mutex, RwLock};
 
 use latent_channel::types::{ChatRef, OutboundMessage, Sender};
@@ -23,6 +23,9 @@ use latent_channel::plugin::ChannelHandle;
 
 /// 审批请求等待上限。
 pub const APPROVAL_TIMEOUT_SECS: u64 = 120;
+/// 审批消息发送超时(P2-3):渠道命令队列卡死时按发送失败处理,不无限
+/// 挂住 run(发送失败 = 立即 Deny,fail-closed)。
+const APPROVAL_SEND_TIMEOUT_SECS: u64 = 10;
 
 /// 审批消息投递目标(owner 的私聊)。
 #[derive(Clone)]
@@ -33,8 +36,14 @@ pub struct ApprovalTransport {
 
 pub struct ChatApprovalUi {
     next_id: AtomicU64,
-    pending: Mutex<HashMap<u64, oneshot::Sender<ApprovalDecision>>>,
+    /// 未决审批(oneshot + 工具名,供裸词应答路由与待审摘要展示)
+    pending: Mutex<HashMap<u64, PendingApproval>>,
     transport: RwLock<Option<ApprovalTransport>>,
+}
+
+struct PendingApproval {
+    tx: oneshot::Sender<ApprovalDecision>,
+    tool_name: String,
 }
 
 impl ChatApprovalUi {
@@ -58,7 +67,8 @@ impl ChatApprovalUi {
     /// 审批请求消息文本(命令面见 auto_reply/commands.rs 的 /approve)。
     fn format_request(id: u64, request: &ApprovalRequest) -> String {
         format!(
-            "⏳ 需要批准 [{}] {}\n/approve {id} allow-once|allow-always|deny",
+            "⏳ 需要批准 [{}] {}\n/approve {id} allow-once|allow-always|deny\n\
+             (或直接回复 allow-once / allow-always / deny 应答本请求)",
             request.tool_name, request.detail
         )
     }
@@ -66,12 +76,31 @@ impl ChatApprovalUi {
     /// `/approve` 应答路由(全局命令层调用)。
     pub async fn resolve(&self, id: u64, decision: ApprovalDecision) -> bool {
         match self.pending.lock().await.remove(&id) {
-            Some(tx) => {
-                let _ = tx.send(decision);
+            Some(pending) => {
+                let _ = pending.tx.send(decision);
                 true
             }
             None => false,
         }
+    }
+
+    /// 最新未决审批 id(id 全局自增,最大 = 用户刚看到的那条;裸 decision
+    /// 应答路由用)。
+    pub async fn latest_pending_id(&self) -> Option<u64> {
+        self.pending.lock().await.keys().copied().max()
+    }
+
+    /// 未决审批摘要((id, 工具名) 升序;裸 /approve 与过期应答提示用)。
+    pub async fn pending_summary(&self) -> Vec<(u64, String)> {
+        let mut items: Vec<(u64, String)> = self
+            .pending
+            .lock()
+            .await
+            .iter()
+            .map(|(id, pending)| (*id, pending.tool_name.clone()))
+            .collect();
+        items.sort_by_key(|(id, _)| *id);
+        items
     }
 
     /// 渠道断开/重启:所有未决审批落 Deny(oneshot 关闭 = None = Deny)。
@@ -81,10 +110,7 @@ impl ChatApprovalUi {
 
     /// 当前未决 id 快照(status/诊断用)。
     pub async fn pending_ids(&self) -> Vec<u64> {
-        let pending = self.pending.lock().await;
-        let mut ids: Vec<u64> = pending.keys().copied().collect();
-        ids.sort_unstable();
-        ids
+        self.pending_summary().await.into_iter().map(|(id, _)| id).collect()
     }
 }
 
@@ -103,16 +129,31 @@ impl ApprovalUi for ChatApprovalUi {
     async fn request_approval(&self, request: ApprovalRequest) -> Option<ApprovalDecision> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        self.pending.lock().await.insert(
+            id,
+            PendingApproval {
+                tx,
+                tool_name: request.tool_name.clone(),
+            },
+        );
 
         let body = Self::format_request(id, &request);
         let transport = self.transport.read().await.clone();
         let send_result = match transport {
             Some(transport) => {
-                transport
-                    .handle
-                    .send(&transport.chat, OutboundMessage::text(body))
-                    .await
+                match tokio::time::timeout(
+                    Duration::from_secs(APPROVAL_SEND_TIMEOUT_SECS),
+                    transport
+                        .handle
+                        .send(&transport.chat, OutboundMessage::text(body)),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(latent_channel::error::ChannelError::DeliveryFailed(
+                        format!("审批消息发送超时({APPROVAL_SEND_TIMEOUT_SECS}s)"),
+                    )),
+                }
             }
             None => Err(latent_channel::error::ChannelError::Startup(
                 "审批通道未就绪(无 owner DM 投递目标)".into(),
@@ -154,7 +195,7 @@ mod tests {
     use super::*;
     use latent_channel::mock::MockChannel;
     use latent_channel::types::Sender;
-    use latent_core::{ApprovalReason, ToolRiskClass};
+    use latent_runtime::facade::{ApprovalReason, ToolRiskClass};
 
     fn request() -> ApprovalRequest {
         ApprovalRequest {

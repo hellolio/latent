@@ -56,7 +56,8 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// state.json 存取(daemon 内单线程写;Mutex 保护读改写)。
+/// state.json 存取(唯一写者是 daemon;Mutex 保护读改写,save 全程持锁
+/// 序列化并发写)。
 pub struct StateStore {
     path: PathBuf,
     inner: Mutex<GatewayState>,
@@ -95,10 +96,12 @@ impl StateStore {
         }
     }
 
-    /// 原子落盘:临时文件 + rename(崩溃不留半文件)。
+    /// 原子落盘:临时文件 + rename(崩溃不留半文件)。write+rename 全程
+    /// 持 `inner` 锁(P1-11):并发 save 交错写同一 tmp 会互相撕裂/丢失,
+    /// 序列化简单可靠(state.json 是重启 resume 唯一依据)。
     pub fn save(&self) -> Result<(), String> {
-        let state = self.inner.lock().unwrap().clone();
-        let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
+        let state = self.inner.lock().unwrap();
+        let json = serde_json::to_string_pretty(&*state).map_err(|e| e.to_string())?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -173,6 +176,47 @@ mod tests {
             store.session_file("agent:main:qq:group:12345"),
             Some(PathBuf::from("/tmp/sessions/a.jsonl"))
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// P1-11:多任务并发 save 不得撕裂 —— write+rename 全程持锁后,
+    /// 落盘文件始终是某个任务的完整序列化(此前交错写同一 tmp 会互相覆盖)。
+    #[test]
+    fn concurrent_saves_never_tear() {
+        let path = std::env::temp_dir().join(format!(
+            "latent-gw-state-concurrent-{}-{}.json",
+            std::process::id(),
+            chrono_id()
+        ));
+        let store = std::sync::Arc::new(StateStore::load(path.clone()));
+        let handles: Vec<_> = (0..8)
+            .map(|worker| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    for step in 0..25 {
+                        store.set_session_file(
+                            &format!("agent:main:mock:direct:u{worker}"),
+                            Path::new(&format!("/tmp/sessions/{worker}-{step}.jsonl")),
+                            1728000000000,
+                        );
+                        store.save().unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        // 最终文件可完整解析,且包含每个 worker 的键(无撕裂/无更新丢失)
+        let store = StateStore::load(path.clone());
+        for worker in 0..8 {
+            assert!(
+                store
+                    .session_file(&format!("agent:main:mock:direct:u{worker}"))
+                    .is_some(),
+                "worker {worker} 的键应存活(无并发覆盖丢失)"
+            );
+        }
         std::fs::remove_file(&path).ok();
     }
 

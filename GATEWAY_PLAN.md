@@ -326,7 +326,7 @@ latent-gateway = { path = "crates/latent-gateway", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "process", "net"] }  # 补 net
 # 聊天网关所需（钉精确版本；axum 取 crates.io 最新稳定 0.8.x 精确 pin）
 tokio-tungstenite = "=0.30.0"
-axum = "=0.8.7"        # 实施时核对最新精确版本后钉死
+axum = "=0.8.9"        # 实施时核对最新精确版本后钉死（实施实录：0.8.9）
 ```
 
 ---
@@ -399,7 +399,13 @@ telegram = ["latent-channel/telegram"]
       "botToken": "$TELEGRAM_BOT_TOKEN",
       "textChunkLimit": 4000,
       "dmPolicy": "pairing"          // pairing|allowlist|open|disabled
-    }
+      // 渠道扩展键已类型化（修复审查 P2-2）：telegram 另有 apiBase（默认官方
+      // 端点，测试指向本地假 Bot API）/pollTimeoutSecs（默认 25）；qq 另有
+      // path（反向 WS 路径，默认 /ws，必须以 / 开头且非 /）；wecom 另有
+      // wsEndpoint/heartbeatIntervalSecs。unknown 键仍拒绝启动
+    },
+    "mock": { "enabled": false, "dmPolicy": "open", "allowFrom": [] }
+    // ↑ mock 内存渠道（测试基建；无凭据、chunk_limit 硬编码 4000，§8 偏离 12）
     // 群策略（groupPolicy/groupAllowFrom/requireMention/mentionPatterns/
     // unmentionedInbound）唯一在 messages.groupChat 定义；channels 节不设同名键——
     // 单一定义点，防止双源默认不一致造成 fail-open。
@@ -560,6 +566,7 @@ impl latent_core::ApprovalUi for ChatApprovalUi {
 - **gateway 启动时创建唯一实例**，clone 注入每个 build_session 的 `BuildOptions.approval_ui`（接缝既有，勿改 core）。审批请求发到 owner 的 DM（另一个会话），`/approve` 在全局命令层查这**同一张** pending 表完成跨会话路由——单例表就是这条回路；绝不允许按会话各建实例（id 碰撞 → 批准误路由）。
 - 审批消息**发送失败**（渠道断开/发送错误）→ 立即 `resolve(id, Deny)` + 诊断，不挂 120s（与 close_all 同语义，fail-closed）。
 - `/approve` 命令 → 查 pending 表 → `resolve(id, decision)`；`allow-always` → `ApprovalDecision::ApproveForSession`。
+- **应答人体工学（实施后加固）**：审批消息模板同时教两种应答方式 —— `/approve <id> <decision>` 与**裸 decision 词**（直接回复 `allow-once` / `allow-always` / `deny` 应答最新未决请求，owner-only）；裸 `/approve`（缺参）回待审列表 + 用法；过期 id 回"没有待审 + 当前待审"提示。规约：超时重试会让审批 id 递增，用户极易拿旧 id 空答，**应答入口必须容忍缺参/旧 id/裸词**。
 - 渠道断开/重启 → `close_all()`：所有未决审批落 Deny。
 
 ### 4.10 pairing.rs（DM 配对）
@@ -741,6 +748,9 @@ OpenClaw 仓库 <https://github.com/openclaw/openclaw>（MIT）。路径基于 m
 9. **重启不恢复在途 run**（无上游 restart recovery/tombstone 机制），转录保留；去重/幂等表仅内存。
 10. **凭据解析器**：latent-channel 内置自包含副本（明文/`$ENV`/`!shell`，语义对齐 latent-web `credential.rs`，单测锁行为）——L1「零内部依赖」硬规则优先于去重；`!shell` 来源仅全局配置接受（§4.2）。
 11. **群会话命令收紧**：会话级修改命令在群聊会话中仅 owner（上游为触发者可用）——偏离 6 的延伸，群会话全群共享（§4.7/§5.1）。
+12. **`channels.mock` 配置节**：§4.2 schema 无 mock 渠道，实现按"测试基建"加入了 `mock`（enabled/dmPolicy/allowFrom，无凭据、textChunkLimit 硬编码 4000）——gateway 集成测试经它注入假渠道。
+13. **`inject_operator_message` 未走完整 dispatch 管线**：控制面 chat.send 绕过去重 claim/授权/防抖直接进 run（去重走独立幂等键表；operator 身份固定不匹配 dmPolicy/ownerAllowFrom，授权无意义）——与 §5.4 operator 语义一致，偏离登记。
+14. **owner 私聊免 dmPolicy 门禁**（审查后加固，比上游严）：ownerAllowFrom 命中的发送者绕过 pairing/allowlist/open 门 —— owner 是信任锚，`/approve` 审批应答必须始终可达（否则未配对 DM 的 owner 回复 /approve 会被配对流程吃掉，审批永远无法传达到 agent）；陌生人门禁不变。
 
 ---
 
@@ -828,6 +838,10 @@ OpenClaw 仓库 <https://github.com/openclaw/openclaw>（MIT）。路径基于 m
 - **E5 注册与登记单一事实来源**：`ChannelManager::attach` 若只启动不写 entries（登记留在 `start_enabled`），测试直接 attach 的渠道 `handle()` 恒为 None，报"渠道未连接,消息丢弃"。
 - **E6 回复目标双锁**：`ReplyDispatcher` 的 target 若 struct 持一把 `RwLock`、消费者任务 clone 又建一把，`set_target` 写前者和消费者读后者永不相遇——共享同一个 `Arc<RwLock<Option<ReplyTarget>>>`。
 - **E7 凭据物化必须同步写回 raw 配置（用户实测踩中）**：gateway 启动时把 `$ENV` 凭据解析进**类型化**配置，但 `start_enabled` 会再用 gateway.json 的 **raw Value** 覆盖插件配置（为保留未类型化键）——raw 里还是字面量 `"$TELEGRAM_BOT_TOKEN"`，覆盖后插件拿到的就是字面量，请求 URL 变成 `/bot$TELEGRAM_BOT_TOKEN/getMe` → Telegram 404 Not Found，而用户 curl 环境变量却是好的（首日排障一度误判为 token 错误）。规约：**凭据解析结果要同时写回类型化配置与 raw Value**（`config.rs::materialize_channel_credentials`）；凡"先解析、后 overlay"的配置流，overlay 之后必须复查解析值仍生效。
+- **E8 交互请求的应答通路不得再过入站门禁（confirm 审批传达 bug 的根因）**：ChatApprovalUi 把审批请求发到 owner DM，但 owner 的 `/approve` 回复仍要过 dispatch 的 dmPolicy 门 —— 未配对 DM 的 owner 回复被配对流程吃掉（返回配对码），审批 oneshot 永远无法 resolve；full-access 模式无审批故完全无症状，极难归因。规约：**凡是主动发给某人的交互请求（审批/确认/配对回执），其应答通路必须免受同一套入站门禁**（owner 绕过 dmPolicy，偏离 14）；新增跨聊天回调链路时先画清"应答消息会走哪几道门"。补充：应答入口还要按**用户实际输入习惯**设计 —— 用户会直接回复决策词（allow-once）、会漏掉 id，命令层必须给这些输入一条可达的通路（裸 decision 词 → 最新待审；缺参 /approve → 待审列表），否则超时重试 + 用户误答会形成"反复要求批准"的死循环。
+- **E9 测试复刻 daemon 并发模型必须逐字对齐**：复现网关行为的集成测试，事件循环要按 daemon 同款 **per-message `tokio::spawn`** —— 测试里串行 `dispatch_inbound(...).await` 会把"审批等待期间的 /approve"永久阻塞（首条消息的 run 挂住整个循环），得出假阳性 bug（daemon 本身没这个问题）。规约：测试装配代码从 daemon 抄，不要自己"简化"。
+- **E10 帧限前置后，断连验收要容忍"发送中途被重置"**：服务端 `max_frame_size` 生效时，客户端发送大帧可能直接 ECONNRESET（不再整帧缓冲后断连）——超限帧测试必须把"send 失败"也算通过，否则修复会让测试反而挂掉。
+- **A5 tungstenite `WebSocketConfig` 是 `#[non_exhaustive]`**：跨 crate 不能用结构体字面量 + `..Default::default()` 构造（E0639），只能 `WebSocketConfig::default()` 后逐字段赋值。
 
 ### F. 工程流程
 

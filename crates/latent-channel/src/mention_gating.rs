@@ -11,7 +11,7 @@ use regex::{Regex, RegexBuilder};
 use crate::types::{ChatType, InboundMessage, Segment};
 
 /// @判定配置(调用方把各层配置归并后传入)。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MentionConfig {
     /// 群聊是否要求显式 @(`messages.groupChat.requireMention`,默认 true)
     pub require_mention: bool,
@@ -21,6 +21,46 @@ pub struct MentionConfig {
     pub self_ids: Vec<String>,
     /// 机器人 identity.name(mentionPatterns 全空时派生兜底)
     pub identity_name: Option<String>,
+    /// mentionPatterns 构造期预编译(P2-9):`Regex::new` 是重操作,逐条
+    /// 群消息重新编译既慢又重复诊断非法 pattern;None = 未预编译,回退
+    /// 逐条编译(兼容路径,tests 用)
+    pub compiled_patterns: Option<Vec<Regex>>,
+}
+
+impl MentionConfig {
+    /// 构造入口:patterns 在**构造期**预编译一次(非法 pattern 编译期诊断)。
+    pub fn new(
+        require_mention: bool,
+        mention_patterns: Vec<String>,
+        self_ids: Vec<String>,
+        identity_name: Option<String>,
+    ) -> Self {
+        let compiled_patterns = build_mention_regexes(&mention_patterns, |pattern, error| {
+            eprintln!("[latent-channel:mention] 非法 mentionPattern `{pattern}`: {error}");
+        });
+        MentionConfig {
+            require_mention,
+            mention_patterns,
+            self_ids,
+            identity_name,
+            compiled_patterns: Some(compiled_patterns),
+        }
+    }
+}
+
+// A3(§10):带语义默认值的 Default 禁止 derive —— derive 会把
+// require_mention 抹成 false(上游默认 true,fail-closed)
+#[allow(clippy::derivable_impls)]
+impl Default for MentionConfig {
+    fn default() -> Self {
+        MentionConfig {
+            require_mention: true,
+            mention_patterns: Vec::new(),
+            self_ids: Vec::new(),
+            identity_name: None,
+            compiled_patterns: None,
+        }
+    }
 }
 
 /// 判定结论:`ToMe` = 触发 run;`RoomContext` = 仅作房间上下文(MVP 丢弃
@@ -104,11 +144,16 @@ pub fn is_mentioned(msg: &InboundMessage, cfg: &MentionConfig) -> bool {
     if msg.reply_to_me {
         return true;
     }
-    // 文本命中 mentionPatterns(大小写不敏感)
-    let regexes = build_mention_regexes(&cfg.mention_patterns, |pattern, error| {
-        eprintln!("[latent-channel:mention] 非法 mentionPattern `{pattern}`: {error}");
-    });
-    regexes.iter().any(|regex| regex.is_match(&msg.text))
+    // 文本命中 mentionPatterns(大小写不敏感;优先用构造期预编译,P2-9)
+    match &cfg.compiled_patterns {
+        Some(regexes) => regexes.iter().any(|regex| regex.is_match(&msg.text)),
+        None => {
+            let regexes = build_mention_regexes(&cfg.mention_patterns, |pattern, error| {
+                eprintln!("[latent-channel:mention] 非法 mentionPattern `{pattern}`: {error}");
+            });
+            regexes.iter().any(|regex| regex.is_match(&msg.text))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -139,10 +184,10 @@ mod tests {
 
     fn cfg() -> MentionConfig {
         MentionConfig {
-            require_mention: true,
             mention_patterns: Vec::new(),
             self_ids: vec!["10000".into()],
             identity_name: Some("小龙虾".into()),
+            ..Default::default()
         }
     }
 

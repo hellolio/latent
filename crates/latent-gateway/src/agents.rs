@@ -15,13 +15,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use latent_agent::{AgentEvent, MessageDeltaPayload};
-use latent_core::{
-    AgentSessionEvent, ApprovalUi, McpServerSpec, NoopUi, SessionSharedSubscriber,
-    SessionSubscriber,
-};
 use latent_runtime::assembly::{
     build_session, BuiltSession, BuildOptions, SessionSettings, SessionStore,
+};
+use latent_runtime::facade::{
+    AgentEvent, AgentMessage, AgentSession, AgentSessionEvent, ApprovalUi, McpServerSpec, Model,
+    MessageDeltaPayload, NoopUi, Provider, SessionSharedSubscriber, SessionSubscriber,
+    ThinkingLevel,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -39,8 +39,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 /// 会话工厂:全局解析一次共享(provider/settings/MCP specs),
 /// PermissionEngine/MCP 子进程/会话文件每会话独立(`build_session` 既有语义)。
 pub struct SessionFactory {
-    pub provider: Arc<dyn latent_ai::Provider>,
-    pub model: latent_ai::Model,
+    pub provider: Arc<dyn Provider>,
+    pub model: Model,
     pub settings: SessionSettings,
     /// 会话文件目录(`<数据目录>/sessions`)
     pub sessions_dir: std::path::PathBuf,
@@ -55,7 +55,7 @@ pub struct SessionFactory {
     /// 控制面事件广播(operator 会话的 final 回复上事件线)
     pub events: Option<crate::auto_reply::reply_dispatcher::EventSink>,
     /// agents.defaults.thinkingLevel 默认覆盖(None = 不动)
-    pub default_thinking_level: Option<latent_ai::ThinkingLevel>,
+    pub default_thinking_level: Option<ThinkingLevel>,
     /// messages.queue 全局队列设置(新会话的 PendingQueue 初始值;
     /// /queue 在会话内覆盖)
     pub queue_settings: crate::auto_reply::queue::QueueSettings,
@@ -157,7 +157,7 @@ pub struct ChatSession {
 }
 
 impl ChatSession {
-    pub fn session(&self) -> &Arc<latent_core::AgentSession> {
+    pub fn session(&self) -> &Arc<AgentSession> {
         &self.built.session
     }
 }
@@ -165,6 +165,10 @@ impl ChatSession {
 /// 会话注册表:key = session key。
 pub struct ChatSessionRegistry {
     sessions: AsyncMutex<HashMap<String, Arc<ChatSession>>>,
+    /// per-key 构建锁(P1-13):registry 全局锁不得跨 `factory.build().await`
+    /// —— 冷启动(MCP 子进程 spawn/读盘/落盘,秒级)会卡死所有会话的
+    /// get/status/控制面请求
+    build_locks: AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     factory: Arc<SessionFactory>,
 }
 
@@ -172,18 +176,35 @@ impl ChatSessionRegistry {
     pub fn new(factory: Arc<SessionFactory>) -> Self {
         ChatSessionRegistry {
             sessions: AsyncMutex::new(HashMap::new()),
+            build_locks: AsyncMutex::new(HashMap::new()),
             factory,
         }
     }
 
     /// 惰性创建:第一条消息到达该 session key 时才 build。
     pub async fn get_or_build(&self, key: &str) -> Result<Arc<ChatSession>, String> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(session) = sessions.get(key) {
+        // 快路径:已建会话直接返回(registry 锁只护 map 读写)
+        if let Some(session) = self.sessions.lock().await.get(key) {
+            return Ok(session.clone());
+        }
+        // 未命中 → per-key 构建锁内 build(同 key 双建被防住;异 key 并行)
+        let build_lock = {
+            let mut locks = self.build_locks.lock().await;
+            locks
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone()
+        };
+        let _guard = build_lock.lock().await;
+        // 双检:等锁期间同 key 可能已被并发构建
+        if let Some(session) = self.sessions.lock().await.get(key) {
             return Ok(session.clone());
         }
         let session = self.factory.build(key).await?;
-        sessions.insert(key.to_string(), session.clone());
+        self.sessions
+            .lock()
+            .await
+            .insert(key.to_string(), session.clone());
         Ok(session)
     }
 
@@ -278,7 +299,7 @@ impl SessionSubscriber for SessionEventPump {
                 }
                 // assistant MessageEnd = 权威定稿(覆盖式)
                 AgentEvent::MessageEnd { message } => {
-                    if let latent_agent::AgentMessage::Assistant(assistant) = &**message {
+                    if let AgentMessage::Assistant(assistant) = &**message {
                         let text = assistant.text_content();
                         if !text.trim().is_empty() {
                             *self.final_text.lock().unwrap() = text;

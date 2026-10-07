@@ -65,13 +65,17 @@ pub async fn run_event_loop(
     }
 }
 
-/// 审批通道刷新:owner DM(第一个 ownerAllowFrom 中渠道已连接的项)。
+/// 审批通道刷新:owner DM(第一个 ownerAllowFrom 中渠道**实际连接中**的项;
+/// P2-4:attach 过的 handle 存在 ≠ 连接,断开的渠道会让审批钉死在死渠道)。
 pub async fn refresh_approval_transport(gateway: &Gateway) {
     for owner in &gateway.config.commands.owner_allow_from {
         let Some((channel, user_id)) = owner.split_once(':') else {
             continue;
         };
         if let Some(handle) = gateway.channels.handle(channel).await {
+            if !matches!(handle.status().await, ChannelStatus::Connected { .. }) {
+                continue;
+            }
             gateway
                 .approval
                 .set_transport(crate::approval::ApprovalTransport {

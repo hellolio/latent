@@ -14,7 +14,7 @@
 //!   5 次进入 60s 冷却(按来源)。
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -36,6 +36,8 @@ pub const MAX_CONNECTIONS: usize = 8;
 pub const MAX_AUTH_FAILURES: u32 = 5;
 /// auth 失败冷却时长。
 pub const AUTH_COOLDOWN: Duration = Duration::from_secs(60);
+/// auth 失败表容量上限(公网 bind 下防慢性泄漏;超限先清过期冷却再挤掉一条)。
+const MAX_AUTH_FAILURE_ENTRIES: usize = 4096;
 /// action 应答等待上限。
 const ACTION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -46,7 +48,7 @@ pub struct QqConfig {
     pub reverse_ws_port: u16,
     /// 必填;缺失/为空 → 该渠道拒绝启动
     pub access_token: String,
-    /// WS 路径(NapCat 可配置;默认 /ws,同时接受 /)
+    /// WS 路径(NapCat 可配置;默认 /ws;必须以 / 开头且非 /,非法值拒绝启动)
     pub path: String,
 }
 
@@ -107,8 +109,9 @@ pub struct QqState {
     pub event_tx: mpsc::Sender<ChannelEvent>,
     /// 端点资源上限
     pub connections: Arc<Semaphore>,
-    /// 按来源的 auth 失败退避(计数 + 冷却截止)
-    pub auth_failures: Mutex<HashMap<SocketAddr, (u32, Option<Instant>)>>,
+    /// 按来源的 auth 失败退避(计数 + 冷却截止;键 = 对端 IP,P1-1:
+    /// SocketAddr 含临时端口,重连即换键,节流失效)
+    pub auth_failures: Mutex<HashMap<IpAddr, (u32, Option<Instant>)>>,
     /// 绑定地址(测试/status 用)
     pub bound_addr: RwLock<Option<SocketAddr>>,
     /// 状态 watch(handle.status() 读口)
@@ -227,6 +230,14 @@ impl ChannelPlugin for QqChannel {
             return Err(ChannelError::Config(
                 "qq accessToken 必填(缺失/为空 → 该渠道拒绝启动)".into(),
             ));
+        }
+        // P1-7:path 不以 / 开头会让 axum route panic;/ 与兜底路由重复注册
+        // 同样 panic —— 配置非法一律 Config 错误拒绝启动,绝不 panic
+        if !config.path.starts_with('/') || config.path == "/" {
+            return Err(ChannelError::Config(format!(
+                "qq path 非法: {:?}(必须以 / 开头且非 /)",
+                config.path
+            )));
         }
         *self.config.write().unwrap() = Some(config);
         Ok(())
@@ -399,10 +410,11 @@ async fn ws_handler(
     use axum::response::IntoResponse;
 
     let peer = addr.0;
-    // 冷却检查(连续 5 次失败 → 60s;期间一律拒绝)
+    let peer_ip = peer.ip();
+    // 冷却检查(连续 5 次失败 → 60s;期间一律拒绝;键 = 对端 IP,P1-1)
     {
         let failures = state.auth_failures.lock().await;
-        if let Some((_, Some(until))) = failures.get(&peer) {
+        if let Some((_, Some(until))) = failures.get(&peer_ip) {
             if *until > Instant::now() {
                 return (StatusCode::FORBIDDEN, "auth cooldown").into_response();
             }
@@ -416,7 +428,16 @@ async fn ws_handler(
         .unwrap_or("");
     if !constant_time_eq(provided, &expected) {
         let mut failures = state.auth_failures.lock().await;
-        let entry = failures.entry(peer).or_insert((0, None));
+        // 失败表有界(P1-1):公网 bind 下防慢性泄漏
+        if failures.len() >= MAX_AUTH_FAILURE_ENTRIES && !failures.contains_key(&peer_ip) {
+            failures.retain(|_, (_, until)| until.is_some_and(|until| until > Instant::now()));
+            if failures.len() >= MAX_AUTH_FAILURE_ENTRIES {
+                if let Some(oldest) = failures.keys().next().cloned() {
+                    failures.remove(&oldest);
+                }
+            }
+        }
+        let entry = failures.entry(peer_ip).or_insert((0, None));
         entry.0 += 1;
         if entry.0 >= MAX_AUTH_FAILURES {
             entry.1 = Some(Instant::now() + AUTH_COOLDOWN);
@@ -425,12 +446,16 @@ async fn ws_handler(
         eprintln!("[latent-channel:qq] {peer} 认证失败({MAX_AUTH_FAILURES} 次内进入冷却)");
         return (StatusCode::FORBIDDEN, "invalid token").into_response();
     }
-    state.auth_failures.lock().await.remove(&peer);
+    state.auth_failures.lock().await.remove(&peer_ip);
     // 并发上限
     if state.connections.available_permits() == 0 {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many connections").into_response();
     }
-    ws.on_upgrade(move |socket| handle_connection(socket, state, peer))
+    // P1-2:帧/消息上限前置到 WS 升级(应用层检查保留作双保险)——
+    // 否则整帧先被 axum 缓冲(默认上限 ~64MiB)才轮到应用层断连
+    ws.max_message_size(MAX_FRAME_BYTES)
+        .max_frame_size(MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| handle_connection(socket, state, peer))
 }
 
 /// NapCat 连接任务:事件归一化 + echo 路由 + 自消息防环。

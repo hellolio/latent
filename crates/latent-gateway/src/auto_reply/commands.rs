@@ -7,7 +7,7 @@
 //! /model /thinking /mode /queue /activation)在**群聊中一律仅 owner**;
 //! /status /help 所有人;full-access 无论私聊群聊均仅 owner(§5.1)。
 
-use latent_core::{ApprovalDecision, SessionMode};
+use latent_runtime::facade::{ApprovalDecision, SessionMode};
 
 /// 聊天命令(解析产物;执行在 auto_reply/mod.rs 的 Gateway)。
 #[derive(Debug, Clone, PartialEq)]
@@ -50,15 +50,22 @@ impl ChatCommand {
 }
 
 /// 解析一行聊天文本为命令(未命中 → None)。
+///
+/// 对齐上游正则:仅 `/approve` 允许裸词(`/^\/?approve/`),其余命令必须
+/// 行首 `/`(`/^\/(new|reset)(?:\s|$)/i`)——裸词全放开会把 "stop it"、
+/// "new plan for tomorrow" 之类自然语言劫持成命令(P1-8)。
 pub fn parse(text: &str) -> Option<ChatCommand> {
     let trimmed = text.trim();
-    let rest = trimmed.strip_prefix('/').unwrap_or(trimmed);
-    let (name, arg) = match rest.split_once(char::is_whitespace) {
+    let (name, arg) = match trimmed.split_once(char::is_whitespace) {
         Some((name, arg)) => (name, Some(arg.trim())),
-        None => (rest, None),
+        None => (trimmed, None),
     };
     let arg = arg.filter(|arg| !arg.is_empty());
-    let name = name.to_ascii_lowercase();
+    let bare = !name.starts_with('/');
+    let name = name.trim_start_matches('/').to_ascii_lowercase();
+    if bare && name != "approve" {
+        return None;
+    }
     match name.as_str() {
         "new" | "reset" => Some(ChatCommand::New),
         "compact" => Some(ChatCommand::Compact {
@@ -146,7 +153,8 @@ pub fn help_text() -> String {
      /mode <plan|confirm|full-access> — 切换会话模式\n\
      /queue <steer|followup|collect|interrupt> [cap N] — 队列模式(仅 owner)\n\
      /activation <mention|always> — 按群切换 @ 门(仅 owner)\n\
-     /approve <id> <allow-once|allow-always|deny> — 审批应答(仅 owner)\n\
+     /approve <id> <allow-once|allow-always|deny> — 审批应答(仅 owner;\
+     直接回复 allow-once/allow-always/deny 应答最新待审)\n\
      /help — 本清单\n\
      注:群聊中会话级命令仅 owner 可用"
     .to_string()
@@ -157,11 +165,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_with_and_without_slash_and_case_insensitive() {
+    fn parses_slash_commands_and_bare_approve_only() {
         assert_eq!(parse("/new"), Some(ChatCommand::New));
         assert_eq!(parse("/reset "), Some(ChatCommand::New), "/reset 与 /new 同义");
         assert_eq!(parse("/STOP"), Some(ChatCommand::Stop));
-        assert_eq!(parse("status"), Some(ChatCommand::Status));
+        // 裸词仅 approve(上游正则 /^\/?approve/);其余裸词不命中(P1-8)
+        assert_eq!(parse("status"), None, "裸词 status 不得劫持自然语言");
+        assert_eq!(parse("stop it"), None);
+        assert_eq!(parse("new plan for tomorrow"), None);
+        assert_eq!(parse("Help me fix this"), None);
+        assert!(matches!(parse("approve 1 deny"), Some(ChatCommand::Approve { .. })));
         assert_eq!(
             parse("/compact 保留近期"),
             Some(ChatCommand::Compact {

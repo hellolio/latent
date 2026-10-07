@@ -219,10 +219,61 @@ impl ChannelPlugin for TelegramChannel {
 // Bot API 交互
 // ---------------------------------------------------------------------------
 
+/// reqwest 错误文本会携带完整 URL(含 bot token,如 `error sending request
+/// for url (https://api.telegram.org/bot<TOKEN>/getMe)`)—— 折叠 `/bot<*>/`
+/// 段,避免凭据进诊断日志(§5.5,P2-6)。
+fn redact_bot_token(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("/bot") {
+        let after = &rest[pos + 4..];
+        out.push_str(&rest[..pos + 4]);
+        match after.find('/') {
+            Some(end) => {
+                out.push('*');
+                rest = &after[end..];
+            }
+            None => {
+                out.push('*');
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Bot API 实体 offset/length 单位是 **UTF-16 code units**(P1-5):映射回
+/// 字节区间。此前直接按字节切片 —— mention 前出现中文/emoji 时切片错位,
+/// 落进多字节字符中间返回 None → 群里中文用户 @ 机器人系统性失效。
+///
+/// 畸形实体(offset 越界/length 覆盖不到完整字符)就近取字符边界,越界
+/// 区间钳到文本末尾;完全越界返回 None 由调用方跳过该实体。
+fn utf16_range_to_byte_range(text: &str, offset: usize, length: usize) -> Option<(usize, usize)> {
+    let mut byte_start: Option<usize> = None;
+    let mut u16_pos = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        if byte_start.is_none() && u16_pos >= offset {
+            byte_start = Some(byte_idx);
+        }
+        if let Some(start) = byte_start {
+            if u16_pos >= offset + length {
+                return Some((start, byte_idx));
+            }
+        }
+        u16_pos += ch.len_utf16();
+    }
+    byte_start.map(|start| (start, text.len()))
+}
+
 /// GET 调用并解包 `{ok, result}`;ok=false → 分类错误。
 async fn api_get(client: &reqwest::Client, url: &str) -> Result<serde_json::Value, ChannelError> {
     let response = client.get(url).send().await.map_err(|error| {
-        ChannelError::Startup(format!("telegram 请求失败: {error}"))
+        ChannelError::Startup(format!(
+            "telegram 请求失败: {}",
+            redact_bot_token(&error.to_string())
+        ))
     })?;
     parse_api_response(response).await
 }
@@ -360,9 +411,19 @@ fn normalize_update(state: &TelegramState, update: &serde_json::Value) -> Option
             if !is_mention {
                 continue;
             }
-            let offset = entity.get("offset").and_then(serde_json::Value::as_u64)? as usize;
-            let length = entity.get("length").and_then(serde_json::Value::as_u64)? as usize;
-            let mention = text.get(offset..offset + length).unwrap_or("");
+            // 畸形实体跳过本条实体,不得让整条消息归一化失败被丢弃(P1-5)
+            let (Some(offset), Some(length)) = (
+                entity.get("offset").and_then(serde_json::Value::as_u64),
+                entity.get("length").and_then(serde_json::Value::as_u64),
+            ) else {
+                continue;
+            };
+            let Some((start, end)) =
+                utf16_range_to_byte_range(&text, offset as usize, length as usize)
+            else {
+                continue;
+            };
+            let mention = &text[start..end];
             if let Some(username) = &state.bot_username {
                 if mention.eq_ignore_ascii_case(&format!("@{username}")) {
                     segments.push(Segment::at(&state.bot_id));
@@ -440,6 +501,11 @@ async fn send_message(
         .json(&params)
         .send()
         .await
-        .map_err(|error| ChannelError::DeliveryFailed(format!("sendMessage 网络错误: {error}")))?;
+        .map_err(|error| {
+            ChannelError::DeliveryFailed(format!(
+                "sendMessage 网络错误: {}",
+                redact_bot_token(&error.to_string())
+            ))
+        })?;
     parse_api_response(response).await.map(|_| ())
 }

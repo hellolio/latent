@@ -29,6 +29,12 @@ pub enum OutboundItem {
     Final(String),
 }
 
+/// 单段发送兜底超时(P2-16):渠道发送悬挂(qq/wecom WS 对端黑洞)时,
+/// sendChain 消费任务被永久卡住 → send_final 阻塞 → pump/会话串行广播
+/// 停摆 → run_lock 永久被持,会话后续消息全部入队直至 cap 丢弃。fail-closed
+/// 是计划取舍,但"永久卡死"必须有界 —— 超时记诊断后放行下一段。
+const SEND_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// 回复出口:渠道私聊/群聊,或控制面事件线(chat.send 的 operator 会话)。
 #[derive(Clone)]
 pub enum ReplySink {
@@ -99,17 +105,26 @@ impl ReplyDispatcher {
                     }
                     match &target.sink {
                         ReplySink::Channel { handle, chat } => {
-                            if let Err(error) = handle
-                                .send(chat, OutboundMessage::text(piece.clone()))
-                                .await
-                            {
-                                report_send_failure(&error);
-                                // 限速:按 retry_after 延迟后重试一次
-                                if let Some(delay) = error.retry_after() {
-                                    tokio::time::sleep(delay).await;
-                                    let _ = handle
-                                        .send(chat, OutboundMessage::text(piece.clone()))
-                                        .await;
+                            // P2-16:单段发送加兜底超时,悬挂不放行整条链
+                            let send = handle
+                                .send(chat, OutboundMessage::text(piece.clone()));
+                            match tokio::time::timeout(SEND_TIMEOUT, send).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    report_send_failure(&error);
+                                    // 限速:按 retry_after 延迟后重试一次
+                                    if let Some(delay) = error.retry_after() {
+                                        tokio::time::sleep(delay).await;
+                                        let _ = handle
+                                            .send(chat, OutboundMessage::text(piece.clone()))
+                                            .await;
+                                    }
+                                }
+                                Err(_) => {
+                                    eprintln!(
+                                        "[latent-gateway][reply] 发送悬挂超时({}s),放弃本段放行下一段",
+                                        SEND_TIMEOUT.as_secs()
+                                    );
                                 }
                             }
                         }

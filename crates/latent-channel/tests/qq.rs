@@ -244,3 +244,51 @@ fn with_token(addr: std::net::SocketAddr, token: &str) -> tokio_tungstenite::tun
         .insert("Authorization", format!("Bearer {token}").parse().unwrap());
     request
 }
+
+/// P1-7:非法 path(不以 / 开头、或与兜底路由 / 重复注册)必须返回
+/// Config 错误拒绝启动,而不是 axum route panic。
+#[tokio::test]
+async fn invalid_path_is_rejected_not_panic() {
+    let channel = QqChannel::new();
+    let error = channel
+        .apply_config(&serde_json::json!({
+            "reverseWsHost": "127.0.0.1", "reverseWsPort": 0,
+            "accessToken": "t", "path": "ws",
+        }))
+        .unwrap_err();
+    assert!(
+        matches!(error, latent_channel::error::ChannelError::Config(_)),
+        "{error}"
+    );
+    // path == "/" 与兜底 .route("/") 重复注册(曾 "Overlapping method route" panic)
+    let channel = QqChannel::new();
+    let error = channel
+        .apply_config(&serde_json::json!({
+            "reverseWsHost": "127.0.0.1", "reverseWsPort": 0,
+            "accessToken": "t", "path": "/",
+        }))
+        .unwrap_err();
+    assert!(
+        matches!(error, latent_channel::error::ChannelError::Config(_)),
+        "{error}"
+    );
+}
+
+/// P1-1:auth 失败冷却按对端 IP 计键 —— 每次重连源端口都变,按
+/// SocketAddr 计键时"连续 5 次失败 → 60s 冷却"永不生效。
+#[tokio::test]
+async fn auth_cooldown_is_keyed_by_ip_not_ephemeral_port() {
+    let (channel, _handle, _rx) = spawn_channel().await;
+    let addr = channel.bound_addr().expect("反向 WS 已绑定");
+    // 同 IP(源端口每次 TCP 重连都不同)连续 5 次错 token
+    for _ in 0..5 {
+        let result = tokio_tungstenite::connect_async(with_token(addr, "wrong-token")).await;
+        assert!(result.is_err());
+    }
+    // 第 6 次:换源端口后仍应被冷却拒绝
+    let result = tokio_tungstenite::connect_async(with_token(addr, "wrong-token")).await;
+    assert!(result.is_err(), "第 6 次连接应被冷却拒绝");
+    // 冷却期内即使 token 正确也拒绝(按 IP 生效)
+    let result = tokio_tungstenite::connect_async(with_token(addr, "napcat-token")).await;
+    assert!(result.is_err(), "冷却期内正确 token 也应被拒绝(P1-1)");
+}

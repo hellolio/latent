@@ -19,11 +19,9 @@ telegram = ["latent-channel/telegram"]
 mock = ["latent-channel/mock"]
 
 [dependencies]
-latent-ai.workspace = true
-latent-agent.workspace = true
+# P1-14:按 GATEWAY_PLAN §1,gateway 仅依赖 latent-runtime + latent-channel
+# —— 跨层类型经 latent_runtime::facade re-export
 latent-channel.workspace = true
-latent-core.workspace = true
-latent-session.workspace = true
 latent-runtime.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -40,4 +38,5 @@ futures.workspace = true
 
 [dev-dependencies]
 # 集成测试用 mock 渠道 + ScriptedProvider,全离线
+latent-ai.workspace = true
 latent-channel = { workspace = true, features = ["mock"] }

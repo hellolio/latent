@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 pub const MAX_CONSECUTIVE_AUTH_FAILURES: u32 = 5;
 /// 冷却时长。
 pub const AUTH_COOLDOWN: Duration = Duration::from_secs(60);
+/// 失败表容量上限(公网 bind 下防慢性泄漏;超限先清过期冷却再挤掉一条)。
+const MAX_FAILURE_ENTRIES: usize = 4096;
 
 /// 常数时间字符串比较(长度不同也走满轮比较,防时序侧信道)。
 pub fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -43,9 +45,17 @@ impl AuthThrottle {
         }
     }
 
-    /// 记录一次失败(连续 5 次 → 60s 冷却)。
+    /// 记录一次失败(连续 5 次 → 60s 冷却;表有界)。
     pub fn record_failure(&self, peer: IpAddr) {
         let mut failures = self.failures.lock().unwrap();
+        if failures.len() >= MAX_FAILURE_ENTRIES && !failures.contains_key(&peer) {
+            failures.retain(|_, (_, until)| until.is_some_and(|until| until > Instant::now()));
+            if failures.len() >= MAX_FAILURE_ENTRIES {
+                if let Some(oldest) = failures.keys().next().copied() {
+                    failures.remove(&oldest);
+                }
+            }
+        }
         let entry = failures.entry(peer).or_insert((0, None));
         entry.0 += 1;
         if entry.0 >= MAX_CONSECUTIVE_AUTH_FAILURES {

@@ -130,9 +130,18 @@ where
     S: futures::Sink<WsMessage> + Unpin,
     S::Error: std::fmt::Display,
 {
-    if let Err(error) = ws.send(WsMessage::text(value.to_string())).await {
-        panic!("发送帧失败: {error}");
-    }
+    send_json_lossy(ws, value)
+        .await
+        .unwrap_or_else(|error| panic!("发送帧失败: {error}"));
+}
+
+/// 发送帧但容忍失败(P1-2 后超限帧会在发送中途被服务端重置连接 ——
+/// 发送失败本身就是断连,调用方按需处理)。
+async fn send_json_lossy<S>(ws: &mut S, value: &Value) -> Result<(), S::Error>
+where
+    S: futures::Sink<WsMessage> + Unpin,
+{
+    ws.send(WsMessage::text(value.to_string())).await
 }
 
 async fn next_json(
@@ -355,13 +364,17 @@ async fn oversized_frame_disconnects() {
     )
     .await;
     let _hello = next_json(&mut ws).await;
-    // 超限帧(>1MiB)
+    // 超限帧(>1MiB):服务端帧上限前置(P1-2)—— 连接可能在发送中途即被
+    // 重置(发送失败 = 断连),也可能收到 Close/Err;三种都算通过
     let huge = "x".repeat(1024 * 1024 + 100);
-    send_json(
+    let send_result = send_json_lossy(
         &mut ws,
         &json!({ "type": "req", "id": 2, "method": "status", "params": { "pad": huge } }),
     )
     .await;
+    if send_result.is_err() {
+        return; // 发送中途被重置 = 上限前置生效
+    }
     let closed = tokio::time::timeout(Duration::from_secs(3), async {
         while let Some(message) = ws.next().await {
             if matches!(message, Ok(WsMessage::Close(_)) | Err(_)) {

@@ -120,7 +120,7 @@ async fn run_status() -> Result<(), String> {
 async fn run_daemon() -> Result<(), String> {
     notify_legacy_data_dir();
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let data_dir = latent_core::latent_dir(dirs_home().as_deref());
+    let data_dir = latent_runtime::facade::latent_dir(dirs_home().as_deref());
 
     // 配置:项目逐字段覆盖全局;非法 → 退出码 78(项目级 !shell 在 load_config 强制拒绝)
     let config = match load_config(Some(&cwd), data_dir.as_deref()) {
@@ -197,8 +197,6 @@ async fn run_daemon() -> Result<(), String> {
     // 渠道凭据预解析(失败 = 该渠道拒绝启动,不阻断 daemon)
 
     // 会话工厂
-    let typing_mode =
-        latent_channel::typing::TypingMode::parse(Some(&config.agents.defaults.typing_mode));
     let thinking_level = config
         .agents
         .defaults
@@ -225,10 +223,8 @@ async fn run_daemon() -> Result<(), String> {
         extension_specs,
         approval_ui: approval.clone(),
         state: state.clone(),
-        typing_config: latent_channel::typing::TypingConfig {
-            mode: typing_mode,
-            ..latent_channel::typing::TypingConfig::default()
-        },
+        // P2-14:与 Gateway 共用同一份 typing 配置(单一事实来源)
+        typing_config: latent_gateway::auto_reply::build_typing_config(&config),
         events: Some(latent_gateway::auto_reply::reply_dispatcher::EventSink {
             events: broadcast_events.clone(),
             session_key: String::new(),

@@ -412,11 +412,11 @@ pub async fn switch_new_session(
                 .into(),
         };
     let new_path = new_manager.file_path().map(|p| p.to_path_buf());
-    holder.set(Some(new_manager));
-
-    // 清空转录与队列(错误状态一并复位);模型/思考级别/会话模式随新文件落
-    // 设置态 entry,保持新会话自描述
+    // P1-12(纵深防御):先 reset 再切换持久化 sink —— 若先 set 后 reset,
+    // busy 时 reset 失败会留下"转录尾段 append 进新文件、旧指针未切"的
+    // 半切换状态,重启 resume 静默丢内容
     session.agent().reset().map_err(|e| e.to_string())?;
+    holder.set(Some(new_manager));
     let snapshot = session.agent().state_snapshot();
     if let Some(model) = snapshot.model {
         session.set_model(model).await;

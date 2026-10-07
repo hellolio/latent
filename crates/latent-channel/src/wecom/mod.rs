@@ -9,7 +9,7 @@
 //!   `aibot_send_msg`(指定 chatid/chat_type,须用户先给机器人发过消息)——
 //!   gateway 出站统一走 `aibot_send_msg`;
 //! - 心跳:每 30s 一次 `ping`,超时服务端断开;
-//! - 单机器人同时仅一条长连接,新连接踢旧连接;断线自动重连。
+//! - 断线自动重连(瞬时故障退避重试;订阅被拒 = 凭据失效 → Failed 终止)。
 //!
 //! 频率限制:单会话 30 条/分钟(限速由平台侧 4xx 表达,通道层透传分类)。
 
@@ -35,6 +35,8 @@ use crate::types::{
 pub const DEFAULT_WS_ENDPOINT: &str = "wss://openws.work.weixin.qq.com";
 /// 心跳间隔(官方建议 30s)。
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+/// 单帧/单消息上限(与控制面统一;P1-2 前置到 WS 配置)。
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// 断线重连退避。
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
@@ -254,10 +256,21 @@ async fn connect_loop(state: Arc<WecomState>) {
 }
 
 /// 单次连接生命周期:握手 + 订阅 + 心跳 + 接收循环。
+///
+/// 错误分类(P1-6):DNS/TLS/服务端重启/订阅发送/应答超时/读解析失败都是
+/// **瞬时故障** → `DeliveryFailed`(connect_loop 视为可重试,退避重连);
+/// 仅 `errcode != 0`(凭据被拒)保留 `Startup`(Fatal,宿主介入不再重试)。
+/// 全部映射成 `Startup` 会让一次网络抖动把渠道永久打成 Failed。
 async fn establish(state: &Arc<WecomState>) -> Result<(), ChannelError> {
-    let (ws, _) = tokio_tungstenite::connect_async(&state.config.ws_endpoint)
-        .await
-        .map_err(|error| ChannelError::Startup(format!("wemos 连接失败: {error}")))?;
+    // P1-2:帧/消息上限前置(默认 ~64MiB 才轮到应用层);WebSocketConfig
+    // 是 #[non_exhaustive],跨 crate 只能 default + 字段赋值构造
+    let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    ws_config.max_message_size = Some(MAX_FRAME_BYTES);
+    ws_config.max_frame_size = Some(MAX_FRAME_BYTES);
+    let (ws, _) =
+        tokio_tungstenite::connect_async_with_config(&state.config.ws_endpoint, Some(ws_config), false)
+            .await
+            .map_err(|error| ChannelError::DeliveryFailed(format!("wecom 连接失败: {error}")))?;
     let (mut sender, mut receiver) = ws.split();
 
     // aibot_subscribe
@@ -273,20 +286,20 @@ async fn establish(state: &Arc<WecomState>) -> Result<(), ChannelError> {
     sender
         .send(WsMessage::text(subscribe.to_string()))
         .await
-        .map_err(|error| ChannelError::Startup(format!("订阅发送失败: {error}")))?;
+        .map_err(|error| ChannelError::DeliveryFailed(format!("订阅发送失败: {error}")))?;
 
-    // 等订阅应答(带超时;errcode 非 0 = 凭据失效 → Startup 错误)
+    // 等订阅应答(带超时;errcode 非 0 = 凭据失效 → Startup/Fatal)
     let ack = tokio::time::timeout(Duration::from_secs(15), receiver.next())
         .await
-        .map_err(|_| ChannelError::Startup("订阅应答超时".into()))?
-        .ok_or_else(|| ChannelError::Startup("连接在订阅应答前关闭".into()))?
-        .map_err(|error| ChannelError::Startup(format!("订阅应答读取失败: {error}")))?;
+        .map_err(|_| ChannelError::DeliveryFailed("订阅应答超时".into()))?
+        .ok_or_else(|| ChannelError::DeliveryFailed("连接在订阅应答前关闭".into()))?
+        .map_err(|error| ChannelError::DeliveryFailed(format!("订阅应答读取失败: {error}")))?;
     let ack_text = match ack {
         WsMessage::Text(text) => text.to_string(),
-        _ => return Err(ChannelError::Startup("订阅应答帧异常".into())),
+        _ => return Err(ChannelError::DeliveryFailed("订阅应答帧异常".into())),
     };
     let ack_value: serde_json::Value = serde_json::from_str(&ack_text)
-        .map_err(|error| ChannelError::Startup(format!("订阅应答解析失败: {error}")))?;
+        .map_err(|error| ChannelError::DeliveryFailed(format!("订阅应答解析失败: {error}")))?;
     let errcode = ack_value
         .pointer("/body/errcode")
         .or_else(|| ack_value.get("errcode"))

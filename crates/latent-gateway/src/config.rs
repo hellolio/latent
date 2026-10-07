@@ -182,6 +182,8 @@ pub struct QqChannelConfig {
     pub text_chunk_limit: usize,
     pub dm_policy: String,
     pub allow_from: Vec<String>,
+    /// WS 路径(NapCat 可配置;默认 /ws;非法值拒绝启动,P1-7)
+    pub path: String,
 }
 
 impl Default for QqChannelConfig {
@@ -194,6 +196,7 @@ impl Default for QqChannelConfig {
             text_chunk_limit: 2000,
             dm_policy: "pairing".into(),
             allow_from: Vec::new(),
+            path: "/ws".into(),
         }
     }
 }
@@ -208,6 +211,9 @@ pub struct WecomChannelConfig {
     pub text_chunk_limit: usize,
     pub dm_policy: String,
     pub allow_from: Vec<String>,
+    /// WS 长连接端点(默认官方;测试指向本地假服务器,P2-2 类型化)
+    pub ws_endpoint: String,
+    pub heartbeat_interval_secs: u64,
 }
 
 impl Default for WecomChannelConfig {
@@ -219,6 +225,8 @@ impl Default for WecomChannelConfig {
             text_chunk_limit: 2048,
             dm_policy: "pairing".into(),
             allow_from: Vec::new(),
+            ws_endpoint: "wss://openws.work.weixin.qq.com".into(),
+            heartbeat_interval_secs: 30,
         }
     }
 }
@@ -232,6 +240,10 @@ pub struct TelegramChannelConfig {
     pub text_chunk_limit: usize,
     pub dm_policy: String,
     pub allow_from: Vec<String>,
+    /// Bot API 端点(默认官方;测试指向本地假服务器,P2-2 类型化)
+    pub api_base: String,
+    /// getUpdates 长轮询秒数(上游同款默认 25)
+    pub poll_timeout_secs: u64,
 }
 
 impl Default for TelegramChannelConfig {
@@ -242,6 +254,8 @@ impl Default for TelegramChannelConfig {
             text_chunk_limit: 4000,
             dm_policy: "pairing".into(),
             allow_from: Vec::new(),
+            api_base: "https://api.telegram.org".into(),
+            poll_timeout_secs: 25,
         }
     }
 }
@@ -407,6 +421,17 @@ pub fn load_config_value(cwd: Option<&Path>, data_dir: Option<&Path>) -> (serde_
             Ok(value) => {
                 if is_project {
                     has_project = true;
+                    // P2-1:!shell 门只扫**项目文件自身的 Value 子树** ——
+                    // 扫合并后值会把"全局合法 !shell + 项目文件存在(哪怕
+                    // {})"误判成项目覆盖而拒绝启动
+                    if let Err(error) = reject_project_shell_sources(&value) {
+                        return (serde_json::json!({ "__invalid": error.to_string() }), true);
+                    }
+                    // P1-4(拍板项,显式警告不阻断):项目级 gateway.json 可
+                    // 覆盖安全敏感字段(auth token / owner 名单 / 群策略 /
+                    // 会话 scope),威胁面与被禁的 !shell 同级 —— 覆盖发生时
+                    // 列出字段,提示把敏感配置放进全局数据目录
+                    warn_project_sensitive_overrides(&value);
                 }
                 merged = merge_values(merged, value);
             }
@@ -414,6 +439,27 @@ pub fn load_config_value(cwd: Option<&Path>, data_dir: Option<&Path>) -> (serde_
         }
     }
     (merged, has_project)
+}
+
+/// P1-4:项目级覆盖安全敏感字段的显式警告。
+fn warn_project_sensitive_overrides(project: &serde_json::Value) {
+    const SENSITIVE: [&str; 4] = [
+        "/gateway/auth",
+        "/commands/ownerAllowFrom",
+        "/messages/groupChat",
+        "/session",
+    ];
+    let overridden: Vec<&str> = SENSITIVE
+        .into_iter()
+        .filter(|path| project.pointer(path).map(|node| !node.is_null()).unwrap_or(false))
+        .collect();
+    if !overridden.is_empty() {
+        eprintln!(
+            "[latent-gateway][warn] 项目级 .latent/gateway.json 覆盖了安全敏感配置: {}。\
+             恶意仓库可借 gateway 启动篡改这些字段,请确认来源可信或移入全局数据目录",
+            overridden.join(", ")
+        );
+    }
 }
 
 /// 解析 + 校验(入口:daemon 启动)。
@@ -460,9 +506,9 @@ fn reject_project_shell_sources(value: &serde_json::Value) -> Result<(), ConfigE
 
 /// 类型化解析 + 值校验 + 危险配置警告。
 pub fn validate(value: &serde_json::Value, has_project: bool) -> Result<GatewayConfig, ConfigError> {
-    if has_project {
-        reject_project_shell_sources(value)?;
-    }
+    // P2-1:项目级 !shell 门已移至 load_config_value(只扫项目文件自身);
+    // validate 收到的是合并后值,无法区分来源
+    let _ = has_project;
     let config: GatewayConfig = serde_json::from_value(value.clone())
         .map_err(|error| ConfigError::Parse(normalize_serde_error(&error.to_string())))?;
 
@@ -740,16 +786,52 @@ mod tests {
 
     #[test]
     fn project_shell_sources_are_rejected() {
+        // P2-1 后:门只扫项目文件自身的 Value(调用点在 load_config_value)
         let value = json!({
             "channels": { "qq": { "accessToken": "!cat /etc/passwd" } }
         });
-        let error = validate(&value, true).unwrap_err();
+        let error = reject_project_shell_sources(&value).unwrap_err();
         assert!(error.to_string().contains("!shell"), "{error}");
         // 全局配置允许 !shell(解析期不做凭据求值)
-        let value = json!({
-            "channels": { "qq": { "accessToken": "!cat /etc/passwd" } }
-        });
         assert!(validate(&value, false).is_ok());
+    }
+
+    /// P2-1 回归:全局合法 `!shell` + 项目文件存在(哪怕 {})不再误拒;
+    /// 项目文件自身带 `!shell` 仍拒绝启动。
+    #[test]
+    fn project_shell_gate_scans_project_file_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "latent-gw-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("global")).unwrap();
+        std::fs::create_dir_all(dir.join("project/.latent")).unwrap();
+        std::fs::write(
+            dir.join("global/gateway.json"),
+            r#"{"gateway":{"auth":{"mode":"token","token":"!cat /etc/passwd"}}}"#,
+        )
+        .unwrap();
+
+        // 项目文件存在但不含敏感键 → 不误拒(P2-1)
+        std::fs::write(dir.join("project/.latent/gateway.json"), "{}").unwrap();
+        assert!(
+            load_config(Some(&dir.join("project")), Some(&dir.join("global"))).is_ok(),
+            "全局 !shell + 项目 {{}} 不应被拒"
+        );
+
+        // 项目文件自身带 !shell → 拒绝启动
+        std::fs::write(
+            dir.join("project/.latent/gateway.json"),
+            r#"{"channels":{"telegram":{"botToken":"!evil"}}}"#,
+        )
+        .unwrap();
+        let error = load_config(Some(&dir.join("project")), Some(&dir.join("global"))).unwrap_err();
+        assert!(error.to_string().contains("!shell"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

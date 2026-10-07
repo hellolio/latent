@@ -244,3 +244,71 @@ async fn missing_token_refuses_to_start() {
         .unwrap_err();
     assert!(error.to_string().contains("botToken 必填"), "{error}");
 }
+
+/// P1-5:Bot API 实体 offset/length 是 UTF-16 code units —— mention 前
+/// 有中文/emoji 时按字节切片会错位,群里中文用户 @ 机器人必须仍判 to_me。
+#[tokio::test]
+async fn cjk_prefixed_mention_still_detects_to_me() {
+    let state = Arc::new(FakeBotState::default());
+    let api_base = spawn_fake_bot(state.clone()).await;
+    let channel = latent_channel::telegram::TelegramChannel::new();
+    channel
+        .apply_config(&serde_json::json!({
+            "botToken": "test-token", "apiBase": api_base, "pollTimeoutSecs": 0,
+        }))
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    ChannelPlugin::start(&channel, tx).await.unwrap();
+
+    // "你好 @latent_bot 帮忙":mention 的 UTF-16 offset = 3(你好=2 + 空格=1)
+    state
+        .updates
+        .lock()
+        .unwrap()
+        .push(serde_json::json!({
+            "update_id": 201,
+            "message": {
+                "message_id": 201,
+                "from": { "id": 1001, "first_name": "张三" },
+                "chat": { "id": 12345, "type": "group" },
+                "text": "你好 @latent_bot 帮忙",
+                "entities": [ { "type": "mention", "offset": 3, "length": 11 } ]
+            }
+        }));
+    let message = next_inbound(&mut rx).await;
+    assert!(message.to_me, "CJK 前缀的 @ 必须按 UTF-16 偏移命中");
+    assert!(message.has_at_segment());
+}
+
+/// P1-5:单个畸形实体(缺 offset/length)不得让整条消息归一化失败被丢弃。
+#[tokio::test]
+async fn malformed_entity_does_not_drop_message() {
+    let state = Arc::new(FakeBotState::default());
+    let api_base = spawn_fake_bot(state.clone()).await;
+    let channel = latent_channel::telegram::TelegramChannel::new();
+    channel
+        .apply_config(&serde_json::json!({
+            "botToken": "test-token", "apiBase": api_base, "pollTimeoutSecs": 0,
+        }))
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    ChannelPlugin::start(&channel, tx).await.unwrap();
+
+    state
+        .updates
+        .lock()
+        .unwrap()
+        .push(serde_json::json!({
+            "update_id": 202,
+            "message": {
+                "message_id": 202,
+                "from": { "id": 1002, "first_name": "李四" },
+                "chat": { "id": 12345, "type": "group" },
+                "text": "普通文本",
+                "entities": [ { "type": "mention" } ]
+            }
+        }));
+    let message = next_inbound(&mut rx).await;
+    assert_eq!(message.text, "普通文本", "畸形实体只跳过实体,不丢消息");
+    assert!(!message.to_me);
+}

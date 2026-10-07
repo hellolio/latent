@@ -453,6 +453,26 @@ impl AgentSession {
         self.agent.queue_depths()
     }
 
+    /// 续跑(P1-9):消费滞留在注入通道的 steering/follow_up。忙/闲竞态
+    /// 窗口(try_lock 失败 → 消息入队之间,活跃 run 恰好跨过最后一次
+    /// 收队)会把消息落在通道里没有任何活跃 run 去消费,滞留到下一条
+    /// 消息才被吞入 —— 对安静会话等于无回执丢失。返回 `Ok(None)` = 无
+    /// 滞留内容(或已在流式中,由活跃 run 消费)。
+    pub async fn continue_run(&self) -> Result<Option<RunStop>, CoreError> {
+        if self.agent.is_streaming() {
+            return Ok(None);
+        }
+        if self.agent.queue_depths() == (0, 0) {
+            return Ok(None);
+        }
+        match self.run_with_recovery(self.agent.continue_run()).await {
+            Ok(stop) => Ok(Some(stop)),
+            Err(CoreError::Agent(AgentError::NothingToContinue)) => Ok(None),
+            Err(CoreError::Agent(AgentError::AlreadyRunning)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn abort(&self) {
         self.agent.abort();
     }

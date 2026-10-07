@@ -76,7 +76,7 @@ pub async fn history(gateway: &Arc<Gateway>, params: &Value) -> Result<Value, St
         .iter()
         .rev()
         .filter_map(|entry| match entry {
-            latent_session::Entry::Message { id, message, .. } => {
+            latent_runtime::facade::Entry::Message { id, message, .. } => {
                 serde_json::to_value(message).ok().map(|value| {
                     json!({ "id": id, "message": value })
                 })

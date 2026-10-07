@@ -26,7 +26,7 @@ use latent_channel::debounce::{DebounceConfig, InboundDebouncer};
 use latent_channel::mention_gating::{resolve_mention, MentionConfig, MentionDecision};
 use latent_channel::plugin::ChannelHandle;
 use latent_channel::types::{ChatType, InboundMessage, OutboundMessage};
-use latent_core::SessionMode;
+use latent_runtime::facade::SessionMode;
 use latent_runtime::assembly::switch_new_session;
 
 use crate::agents::{make_reply_target, ChatSession, ChatSessionRegistry, SessionFactory};
@@ -44,6 +44,21 @@ use queue::{OverflowAction, QueueSettings};
 const DEDUPE_TTL_MS: u64 = 10 * 60 * 1000;
 /// 去重表容量上限(防泄漏)。
 const DEDUPE_MAX_ENTRIES: usize = 4096;
+
+/// typing 配置单一事实来源(P2-14):Gateway 与 SessionFactory 必须用
+/// 同一份 —— 泵补开的 typing 走 factory 的配置,分叉会让两个旋钮各管各的。
+/// `typingIntervalSeconds × 500ms`:默认 6 → 3000ms(上游 keepalive)。
+pub fn build_typing_config(
+    config: &GatewayConfig,
+) -> latent_channel::typing::TypingConfig {
+    latent_channel::typing::TypingConfig {
+        mode: latent_channel::typing::TypingMode::parse(Some(
+            &config.agents.defaults.typing_mode,
+        )),
+        interval: Duration::from_millis(config.agents.defaults.typing_interval_seconds * 500),
+        ..latent_channel::typing::TypingConfig::default()
+    }
+}
 
 /// 聊天网关引擎(daemon 全局一份)。
 pub struct Gateway {
@@ -66,6 +81,8 @@ pub struct Gateway {
     group_scope: GroupScope,
     /// /activation 按群覆盖(session key → require_mention)
     activation_overrides: Mutex<HashMap<String, bool>>,
+    /// mentionPatterns 预编译基座(P2-9;逐条消息 clone 后覆盖动态字段)
+    mention_base: MentionConfig,
     pub started_at: std::time::Instant,
 }
 
@@ -81,14 +98,6 @@ impl Gateway {
         events: tokio::sync::broadcast::Sender<crate::control::events::GatewayEvent>,
     ) -> Arc<Self> {
         let queue = &config.messages.queue;
-        let typing_mode =
-            latent_channel::typing::TypingMode::parse(Some(&config.agents.defaults.typing_mode));
-        let typing_config = latent_channel::typing::TypingConfig {
-            mode: typing_mode,
-            // typingIntervalSeconds × 500ms:默认 6 → 3000ms(上游 keepalive)
-            interval: Duration::from_millis(config.agents.defaults.typing_interval_seconds * 500),
-            ..latent_channel::typing::TypingConfig::default()
-        };
         let queue_settings = QueueSettings {
             mode: QueueMode::parse(&queue.mode).unwrap_or_default(),
             debounce_ms: queue.debounce_ms,
@@ -99,9 +108,18 @@ impl Gateway {
                 _ => DropPolicy::Summarize,
             },
         };
+        // P2-14:typing 配置单一事实来源(与 SessionFactory 共用 build_typing_config)
+        let typing_config = build_typing_config(&config);
         Arc::new(Gateway {
             dm_scope: DmScope::parse(Some(&config.session.dm_scope)),
             group_scope: GroupScope::parse(Some(&config.session.group_scope)),
+            // P2-9:mentionPatterns 构造期预编译一次,逐条群消息只覆盖动态字段
+            mention_base: MentionConfig::new(
+                true,
+                config.messages.group_chat.mention_patterns.clone(),
+                Vec::new(),
+                None,
+            ),
             config,
             channels,
             registry: Arc::new(ChatSessionRegistry::new(factory)),
@@ -192,21 +210,34 @@ impl Gateway {
                     return;
                 }
             }
-            ChatType::Private => match self.pairing.decide(&msg, now) {
-                DmDecision::Allow => {}
-                DmDecision::PairingCode(text) => {
-                    let _ = handle
-                        .send(&msg.chat, OutboundMessage::text(text))
-                        .await;
-                    return;
+            ChatType::Private => {
+                // owner 是信任锚(§5.2 审批应答权仅 owner):不受 dmPolicy 门禁
+                // —— 否则未配对 DM 的 owner 回复 /approve 会被配对流程吃掉,
+                // 审批永远无法传达到 agent(回归:confirm 审批链路)。
+                let owner = commands::is_owner(
+                    msg.platform,
+                    &msg.sender.user_id,
+                    &self.config.commands.owner_allow_from,
+                );
+                if owner {
+                } else {
+                    match self.pairing.decide(&msg, now) {
+                        DmDecision::Allow => {}
+                        DmDecision::PairingCode(text) => {
+                            let _ = handle
+                                .send(&msg.chat, OutboundMessage::text(text))
+                                .await;
+                            return;
+                        }
+                        DmDecision::Reject(text) => {
+                            let _ = handle
+                                .send(&msg.chat, OutboundMessage::text(text))
+                                .await;
+                            return;
+                        }
+                    }
                 }
-                DmDecision::Reject(text) => {
-                    let _ = handle
-                        .send(&msg.chat, OutboundMessage::text(text))
-                        .await;
-                    return;
-                }
-            },
+            }
         }
         self.emit(crate::control::events::GatewayEvent::Chat {
             platform: msg.platform.to_string(),
@@ -217,6 +248,11 @@ impl Gateway {
         });
 
         // 3. 命令拦截(未识别 /xxx → 本地警告不发给模型)
+        let owner = commands::is_owner(
+            msg.platform,
+            &msg.sender.user_id,
+            &self.config.commands.owner_allow_from,
+        );
         match commands::parse(&msg.text) {
             Some(command) => {
                 if let Some(reply) = self.handle_command(&msg, command).await {
@@ -237,20 +273,52 @@ impl Gateway {
                     .await;
                 return;
             }
-            None if msg.text.trim_start().starts_with('/') => {
-                // 形如命令但不在命令表:本地警告
-                let _ = handle
-                    .send(
-                        &msg.chat,
-                        OutboundMessage::text(format!(
-                            "未知命令: {}(用 /help 查看命令清单)",
-                            msg.text.split_whitespace().next().unwrap_or("")
-                        )),
-                    )
-                    .await;
-                return;
+            None => {
+                let trimmed = msg.text.trim();
+                // 裸 decision 应答(用户实测:直接回复 allow-once 等):
+                // owner 回复单个决策词 → 应答**最新**未决审批;无待审时
+                // 回提示(不进模型,避免"以为同意了→重试→再弹审批"循环)。
+                // 非 owner 不劫持,按普通消息进管线
+                if let Some(decision) = commands::parse_decision(&trimmed.to_ascii_lowercase()) {
+                    if owner {
+                        let reply = match self.approval.latest_pending_id().await {
+                            Some(id) => {
+                                self.approval.resolve(id, decision).await;
+                                format!("已应用审批 #{id}(最新待审)")
+                            }
+                            None => "当前没有待审的审批(可能已超时或已处理)".to_string(),
+                        };
+                        let _ = handle.send(&msg.chat, OutboundMessage::text(reply)).await;
+                        return;
+                    }
+                }
+                // 裸 /approve(缺 id/decision):回待审列表 + 用法,不再当
+                // "未知命令"吞掉
+                let first_word = trimmed
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches('/')
+                    .to_ascii_lowercase();
+                if first_word == "approve" {
+                    let reply = self.approval_pending_text().await;
+                    let _ = handle.send(&msg.chat, OutboundMessage::text(reply)).await;
+                    return;
+                }
+                if trimmed.starts_with('/') {
+                    // 形如命令但不在命令表:本地警告
+                    let _ = handle
+                        .send(
+                            &msg.chat,
+                            OutboundMessage::text(format!(
+                                "未知命令: {}(用 /help 查看命令清单)",
+                                trimmed.split_whitespace().next().unwrap_or("")
+                            )),
+                        )
+                        .await;
+                    return;
+                }
             }
-            None => {}
         }
 
         // 4. 防抖合并窗口
@@ -281,11 +349,18 @@ impl Gateway {
                         let flushed: Vec<InboundMessage> =
                             self.debouncer.lock().unwrap().flush_due(now_ms());
                         for message in flushed {
-                            let Some((handle, chunk_limit)) = self.reply_channel(&message).await
+                            // 冲刷出的消息逐条 spawn(P1-10):单会话长 run
+                            // 不得阻塞其他会话的到期冲刷;同会话顺序性由
+                            // run_lock 串行保证
+                            let Some((handle, chunk_limit)) =
+                                self.reply_channel(&message).await
                             else {
                                 continue;
                             };
-                            self.run_message(message, &handle, chunk_limit).await;
+                            let gateway = self.clone();
+                            tokio::spawn(async move {
+                                gateway.run_message(message, &handle, chunk_limit).await;
+                            });
                         }
                     } else {
                         let _ = tokio::time::timeout(
@@ -392,7 +467,10 @@ impl Gateway {
         // typing 上下文供 pump 补开(未 @ 群聊首个回复活动)
         *session.typing_ctx.lock().await = Some((handle.clone(), msg.chat.clone()));
 
-        let _ = session.built.session.prompt(text).await;
+        // P2-12:prompt 失败至少留诊断,不静默吞掉(collect 冲刷分支同)
+        if let Err(error) = session.built.session.prompt(text).await {
+            eprintln!("[latent-gateway] run 启动失败: {error}");
+        }
         session.built.session.wait_idle().await;
 
         // collect 缓存冲刷:合并文本作为新 run(仍在 run_lock 内)
@@ -404,10 +482,29 @@ impl Gateway {
                 Some(notice) => format!("{notice}\n\n{merged}"),
                 None => merged,
             };
-            let _ = session.built.session.prompt(text).await;
+            if let Err(error) = session.built.session.prompt(text).await {
+                eprintln!("[latent-gateway] collect 冲刷 run 失败: {error}");
+            }
             session.built.session.wait_idle().await;
         }
         session.pending.lock().await.reset_drop_counter();
+
+        // P1-9:收尾复查滞留注入 —— 忙/闲竞态窗口(队列处置的 steer 在
+        // run 最后一次收队之后落通道)会把消息滞留到下一条消息才被吞入,
+        // 对安静会话等于无回执丢失;此处续跑消化
+        for _ in 0..5 {
+            if session.built.session.queue_depths() == (0, 0) {
+                break;
+            }
+            match session.built.session.continue_run().await {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(error) => {
+                    eprintln!("[latent-gateway] 滞留消息续跑失败: {error}");
+                    break;
+                }
+            }
+        }
 
         // typing 停止 + 上下文清理
         if let Some(guard) = session.typing.lock().await.take() {
@@ -429,7 +526,7 @@ impl Gateway {
             QueueMode::Steer => {
                 let (steering, follow_up) = session.built.session.queue_depths();
                 if steering + follow_up >= settings.cap {
-                    self.handle_queue_overflow(session, msg, handle, &text).await;
+                    self.handle_queue_overflow(session, msg, handle).await;
                 } else {
                     session.built.session.steer(text).await;
                 }
@@ -437,7 +534,7 @@ impl Gateway {
             QueueMode::Followup => {
                 let (steering, follow_up) = session.built.session.queue_depths();
                 if steering + follow_up >= settings.cap {
-                    self.handle_queue_overflow(session, msg, handle, &text).await;
+                    self.handle_queue_overflow(session, msg, handle).await;
                 } else {
                     session.built.session.follow_up(text).await;
                 }
@@ -482,16 +579,15 @@ impl Gateway {
 
     /// steer/followup 的 cap 溢出:latent 队列是会话内部态,无法回退删除
     /// —— 近似处置(偏离 3 记录):new → 拒新并回执;old → 丢新;
-    /// summarize → 丢新 + 合成提示回执。
+    /// summarize → 丢新 + 合成提示回执。回执数值用**会话级**设置
+    /// (P2-13:/queue 可覆盖 cap,回执与判溢出的 cap 必须同源)。
     async fn handle_queue_overflow(
         self: &Arc<Self>,
         session: &Arc<ChatSession>,
         msg: &InboundMessage,
         handle: &ChannelHandle,
-        text: &str,
     ) {
-        let _ = session;
-        let settings = self.queue_settings;
+        let settings = session.pending.lock().await.settings();
         match settings.drop_policy {
             DropPolicy::New => {
                 let _ = handle
@@ -518,7 +614,6 @@ impl Gateway {
                     .await;
             }
         }
-        let _ = text;
     }
 
     // ------------------------------------------------------------------
@@ -538,6 +633,8 @@ impl Gateway {
     }
 
     /// @判定(requireMention + activation 覆盖 + mentionPatterns)。
+    /// patterns 经 `mention_base` 构造期预编译(P2-9);逐条消息只覆盖
+    /// 动态字段(require_mention 的 /activation 覆盖 + 渠道 self_id)。
     async fn mentioned(&self, msg: &InboundMessage) -> bool {
         let group_chat = &self.config.messages.group_chat;
         let key = build_session_key("main", &msg.chat, "", self.dm_scope, self.group_scope);
@@ -547,12 +644,9 @@ impl Gateway {
             .unwrap()
             .get(&key)
             .unwrap_or(&group_chat.require_mention);
-        let cfg = MentionConfig {
-            require_mention,
-            mention_patterns: group_chat.mention_patterns.clone(),
-            self_ids: self.channels.account_ids(msg.platform).await,
-            identity_name: None,
-        };
+        let mut cfg = self.mention_base.clone();
+        cfg.require_mention = require_mention;
+        cfg.self_ids = self.channels.account_ids(msg.platform).await;
         resolve_mention(msg, &cfg) == MentionDecision::ToMe
     }
 
@@ -581,9 +675,13 @@ impl Gateway {
             commands::is_owner(msg.platform, &msg.sender.user_id, &self.config.commands.owner_allow_from);
         let is_group = msg.chat.chat_type == ChatType::Group;
         // 权限天花板(§5.1):full-access 切换恒 owner;群聊中会话级命令
-        // 一律 owner(§8 偏离 11,群会话全群共享)
-        let full_access_requested =
-            matches!(&command, ChatCommand::Mode { arg: Some(arg) } if arg.trim() == "full-access");
+        // 一律 owner(§8 偏离 11,群会话全群共享)。full-access 判定走与执行层
+        // 同一个 SessionMode::parse(P0-1:字面串精确比对会被
+        // full_access/FULL-ACCESS 等别名绕过)
+        let full_access_requested = matches!(
+            &command,
+            ChatCommand::Mode { arg: Some(arg) } if SessionMode::parse(arg.trim()) == Some(SessionMode::FullAccess)
+        );
         if ((is_group && command.owner_only_in_group()) || full_access_requested) && !owner {
             return Some(commands::PERMISSION_DENIED_TEXT.to_string());
         }
@@ -604,7 +702,12 @@ impl Gateway {
                 if self.approval.resolve(id, decision).await {
                     Some(format!("已应用审批 #{id}"))
                 } else {
-                    Some(format!("没有待审的审批 #{id}"))
+                    // 过期/不存在的 id 是常见误操作(超时重试后 id 会变):
+                    // 附当前待审与裸词应答提示,别让用户对着旧 id 反复空答
+                    let pending = self.approval_pending_text().await;
+                    Some(format!(
+                        "没有待审的审批 #{id}(可能已超时或已处理)\n{pending}"
+                    ))
                 }
             }
             command if command.needs_session() => {
@@ -648,8 +751,17 @@ impl Gateway {
         msg: &InboundMessage,
     ) -> Option<String> {
         let agent_session = session.built.session.clone();
+        // 忙时预检(P1-12):switch_new_session/compact 的文档契约是"流式
+        // 期间调用方须先行拒绝" —— busy 时切换会半切换持久化(state.json 与
+        // 实际会话文件脱钩),忙时一律拒绝
+        let busy = agent_session.agent().state_snapshot().is_streaming;
         match command {
             ChatCommand::New | ChatCommand::Reset => {
+                if busy {
+                    return Some(
+                        "会话正在执行任务,暂不能新建(可先发 /stop 中止)".into(),
+                    );
+                }
                 // 后台 subagent 全部中止(会话废弃)
                 if let Some(registry) = &session.built.subagent_registry {
                     registry.abort_all();
@@ -673,10 +785,15 @@ impl Gateway {
                     Err(error) => Some(format!("新建会话失败: {error}")),
                 }
             }
-            ChatCommand::Compact { .. } => match agent_session.compact().await {
-                Ok(tokens) => Some(format!("已压缩上下文(保留约 {tokens} tokens)")),
-                Err(error) => Some(format!("压缩失败: {error}")),
-            },
+            ChatCommand::Compact { .. } => {
+                if busy {
+                    return Some("会话正在执行任务,压缩请稍后再试".into());
+                }
+                match agent_session.compact().await {
+                    Ok(tokens) => Some(format!("已压缩上下文(保留约 {tokens} tokens)")),
+                    Err(error) => Some(format!("压缩失败: {error}")),
+                }
+            }
             ChatCommand::Stop => {
                 agent_session.abort();
                 Some("已中止当前任务".into())
@@ -732,6 +849,17 @@ impl Gateway {
                 let Some(mode) = SessionMode::parse(&arg) else {
                     return Some("用法: /mode <plan|confirm|full-access>".into());
                 };
+                // 纵深防御(P0-1):full-access 在解析后的枚举上再校验一次 owner,
+                // 门与执行不可能漂移
+                if mode == SessionMode::FullAccess
+                    && !commands::is_owner(
+                        msg.platform,
+                        &msg.sender.user_id,
+                        &self.config.commands.owner_allow_from,
+                    )
+                {
+                    return Some(commands::PERMISSION_DENIED_TEXT.to_string());
+                }
                 match agent_session.set_mode(mode).await {
                     Ok(()) => Some(format!("会话模式已切换: {arg}")),
                     Err(error) => Some(format!("模式切换失败: {error}")),
@@ -776,6 +904,26 @@ impl Gateway {
         }
     }
 
+    /// 待审审批摘要文本(裸 /approve 与过期 id 提示共用)。
+    async fn approval_pending_text(&self) -> String {
+        let pending = self.approval.pending_summary().await;
+        if pending.is_empty() {
+            "当前没有待审的审批。有新请求时直接回复 allow-once / allow-always / deny 即可应答"
+                .to_string()
+        } else {
+            let list = pending
+                .iter()
+                .map(|(id, tool)| format!("#{id} [{tool}]"))
+                .collect::<Vec<_>>()
+                .join("、");
+            format!(
+                "当前待审: {list}\n\
+                 应答方式: /approve <id> <allow-once|allow-always|deny>,\
+                 或直接回复 allow-once / allow-always / deny 应答最新一条"
+            )
+        }
+    }
+
     /// 控制面 chat.send 注入(§4.12):**sender 身份固定 operator**
     /// (params 无 sender 字段;不匹配 ownerAllowFrom、不受 dmPolicy 放行)。
     /// sessionKey 直指目标会话;带幂等键(进程内 Map + 过期)。
@@ -799,8 +947,24 @@ impl Gateway {
         let outcome = match lock_result {
             Ok(_guard) => {
                 session.dispatcher.set_target_control_plane().await;
-                let _ = session.built.session.prompt(text).await;
+                if let Err(error) = session.built.session.prompt(text).await {
+                    eprintln!("[latent-gateway] chat.send run 启动失败: {error}");
+                }
                 session.built.session.wait_idle().await;
+                // P1-9:同 execute_turn,复查滞留注入并续跑
+                for _ in 0..5 {
+                    if session.built.session.queue_depths() == (0, 0) {
+                        break;
+                    }
+                    match session.built.session.continue_run().await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(error) => {
+                            eprintln!("[latent-gateway] 滞留消息续跑失败: {error}");
+                            break;
+                        }
+                    }
+                }
                 "started".to_string()
             }
             Err(_) => {
@@ -840,12 +1004,12 @@ impl Gateway {
         )
     }
 
-    fn resolve_model(&self, spec: &str) -> Result<latent_ai::Model, String> {
+    fn resolve_model(&self, spec: &str) -> Result<latent_runtime::facade::Model, String> {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let dir = latent_runtime::bootstrap::dirs_home()
-            .and_then(|home| latent_core::latent_dir(Some(&home)));
+            .and_then(|home| latent_runtime::facade::latent_dir(Some(&home)));
         let resolver =
-            latent_core::create_model_resolver_from_config(Some(&cwd), dir.as_deref());
+            latent_runtime::facade::create_model_resolver_from_config(Some(&cwd), dir.as_deref());
         resolver.resolve(spec)
     }
 }

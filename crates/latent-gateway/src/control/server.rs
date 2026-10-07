@@ -82,7 +82,11 @@ async fn ws_handler(
     State(state): State<Arc<ControlState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, peer.ip()))
+    // P1-2:帧/消息上限前置到 WS 升级(应用层检查保留作双保险)——
+    // 否则整帧先被 axum 缓冲(默认上限 ~64MiB)才轮到应用层断连
+    ws.max_message_size(MAX_FRAME_BYTES)
+        .max_frame_size(MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state, peer.ip()))
 }
 
 /// 连接处理:握手(首帧 connect 强制)→ 请求循环 + 事件转发。

@@ -409,6 +409,72 @@ async fn group_session_commands_are_owner_only() {
     );
 }
 
+// P0-1:full-access 权限天花板按语义判定 —— 别名拼写(full_access /
+// FULL-ACCESS / fullaccess)不得绕过 owner 门
+#[tokio::test]
+async fn full_access_mode_aliases_are_owner_only() {
+    let harness = build_harness(
+        vec![
+            ScriptedTurn::text(&test_model(), "你好"),
+            ScriptedTurn::text(&test_model(), "owner 的回复"),
+        ],
+        default_config(),
+    )
+    .await;
+    // 两个用户各建一个私聊会话(dmScope=per-channel-peer,按 user 分会话)
+    harness.gateway.dispatch_inbound(dm("u2", "m-0", "你好")).await;
+    assert!(wait_for_reply_containing(&harness, "你好").await);
+    harness
+        .gateway
+        .dispatch_inbound(dm("owner1", "m-0b", "hi"))
+        .await;
+    assert!(wait_for_reply_containing(&harness, "owner 的回复").await);
+
+    let denials = |harness: &TestHarness| -> usize {
+        harness
+            .mock
+            .sent()
+            .iter()
+            .filter(|(_, outbound)| {
+                matches!(
+                    &outbound.segments[0],
+                    latent_channel::types::Segment::Text(text) if text.contains("该命令仅 owner 可用")
+                )
+            })
+            .count()
+    };
+
+    // 非 owner:三种 full-access 拼写全部拒绝
+    for (index, spelling) in ["full_access", "FULL-ACCESS", "fullaccess"].iter().enumerate() {
+        harness
+            .gateway
+            .dispatch_inbound(dm("u2", &format!("m-1{index}"), &format!("/mode {spelling}")))
+            .await;
+    }
+    for _ in 0..1000 {
+        if denials(&harness) >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(denials(&harness), 3, "别名拼写必须被权限门拦下(P0-1)");
+    // 且模式未被切换(默认 Plan)
+    harness.gateway.dispatch_inbound(dm("u2", "m-2", "/mode")).await;
+    assert!(wait_for_reply_containing(&harness, "当前模式: Plan").await);
+
+    // owner:三种拼写全部成功
+    for (index, spelling) in ["full_access", "FULL-ACCESS", "fullaccess"].iter().enumerate() {
+        harness
+            .gateway
+            .dispatch_inbound(dm("owner1", &format!("m-2{index}"), &format!("/mode {spelling}")))
+            .await;
+        assert!(
+            wait_for_reply_containing(&harness, "会话模式已切换").await,
+            "owner 拼写 {spelling} 应切换成功"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 四模式队列
 // ---------------------------------------------------------------------------
@@ -537,6 +603,74 @@ async fn queue_mode_interrupt_aborts_and_reprompts() {
     let _ = harness;
 }
 
+/// P1-12:run 进行中 `/new` 必须被拒 —— busy 半切换会让转录尾段 append
+/// 进新文件而 state.json 仍记旧文件,重启 resume 静默丢内容。
+#[tokio::test]
+async fn new_session_rejected_while_busy() {
+    let (harness, gateway, _chat) = build_busy_session(default_config()).await;
+    gateway.dispatch_inbound(dm("u1", "n-1", "/new")).await;
+    assert!(
+        wait_for_reply_containing(&harness, "暂不能新建").await,
+        "忙时 /new 应被拒绝"
+    );
+    // /compact 同样预检
+    gateway.dispatch_inbound(dm("u1", "n-2", "/compact")).await;
+    assert!(
+        wait_for_reply_containing(&harness, "压缩请稍后再试").await,
+        "忙时 /compact 应被拒绝"
+    );
+    let _ = harness;
+}
+
+/// P1-10:防抖冲刷循环不得被单会话长 run 队头阻塞 —— 会话 A 的 run
+/// 进行中,会话 B 到期的防抖消息应能独立得到回复。
+#[tokio::test]
+async fn debounce_flush_not_blocked_by_long_run() {
+    let config = serde_json::json!({
+        "channels": { "mock": { "dmPolicy": "open", "allowFrom": ["*"] } },
+        "commands": { "ownerAllowFrom": ["mock:owner1"] },
+        "messages": { "queue": { "debounceMs": 200 }, "groupChat": {
+            "requireMention": true, "groupPolicy": "allowlist", "groupAllowFrom": ["mock:group1"] } }
+    });
+    let harness = build_harness(
+        vec![
+            ScriptedTurn::text(&test_model(), "A 的慢回复").with_delay(1500),
+            ScriptedTurn::text(&test_model(), "B 的快回复"),
+        ],
+        config,
+    )
+    .await;
+    // A:进防抖缓冲,200ms 后冲刷 → 长 run(1.5s)占住该会话
+    harness.gateway.dispatch_inbound(dm("u1", "f-1", "A 的消息")).await;
+    // B:250ms 后到达(此时 A 的 run 已启动并占住冲刷循环的时间片)
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    harness.gateway.dispatch_inbound(dm("u2", "f-2", "B 的消息")).await;
+    // B 的回复必须在 A 的 run 结束(1.5s)之前到达 —— 内联冲刷(修复前)
+    // 会让 B 滞留到 A 结束后
+    let deadline = std::time::Instant::now() + Duration::from_millis(1200);
+    let mut b_replied = false;
+    while std::time::Instant::now() < deadline {
+        if harness
+            .mock
+            .sent()
+            .iter()
+            .any(|(chat, outbound)| {
+                chat.conversation_id == "u2"
+                    && matches!(
+                        &outbound.segments[0],
+                        latent_channel::types::Segment::Text(text) if text.contains("B 的快回复")
+                    )
+            })
+        {
+            b_replied = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(b_replied, "会话 B 的防抖冲刷不得被会话 A 的长 run 阻塞");
+    let _ = harness;
+}
+
 #[tokio::test]
 async fn queue_cap_overflow_drop_new_rejects() {
     let config = serde_json::json!({
@@ -614,7 +748,7 @@ async fn approval_routes_to_owner_and_back() {
     });
     // settings 会话模式 Confirm:写命令(touch)触发人审
     let settings = latent_runtime::assembly::SessionSettings {
-        session_mode: latent_core::SessionMode::Confirm,
+        session_mode: latent_runtime::facade::SessionMode::Confirm,
         ..Default::default()
     };
     let toolcall_turn = ScriptedTurn::new(latent_ai::assistant_message(
@@ -720,6 +854,217 @@ async fn approve_command_is_owner_only() {
         .await;
     let texts = wait_for_text(&harness.mock, 1).await;
     assert_eq!(texts[0], "该命令仅 owner 可用");
+}
+
+// ---------------------------------------------------------------------------
+// 审批应答的人体工学(用户实测回归):裸 decision 词应答最新待审
+// ---------------------------------------------------------------------------
+
+/// 审批场景公共装配:u1 触发 confirm 审批,审批通道指向 owner1 私聊。
+async fn build_approval_harness(extra_turns: Vec<ScriptedTurn>) -> TestHarness {
+    let config = serde_json::json!({
+        "channels": { "mock": { "dmPolicy": "open", "allowFrom": ["*"] } },
+        "commands": { "ownerAllowFrom": ["mock:owner1"] },
+        "messages": { "queue": { "debounceMs": 0 }, "groupChat": {
+            "requireMention": true, "groupPolicy": "allowlist", "groupAllowFrom": ["mock:group1"] } }
+    });
+    let settings = latent_runtime::assembly::SessionSettings {
+        session_mode: latent_runtime::facade::SessionMode::Confirm,
+        ..Default::default()
+    };
+    let toolcall_turn = ScriptedTurn::new(latent_ai::assistant_message(
+        &test_model(),
+        vec![latent_ai::ContentBlock::ToolCall {
+            id: "call-1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "touch /tmp/latent-gw-ap-test"}),
+        }],
+        latent_ai::StopReason::ToolUse,
+    ));
+    let mut turns = vec![toolcall_turn, ScriptedTurn::text(&test_model(), "工具跑完了")];
+    turns.extend(extra_turns);
+    let harness = build_harness_full(
+        turns,
+        config,
+        Arc::new(StateStore::in_memory()),
+        Some(settings),
+    )
+    .await;
+    harness
+        .gateway
+        .approval
+        .set_transport(ApprovalTransport {
+            handle: harness.mock_handle.clone(),
+            chat: ChatRef::private("mock", "owner1"),
+        })
+        .await;
+    harness
+}
+
+/// 等 owner 收到审批请求并返回自增 id。
+async fn wait_for_approval_request(harness: &TestHarness) -> u64 {
+    let mut approval_id: Option<u64> = None;
+    for _ in 0..1000 {
+        for (chat, outbound) in harness.mock.sent() {
+            if chat.conversation_id == "owner1" {
+                if let latent_channel::types::Segment::Text(text) = &outbound.segments[0] {
+                    if text.contains("需要批准") {
+                        for token in text.split_whitespace() {
+                            if let Ok(id) = token.parse::<u64>() {
+                                approval_id = Some(id);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if approval_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    approval_id.expect("owner 应收到审批消息(含自增 id)")
+}
+
+/// 用户实测回归:owner 直接回复裸词 `allow-once`(不带 /approve 前缀、
+/// 不带 id)→ 应答**最新**未决审批,工具执行。
+#[tokio::test]
+async fn bare_decision_reply_resolves_latest_approval() {
+    let harness = build_approval_harness(vec![]).await;
+    let gateway = harness.gateway.clone();
+    let run = tokio::spawn(async move {
+        gateway
+            .dispatch_inbound(dm("u1", "b-1", "帮我建个文件"))
+            .await;
+    });
+    let approval_id = wait_for_approval_request(&harness).await;
+    assert!(harness.gateway.approval.pending_ids().await.contains(&approval_id));
+
+    // 裸词应答(修复前:进防抖→steer,永远到不了审批 oneshot,120s 超时 Deny)
+    harness
+        .gateway
+        .dispatch_inbound(dm("owner1", "b-2", "allow-once"))
+        .await;
+    run.await.unwrap();
+
+    let mut user_reply = false;
+    for _ in 0..500 {
+        for (chat, outbound) in harness.mock.sent() {
+            if chat.conversation_id == "u1" {
+                if let latent_channel::types::Segment::Text(text) = &outbound.segments[0] {
+                    if text.contains("工具跑完了") {
+                        user_reply = true;
+                    }
+                }
+            }
+        }
+        if user_reply {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(user_reply, "裸词应答后工具应执行并回终稿");
+}
+
+/// 非 owner 的裸 decision 词不得劫持 —— 按普通消息进模型管线。
+#[tokio::test]
+async fn bare_decision_word_not_hijacked_for_non_owner() {
+    let config = serde_json::json!({
+        "channels": { "mock": { "dmPolicy": "open", "allowFrom": ["*"] } },
+        "commands": { "ownerAllowFrom": ["mock:owner1"] },
+        "messages": { "queue": { "debounceMs": 0 }, "groupChat": {
+            "requireMention": true, "groupPolicy": "allowlist", "groupAllowFrom": ["mock:group1"] } }
+    });
+    let harness = build_harness_full(
+        // 独立装配:首 turn 即文本回复(ScriptedProvider 队列跨会话共享,
+        // 不能复用带 toolcall 的公共装配)
+        vec![ScriptedTurn::text(&test_model(), "普通回复")],
+        config,
+        Arc::new(StateStore::in_memory()),
+        Some(latent_runtime::assembly::SessionSettings {
+            session_mode: latent_runtime::facade::SessionMode::Confirm,
+            ..Default::default()
+        }),
+    )
+    .await;
+    harness
+        .gateway
+        .dispatch_inbound(dm("u1", "c-1", "deny"))
+        .await;
+    let texts = wait_for_text(&harness.mock, 1).await;
+    assert!(
+        texts.iter().any(|t| t.contains("普通回复")),
+        "非 owner 的裸 decision 词应进模型管线: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("已应用审批") || t.contains("没有待审")),
+        "非 owner 不应触发审批应答: {texts:?}"
+    );
+}
+
+/// 裸 `/approve`(缺参数)回待审列表 + 用法;过期 id 附当前待审提示。
+#[tokio::test]
+async fn bare_approve_and_stale_id_show_pending_summary() {
+    let harness = build_approval_harness(vec![ScriptedTurn::text(&test_model(), "工具跑完了")])
+        .await;
+    let gateway = harness.gateway.clone();
+    let run = tokio::spawn(async move {
+        gateway
+            .dispatch_inbound(dm("u1", "d-1", "帮我建个文件"))
+            .await;
+    });
+    let approval_id = wait_for_approval_request(&harness).await;
+
+    // 裸 /approve → 待审列表(含工具名)
+    harness
+        .gateway
+        .dispatch_inbound(dm("owner1", "d-2", "/approve"))
+        .await;
+    let texts = wait_for_text(&harness.mock, 1).await;
+    assert!(
+        texts.iter().any(|t| t.contains(&format!("#{approval_id} [bash]"))),
+        "裸 /approve 应显示待审列表: {texts:?}"
+    );
+
+    // 过期 id → 提示 + 当前待审
+    harness
+        .gateway
+        .dispatch_inbound(dm("owner1", "d-3", "/approve 999 allow-once"))
+        .await;
+    let texts = wait_for_text(&harness.mock, 2).await;
+    assert!(
+        texts.iter().any(|t| t.contains("没有待审的审批 #999")),
+        "过期 id 应有明确提示: {texts:?}"
+    );
+
+    // 正确 id 仍可应答
+    harness
+        .gateway
+        .dispatch_inbound(dm("owner1", "d-4", &format!("/approve {approval_id} allow-once")))
+        .await;
+    run.await.unwrap();
+}
+
+/// owner 回复 decision 词但无待审 → 明确提示,不进模型(避免模型把
+/// "allow-once" 当作用户同意再次发起命令,形成重试循环)。
+#[tokio::test]
+async fn owner_decision_word_without_pending_gets_notice() {
+    let harness = build_approval_harness(vec![ScriptedTurn::text(&test_model(), "不该出现")])
+        .await;
+    harness
+        .gateway
+        .dispatch_inbound(dm("owner1", "e-1", "deny"))
+        .await;
+    let texts = wait_for_text(&harness.mock, 1).await;
+    assert!(
+        texts.iter().any(|t| t.contains("当前没有待审的审批")),
+        "无待审时 decision 词应回提示: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("不该出现")),
+        "decision 词不应进模型管线: {texts:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

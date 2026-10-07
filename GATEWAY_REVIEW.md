@@ -6,6 +6,21 @@
 
 ---
 
+## 修复记录（2026-10-08）
+
+**已修：P0 全部 + P1 全部 + P2-1/2/3/4/5/6/9/12/13/14/16/17。** `cargo test --workspace` 978 全绿零失败、`cargo clippy --workspace --all-targets` 零警告、§1 三条隔离断言通过。
+
+- **P0-1**：权限门改 `SessionMode::parse` 语义判定 + `Mode` 分支解析后二次 owner 校验（纵深）；回归测试 `full_access_mode_aliases_are_owner_only`。
+- **P0-2**：复核发现 §10 坑 E7 的 `materialize_channel_credentials`（解析结果同时写回类型化与 raw）已在审查定稿后落地，本条当时已被修复；新增端到端回归 `start_enabled_delivers_resolved_env_credentials`（`$ENV` + start_enabled → 假 Bot API 收到解析后 token）钉死。
+- **P1-4（拍板项）**：采用"显式 stderr 警告"选项 —— 项目级 gateway.json 覆盖 `gateway.auth`/`commands.ownerAllowFrom`/`messages.groupChat`/`session` 时列出字段警告（不阻断合法使用）。
+- **P1-2**：axum WS 升级链 `max_message_size/max_frame_size`（control + qq）与 wecom tungstenite 客户端 `WebSocketConfig` 前置 1MiB；`oversized_frame_disconnects` 更新为容忍"发送中途被重置"（上限前置生效的表现）。
+- **P1-9**：`AgentSession::continue_run` 暴露（`Ok(None)` = 无滞留），`execute_turn` 与 `inject_operator_message` 在 wait_idle + collect 冲刷后复查 `queue_depths` 续跑消化滞留注入。
+- **确认模式审批传达 bug（用户报告，telegram + confirm）**：根因是 **owner 的 DM 回复被 dmPolicy 门禁吃掉** —— `pairing.decide` 对未配对 DM 一律回配对码，`/approve` 被当作配对请求消费，审批 oneshot 永远无法 resolve（群聊聊天的 owner 几乎必然没配对过 DM；full-access 无审批故无症状）。修复：**owner（ownerAllowFrom 命中）绕过 DM 门禁**（信任锚：§5.2 审批应答权仅 owner 的前提就是 owner 消息必须可达）。回归测试：`tests/telegram_approval.rs`（真 TelegramChannel + 假 Bot API 全链路审批往返 / owner 免配对 / 陌生人仍走配对 / start_enabled 凭据物化）。
+- **第二轮（用户实测复现后）**：审批应答人体工学 —— 用户直接回复 `allow-once`（裸词）此前会进防抖/steer 管线永远到不了审批 oneshot，120s 超时 Deny 后模型重试再弹审批，形成"隔一会又要求批准"循环。修复：owner 的裸 decision 词 → 应答最新未决审批（无待审回提示不进模型，防"误答被模型当同意"）；裸 `/approve` → 待审列表 + 用法；过期 id → 附当前待审提示。回归测试 ×4（e2e：`bare_decision_reply_resolves_latest_approval` 等）。
+- **未修（后续批次）**：P2-7（心跳判活）、P2-8（shutdown 传播）、P2-10（Segment serde）、P2-11（telegram message_id）、P2-15（NO_REPLY）、P2-18（e2e 缺口）与全部 P3。
+
+---
+
 ## 0. 总评与修复批次
 
 架构与实施纪律整体良好：GATEWAY_PLAN §10 实施坑清单所列各坑（B1 出站消费循环、B4 same_channel、A1-A4 serde、E1-E6 装配语义）全部有落实与测试；防抖/chunk/typing/pairing 常量与上游语义逐项一致；控制面 11 个方法齐全；unsafe 零出现、外部依赖精确 pin、测试全离线、§8 偏离记录大体诚实。**但存在 2 个 P0（其一为权限绕过安全洞）与 14 个 P1，建议全部修复后再合入。**
@@ -23,7 +38,7 @@
 
 ## 1. P0（合入前必须修）
 
-### - [ ] P0-1【安全】full-access 权限天花板可被参数别名绕过
+### - [x] P0-1【安全】full-access 权限天花板可被参数别名绕过
 
 - **位置**：`crates/latent-gateway/src/auto_reply/mod.rs:585-586`；对照 `crates/latent-core/src/permission/types.rs:29-36`
 - **问题**：权限门对 `/mode` 参数做**字面串精确比对**，而实际切档走 `SessionMode::parse`（接受 `full-access | fullaccess | full_access` 且大小写不敏感）。群聊被 `owner_only_in_group()` 兜住不受影响；但**私聊中任何已过 dmPolicy 的非 owner**（配对用户 / allowlist / `dmPolicy: open` 下的任何人）发 `/mode full_access` 或 `/mode FULL-ACCESS` 即可绕过门禁，把会话切到 FullAccess——之后其消息驱动一个无审批、无沙箱的 agent，等效拿走机器控制权。直接击穿 GATEWAY_PLAN §5.1。
@@ -40,7 +55,7 @@
   更稳妥：把 full-access 的 owner 判定下沉到 `execute_session_command` 的 `Mode` 分支内（解析后判定），门与执行不可能再漂移。
 - **验收**：新增回归测试——非 owner 私聊发 `/mode full_access`、`/mode FULL-ACCESS`、`/mode fullaccess` 均被拒；owner 三种拼写均成功。
 
-### - [ ] P0-2【功能】raw 配置覆盖把已解析凭据打回 `$ENV` 原始串，推荐配置下三渠道全废
+### - [x] P0-2【功能】raw 配置覆盖把已解析凭据打回 `$ENV` 原始串，推荐配置下三渠道全废
 
 - **位置**：`crates/latent-gateway/src/channels.rs:98-106`；关联 `crates/latent-gateway/src/main.rs:199/243/250`
 - **问题**：`main.rs:199` 先经 `prepare_channel_credentials` 把 `$ENV`/`!shell` 解析成明文写回 typed 配置；`main.rs:243` 却另取**未解析**的 raw 配置，`start_enabled` 中 raw 逐键无条件覆盖 typed。按 §4.2 推荐写 `accessToken: "$NAPCAT_TOKEN"` 的用户：QQ 实际发送 `Bearer $NAPCAT_TOKEN` 字面量（NapCat 永远 403）、telegram `getMe` 401、wecom 订阅被拒 → 三渠道全部 Failed；**反而写明文 token 能用**，而危险配置警告恰恰在把用户往 `$ENV` 推。e2e 测试全用 mock 渠道直连 `attach`，没走 `start_enabled` 凭据路径，故未暴露。
@@ -64,27 +79,27 @@
 
 ### 安全面
 
-#### - [ ] P1-1 QQ 接入冷却按含临时端口的 SocketAddr 计键，节流失效 + 失败表无界
+#### - [x] P1-1 QQ 接入冷却按含临时端口的 SocketAddr 计键，节流失效 + 失败表无界
 
 - **位置**：`crates/latent-channel/src/qq/mod.rs:111`（键类型）、`402-428`（判定）；对照控制面正确实现 `crates/latent-gateway/src/control/auth.rs:29`（用 `IpAddr`）
 - **问题**：每次 TCP 重连源端口都变 → `record_failure`/`is_cooled_down` 永不命中同一条目，"连续 5 次失败 → 60s 冷却"（§5.3）对真实攻击者形同虚设；且失败条目仅成功时移除，公网 bind 下无界增长。
 - **修复**：键改 `peer.ip()`；失败表加容量上限/过期清理（控制面 `auth.rs` 的 `failures` 表同病，一并处理）。
 - **验收**：同 IP 换端口连续 5 次错 token → 第 6 次连接被冷却拒绝。
 
-#### - [ ] P1-2 1MiB 帧限在整帧缓冲之后检查，实际可缓冲 ~64MiB
+#### - [x] P1-2 1MiB 帧限在整帧缓冲之后检查，实际可缓冲 ~64MiB
 
 - **位置**：`crates/latent-gateway/src/control/server.rs:187`、`crates/latent-channel/src/qq/mod.rs:462-473`（同型）
 - **问题**：应用层拿到 `Message::Text` 时整帧已被 axum/tungstenite 缓冲完（tungstenite 默认消息上限约 64MiB，待核实精确默认值）。8 并发 × 64MiB ≈ 512MiB 可被打满，"单帧 1 MiB（超限断连）"（§5.3）实际是"缓冲到 64MiB 再断"。
 - **修复**：`WebSocketUpgrade`（axum）链式 `.max_message_size(MAX_FRAME_BYTES).max_frame_size(...)`；qq 侧 tungstenite 同理；应用层检查保留作双保险。
 
-#### - [ ] P1-3 配对码兜底熵源退化为恒定输出
+#### - [x] P1-3 配对码兜底熵源退化为恒定输出
 
 - **位置**：`crates/latent-gateway/src/pairing.rs:186-195`
 - **问题**：同一 `RandomState` 对同一常量反复 SipHash → 8 字节全相同。Windows 上（唯一走兜底的平台）配对码恒为同一字符 ×8，码空间从 32⁸ 塌缩到 32。Unix 正常走 `/dev/urandom` 不受影响。
 - **修复**：循环内混合下标（`hasher.write_u64(i as u64)`）；或兜底直接返回 Err 拒绝启动（fail-closed）；或登记 `getrandom` crate（需按仓库规范先在根 Cargo.toml 登记）。三选一。
 - **验收**：单测——连续两次 `generate_code()` 不同；mock 一次 `/dev/urandom` 失败路径不再产生重复字符码。
 
-#### - [ ] P1-4【需拍板】项目级 gateway.json 可覆盖 auth.token / ownerAllowFrom / sessionMode=full-access
+#### - [x] P1-4【需拍板】项目级 gateway.json 可覆盖 auth.token / ownerAllowFrom / sessionMode=full-access
 
 - **位置**：`crates/latent-gateway/src/config.rs`（项目逐字段深合并）；关联 `main.rs:135-153`
 - **问题**：`!shell` 项目级拒绝的理由是"恶意 repo 可借 gateway 启动"（config.rs:8/454-456），但恶意 repo 的 `.latent/gateway.json` 可以：把 `gateway.auth.token` 覆盖为攻击者已知的**明文**值（不触发 `!shell` 拒绝）、覆盖 `commands.ownerAllowFrom` 为攻击者身份、`dmPolicy/groupPolicy: open`，再经项目 `.latent/settings.json` 覆盖 `sessionMode: full-access`——受害者在本 repo 内启动 gateway 后，攻击者以 owner 身份聊天即可驱动 full-access agent。效果与被禁的 `!shell` 等价。**计划层只拍板了 `!shell` 一项，此项属威胁模型决策。**
@@ -92,7 +107,7 @@
 
 ### 协议正确性（latent-channel）
 
-#### - [ ] P1-5 Telegram @实体偏移按 UTF-8 字节切，Bot API 单位是 UTF-16 code units → CJK 群 @ 判定系统性失效
+#### - [x] P1-5 Telegram @实体偏移按 UTF-8 字节切，Bot API 单位是 UTF-16 code units → CJK 群 @ 判定系统性失效
 
 - **位置**：`crates/latent-channel/src/telegram/mod.rs:363-365`
 - **问题**：mention 前出现任何中文/emoji 时，实体 offset/length（UTF-16 单位）与 `str::get`（字节偏移）错位：切片落进多字节字符中间返回 None → 静默判为未 @ → `requireMention` 群里中文用户 @ 机器人不响应（偶发对齐时产生错误切片）。现有测试只覆盖 offset=0 纯 ASCII。
@@ -105,14 +120,14 @@
 - **修复**：text 转 `Vec<u16>` 求 UTF-16 偏移，或遍历 char 累计 `utf16_length` 映射回字节区间；**同时把 363-364 行的 `?` 改 `continue`**（当前单个畸形实体会让整条消息归一化返回 None 被丢弃）。
 - **验收**：测试——`"你好 @bot 帮忙"`（CJK 前缀）能正确判 to_me；畸形实体不丢整条消息。
 
-#### - [ ] P1-6 wecom 把一切握手期异常映射为 `Startup`，connect_loop 视所有 `Startup` 为凭据失效 → 瞬时故障永久 Failed
+#### - [x] P1-6 wecom 把一切握手期异常映射为 `Startup`，connect_loop 视所有 `Startup` 为凭据失效 → 瞬时故障永久 Failed
 
 - **位置**：`crates/latent-channel/src/wecom/mod.rs:241-245`（connect_loop 判定）+ `258-299`（establish 全部错误 → `Startup`）
 - **问题**：connect_async 失败（DNS/TLS/服务端重启）、订阅发送失败、应答 15s 超时、ack 读/解析失败——全是瞬时类故障，却与"errcode≠0 凭据被拒"共用 `Startup` 分类，首次遇到即 `Failed` **永久退出不再重连**，只能重启 daemon。与模块"断线自动重连"自述及 connect_loop 注释（"订阅被拒 = Failed"）的意图矛盾。
 - **修复**：握手/传输期错误改 `DeliveryFailed`（或新增专用瞬时分类），仅 `errcode != 0` 保留 `Startup`（Fatal）。
 - **验收**：新测试——假服务器不可达 → 状态 `Disconnected` → 退避重连恢复；errcode≠0 → `Failed` 不重试。
 
-#### - [ ] P1-7 qq `path` 配置未校验直接喂 axum，非法值启动即 panic
+#### - [x] P1-7 qq `path` 配置未校验直接喂 axum，非法值启动即 panic
 
 - **位置**：`crates/latent-channel/src/qq/mod.rs:274-276`
 - **问题**：`.route(&path, ...)` 对不以 `/` 开头的 path panic；`path=="/"` 时与兜底 `.route("/")` 重复注册 GET → "Overlapping method route" panic。违反"trait 方法不 panic"与"配置非法走 `Config` → 退出码 78"两条硬规则（注释自称"同时接受 /"，恰好该值必炸）。
@@ -120,46 +135,46 @@
 
 ### 引擎与并发（latent-gateway）
 
-#### - [ ] P1-8 裸词命中命令表，自然语言被劫持为命令
+#### - [x] P1-8 裸词命中命令表，自然语言被劫持为命令
 
 - **位置**：`crates/latent-gateway/src/auto_reply/commands.rs:53-61`；钉死错误行为的单测在 `commands.rs:164` 附近
 - **问题**：`strip_prefix('/').unwrap_or(trimmed)` 让**所有**命令斜杠可选——"stop it" 杀 run、"new plan for tomorrow" 清空群共享会话、"Help me fix this" 吞消息回命令清单、"status update..." 回状态不进模型。实现自己引用的上游正则明确**只有 `/approve` 可裸词**（`/^\/?approve/`），其余必须 `/`（`/^\/(new|reset)(?:\s|$)/i`）。
 - **修复**：仅 `/approve` 保留裸词（对齐上游），其余命令要求行首 `/`；同步修改单测 `parses_with_and_without_slash_and_case_insensitive`。若判定为有意设计，须在 GATEWAY_PLAN §8 登记偏离。
 - **验收**：单测——"stop it"/"new plan"/"Help me" 不命中命令、进模型管线；"/stop"/"approve 3 deny"（裸词 approve）正常。
 
-#### - [ ] P1-9 忙/闲判定与 steer/follow_up 注入之间的竞态窗口会静默滞留消息
+#### - [x] P1-9 忙/闲判定与 steer/follow_up 注入之间的竞态窗口会静默滞留消息
 
 - **位置**：`crates/latent-gateway/src/auto_reply/mod.rs:349-358`（run_turn try_lock 判忙）、`434/442`（queue_disposition）、`807`（inject_operator_message 忙分支同病）
 - **问题**：core 侧注入通道只在 run 活跃期间被消费，最后一次收队在 `step_settling`（`latent-agent/src/loop_.rs:904-917`）。gateway 从"try_lock 失败"到"消息入队"之间若正在收尾的 run 恰好跨过最后一次收队，steer 的消息落在通道里**没有任何活跃 run 去消费**，滞留到该会话下一条消息触发新 prompt 才被吞入——对安静会话等于无回执丢失。（窗口宽度待复现验证，但结构性缺口成立；对照 subagent supervisor 有 `wait_idle → follow_up → continue_run` 兜底，gateway 忙路径没有。）
 - **修复**：`execute_turn` 在 `wait_idle` 与 collect 冲刷之后复查 `queue_depths() != (0,0)`，非空则续跑——需把 latent-agent 已有的 `continue_run`（`agent.rs:347-360`）暴露到 `AgentSession`（session.rs:765 内部已在用）；或忙路径改走 `session.prompt()`（core 已把 AlreadyRunning 转 steer）。
 
-#### - [ ] P1-10 防抖冲刷循环内联执行完整 turn：跨会话队头阻塞
+#### - [x] P1-10 防抖冲刷循环内联执行完整 turn：跨会话队头阻塞
 
 - **位置**：`crates/latent-gateway/src/auto_reply/mod.rs:273-300`（`run_debounce_loop`，冲刷体在 283-289）
 - **问题**：daemon 全局唯一冲刷任务里 `run_message(...).await` 同步执行（prompt + wait_idle 分钟级），一个用户的长 run 期间**所有其他会话**到期的防抖缓冲全部无法冲刷，回复延迟无上界（缓冲不丢但延迟任意长）。
 - **修复**：冲刷出的每条消息 `tokio::spawn` 后继续循环（顺序性由各会话 run_lock 自身保证，跨会话本就并行）。
 - **验收**：集成测试——会话 A 长任务运行中，会话 B 消息到期后能独立得到回复。
 
-#### - [ ] P1-11 state.json 并发 save 可撕裂/丢失
+#### - [x] P1-11 state.json 并发 save 可撕裂/丢失
 
 - **位置**：`crates/latent-gateway/src/state.rs:99-109`
 - **问题**：`save()` 锁内只 clone，写固定名 tmp（`path.with_extension("json.tmp")`）与 rename 在锁外。调用方分散在多个并发任务（SessionFactory::build、`/new`、pairing、sessions.reset、停机），其中 `/new` 的 `rebuild_session` 不持 registry 锁，可与另一 session key 的 `get_or_build` 并发 build → 两个 `save()` 交错写同一 tmp → rename 撕裂/失败。state.json 是重启 resume 唯一依据，损坏 = 下次启动按空状态起步（会话映射、已批准配对全丢）。
 - **修复**：write+rename 全程持 `inner` 锁（序列化简单可靠），或 tmp 名拼 `pid+计数器` 唯一化。
 
-#### - [ ] P1-12 busy 期间 `/new` 半切换持久化：state.json 与实际会话文件脱钩
+#### - [x] P1-12 busy 期间 `/new` 半切换持久化：state.json 与实际会话文件脱钩
 
 - **位置**：`crates/latent-gateway/src/auto_reply/mod.rs:652-674`；core 侧 `crates/latent-runtime/src/assembly.rs:414-419`
 - **问题**：`switch_new_session` 文档契约"流式期间调用方须先行拒绝"依赖调用方预检，gateway 的 `/new` 路径**不查 `is_streaming`** 直接调用。core 内部顺序：`create_session_in_dir`（新文件已落盘）→ `holder.set(Some(new_manager))`（**持久化 sink 已指向新文件**）→ `session.agent().reset()`（busy 时 Err）→ 返回 Err。gateway Err 分支只回"新建会话失败"：转录尾段继续 append 进**新**文件、state.json 仍记旧文件（state 写只在 Ok 分支）、磁盘多孤儿文件。重启 resume 到旧文件，静默丢失中途追加内容——违反"转录即真相"。
 - **修复**：gateway 侧 `execute_session_command` 的 New/Reset 臂先查 `session.built.session.agent().state_snapshot().is_streaming`，忙则拒绝（`/compact` 同样预检）；core 侧把 `holder.set` 挪到 `reset()` 成功之后（纵深防御）。
 - **验收**：集成测试——run 进行中发 `/new` 被拒且回复提示；结束后 `/new` 正常。
 
-#### - [ ] P1-13 会话注册表全局锁跨 `factory.build().await`：任一会话冷启动卡死所有会话
+#### - [x] P1-13 会话注册表全局锁跨 `factory.build().await`：任一会话冷启动卡死所有会话
 
 - **位置**：`crates/latent-gateway/src/agents.rs:180-188`
 - **问题**：`get_or_build` 持 registry `AsyncMutex` 跨整个 `factory.build(key).await`（MCP 子进程 × spec 数 spawn、settings 读盘、state.json 同步落盘——秒级起步）。期间**其他所有会话**的 `get_or_build`/`get`（含 /status、控制面 sessions.*、chat.send）全部排队。同 key 双建确实被防住了，但代价是全局串行。
 - **修复**：先无锁查缓存 → 未命中放 per-key 构建锁（`HashMap<String, Arc<tokio::sync::Mutex<()>>>`）内 build → 完成后二次查缓存再 insert；registry 锁只护 map 读写。
 
-#### - [ ] P1-14 gateway 直接依赖 latent-ai/agent/core/session 五件套，与计划/文档不一致且未登记
+#### - [x] P1-14 gateway 直接依赖 latent-ai/agent/core/session 五件套，与计划/文档不一致且未登记
 
 - **位置**：`crates/latent-gateway/Cargo.toml:21-27`
 - **问题**：GATEWAY_PLAN §1 与本次 AGENTS.md 均写"latent-gateway 仅依赖 latent-runtime + latent-channel"，实际直接依赖 `latent-ai`、`latent-agent`、`latent-core`、`latent-session`、`latent-runtime`、`latent-channel` 六项。§8/§10 均无此偏离登记——代码与两份文档三方不一致。
@@ -173,29 +188,29 @@
 
 ### 安全 / 配置
 
-- [ ] **P2-1 `!shell` 项目级拒绝扫描的是合并后值**（`config.rs:434-465`）：全局合法 `!shell` + 项目文件存在（哪怕 `{}`）→ 误拒启动，打断 §4.2 明确允许的用法。修复：只扫项目文件自身的 Value 子树。
-- [ ] **P2-2 渠道扩展键端到端配不了**（`config.rs` 类型化 schema + `channels.rs:99`）：qq `path`、telegram `apiBase`/`pollTimeoutSecs`、wecom `wsEndpoint`/`heartbeatIntervalSecs` 不在类型化字段，`deny_unknown_fields` 直接 78——AGENTS.md 宣称的"apiBase 可指向本地假服务器"用户实际配不出。修复：提升为类型化字段，或 §8 登记"仅测试注入"。放开 `path` 时须接 P1-7 的校验。
-- [ ] **P2-3 审批请求 `handle.send().await` 无超时**（`approval.rs:108-129`）：渠道命令队列卡死（mpsc 64 满不消费）时 run 被无限挂住——既非"120s→Deny"也非"发送失败→立即 Deny"。修复：send 套 `tokio::time::timeout`（如 10s），超时走发送失败路径 Deny。
-- [ ] **P2-4 审批通道选择不看实际连接状态**（`main.rs:413-437` + `channels.rs:184-190`）：`refresh_approval_transport` 取 ownerAllowFrom 第一个"有 handle"的渠道，`ChannelManager::handle` 只 attach 过就返回 Some（即使 disconnected/failed）→ 首个 owner 渠道断开时审批钉死死渠道。修复：选择时读 `status_snapshot()` 只挑 connected。
-- [ ] **P2-5 envelope 头部清洗不滤换行/控制符**（`auto_reply/envelope.rs:14-17`）：只替换方括号；昵称含 `\n` 可把单行信封头拆成多行伪造新头部。修复：`sanitize_envelope_header_part` 追加 `\n\r` 与控制字符过滤（空格替代）。
-- [ ] **P2-6 telegram reqwest 错误 Display 携带 URL，bot token 泄入日志**（`telegram/mod.rs:224-226` + `440-444`）：reqwest Display 形如 `error sending request for url (https://api.telegram.org/bot<TOKEN>/getMe)`。修复：错误串清洗 URL 的 token 段（违反 §5.5 日志 redact）。
+- [x] **P2-1 `!shell` 项目级拒绝扫描的是合并后值**（`config.rs:434-465`）：全局合法 `!shell` + 项目文件存在（哪怕 `{}`）→ 误拒启动，打断 §4.2 明确允许的用法。修复：只扫项目文件自身的 Value 子树。
+- [x] **P2-2 渠道扩展键端到端配不了**（`config.rs` 类型化 schema + `channels.rs:99`）：qq `path`、telegram `apiBase`/`pollTimeoutSecs`、wecom `wsEndpoint`/`heartbeatIntervalSecs` 不在类型化字段，`deny_unknown_fields` 直接 78——AGENTS.md 宣称的"apiBase 可指向本地假服务器"用户实际配不出。修复：提升为类型化字段，或 §8 登记"仅测试注入"。放开 `path` 时须接 P1-7 的校验。
+- [x] **P2-3 审批请求 `handle.send().await` 无超时**（`approval.rs:108-129`）：渠道命令队列卡死（mpsc 64 满不消费）时 run 被无限挂住——既非"120s→Deny"也非"发送失败→立即 Deny"。修复：send 套 `tokio::time::timeout`（如 10s），超时走发送失败路径 Deny。
+- [x] **P2-4 审批通道选择不看实际连接状态**（`main.rs:413-437` + `channels.rs:184-190`）：`refresh_approval_transport` 取 ownerAllowFrom 第一个"有 handle"的渠道，`ChannelManager::handle` 只 attach 过就返回 Some（即使 disconnected/failed）→ 首个 owner 渠道断开时审批钉死死渠道。修复：选择时读 `status_snapshot()` 只挑 connected。
+- [x] **P2-5 envelope 头部清洗不滤换行/控制符**（`auto_reply/envelope.rs:14-17`）：只替换方括号；昵称含 `\n` 可把单行信封头拆成多行伪造新头部。修复：`sanitize_envelope_header_part` 追加 `\n\r` 与控制字符过滤（空格替代）。
+- [x] **P2-6 telegram reqwest 错误 Display 携带 URL，bot token 泄入日志**（`telegram/mod.rs:224-226` + `440-444`）：reqwest Display 形如 `error sending request for url (https://api.telegram.org/bot<TOKEN>/getMe)`。修复：错误串清洗 URL 的 token 段（违反 §5.5 日志 redact）。
 
 ### 渠道健壮性
 
 - [ ] **P2-7 QQ/wecom 心跳判活缺失**（`qq/mod.rs:504-519` 自认"MVP 忽略"；规格 §2.6/§6 坑 3 明确要求）：NapCat 静默掉线时渠道僵尸在 Connected，出站白等 30s 超时。修复：记录最近心跳时间，超过 N 个周期无帧主动断开清理。wecom 侧 30s ping 同查。
 - [ ] **P2-8 shutdown 不传播到长驻任务**（telegram `poll_loop` mod.rs:174、qq axum server mod.rs:279、wecom `connect_loop` mod.rs:200）：`ChannelHandle::shutdown` 只停命令循环，三处长驻任务继续收发。当前仅 Ctrl-C 进程退出掩盖问题；未来渠道热重载会双轮询（§6 坑 4 的 409）。修复：start 内建 `CancellationToken`，shutdown cancel，三任务 select。
-- [ ] **P2-9 mentionPatterns 每条群消息重新编译正则**（`mention_gating.rs:108-111`；gateway 每群消息调用 `auto_reply/mod.rs:556`）：Regex::new 重操作且非法 pattern 每条重复诊断。修复：构造期预编译存入 `MentionConfig`。注意同文件 `MentionConfig` derive Default 使 `require_mention=false`（上游默认 true），是 §10 A3 同型脚枪，顺手改手写 Default。
+- [x] **P2-9 mentionPatterns 每条群消息重新编译正则**（`mention_gating.rs:108-111`；gateway 每群消息调用 `auto_reply/mod.rs:556`）：Regex::new 重操作且非法 pattern 每条重复诊断。修复：构造期预编译存入 `MentionConfig`。注意同文件 `MentionConfig` derive Default 使 `require_mention=false`（上游默认 true），是 §10 A3 同型脚枪，顺手改手写 Default。
 - [ ] **P2-10 `Segment` serde internally-tagged + newtype 变体序列化必炸**（`types.rs:61-81`）：`#[serde(tag="type")]` 遇 `Text(String)` newtype 变体运行时报错。当前全仓无人序列化 Segment（潜伏雷）。修复：改 untagged 或各变体改 struct 变体，并补序列化单测。
 - [ ] **P2-11 telegram 入站 message_id 用 `"tg-{update_id}"`**（`telegram/mod.rs:403-406`）：平台 `message.message_id` 未提取，`OutboundMessage.reply_to` 一旦回填必 400（Bot API 要 Integer 且 update_id≠message_id）——"reply_to_message_id 实现 Reply 段"的验收声明不成立（当前无人设 reply_to，潜伏）。修复：normalize 增加平台 message_id 或以之为主键、另设去重键。
 
 ### 引擎
 
-- [ ] **P2-12 三处 `let _ = session.prompt(...)` 吞错**（`auto_reply/mod.rs:395/407/802`）：失败无日志无回执（collect 冲刷分支还丢已合并文本）。修复：至少 eprintln 诊断；能回执处发失败提示。
-- [ ] **P2-13 `handle_queue_overflow` 用全局 queue_settings 回执 + 两个死参数**（`mod.rs:486-522`）：判溢出用会话级 cap（`/queue` 可覆盖），回执文案却读全局 `self.queue_settings`，数值可能不符；`let _ = session; let _ = text;` 是掩盖签名失配的死参数。修复：传 `session.pending.settings()`，删假参数。
-- [ ] **P2-14 typing 间隔配置分叉 + 死旋钮**（`main.rs:230-233`、`config.rs:63-65`）：`typingIntervalSeconds` 只传 Gateway 未传 SessionFactory（泵补开的 typing 用另一份配置）；config 注释"默认 6 = 3000ms"算术错误（6s≠3s）。修复：抽 `build_typing_config(config)` 两处共用，或删字段修注释。
+- [x] **P2-12 三处 `let _ = session.prompt(...)` 吞错**（`auto_reply/mod.rs:395/407/802`）：失败无日志无回执（collect 冲刷分支还丢已合并文本）。修复：至少 eprintln 诊断；能回执处发失败提示。
+- [x] **P2-13 `handle_queue_overflow` 用全局 queue_settings 回执 + 两个死参数**（`mod.rs:486-522`）：判溢出用会话级 cap（`/queue` 可覆盖），回执文案却读全局 `self.queue_settings`，数值可能不符；`let _ = session; let _ = text;` 是掩盖签名失配的死参数。修复：传 `session.pending.settings()`，删假参数。
+- [x] **P2-14 typing 间隔配置分叉 + 死旋钮**（`main.rs:230-233`、`config.rs:63-65`）：`typingIntervalSeconds` 只传 Gateway 未传 SessionFactory（泵补开的 typing 用另一份配置）；config 注释"默认 6 = 3000ms"算术错误（6s≠3s）。修复：抽 `build_typing_config(config)` 两处共用，或删字段修注释。
 - [ ] **P2-15 NO_REPLY 静默语义缺失**（`reply_dispatcher.rs:92-95`）：只跳过空文本，模型对"收到但无需回应"照常回群（§4.8 承诺未兑现，gateway 也未注入相关约定）。修复：出站识别标记丢弃，或系统提示词注入约定 + 配套过滤。
-- [ ] **P2-16 sendChain 消费者可能无限期阻塞**（`reply_dispatcher.rs:100-114` + `agents.rs:300-305`）：渠道发送悬挂（qq/wecom WS 对端黑洞）→ 256 槽满 → pump `AgentSettled` → `send_final().await` 阻塞 → SessionBridge 串行广播阻塞 → agent 循环停摆 → run_lock 永久被持，会话后续消息全部入队直至 cap 丢弃。fail-closed 是计划取舍，但"拖慢"与"永久卡死"之间缺兜底。修复：每段发送加超时（如 60s，超时记诊断放行下一段）。
-- [ ] **P2-17 chunk 括号感知断点只认 ASCII 括号**（`chunk.rs:90-110`）：中文全角 `（）【】｛｝` 不计入 depth，聊天场景括号内换行被当断点。修复：depth 匹配表加全角对。
+- [x] **P2-16 sendChain 消费者可能无限期阻塞**（`reply_dispatcher.rs:100-114` + `agents.rs:300-305`）：渠道发送悬挂（qq/wecom WS 对端黑洞）→ 256 槽满 → pump `AgentSettled` → `send_final().await` 阻塞 → SessionBridge 串行广播阻塞 → agent 循环停摆 → run_lock 永久被持，会话后续消息全部入队直至 cap 丢弃。fail-closed 是计划取舍，但"拖慢"与"永久卡死"之间缺兜底。修复：每段发送加超时（如 60s，超时记诊断放行下一段）。
+- [x] **P2-17 chunk 括号感知断点只认 ASCII 括号**（`chunk.rs:90-110`）：中文全角 `（）【】｛｝` 不计入 depth，聊天场景括号内换行被当断点。修复：depth 匹配表加全角对。
 - [ ] **P2-18 e2e 验收缺口**（`tests/e2e.rs`）：①防抖窗口>0 的 gateway 级路径全部用例配 `debounceMs: 0`，`run_debounce_loop` 冲刷未被 e2e 走过；②collect 的 drop=old/summarize 冲刷路径无集成验证；③事件泵背压语义（进度丢/final 不丢）无测试；④双会话并发审批 id 路由无测试；⑤`/compact` 不在 15 例中；⑥`channel_echo_messages_are_dropped_by_channel`（e2e.rs:790-804）名不副实——mock 渠道不丢自消息，断言本体写在注释里指向 tests/qq.rs，建议改名或删除。
 
 ---

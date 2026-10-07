@@ -87,14 +87,17 @@ fn chunk_by_length(text: &str, limit: usize) -> Vec<String> {
 ///    由调用方跳过);
 /// 2. 最后一个空白(空格/tab,留在上一段尾部);
 /// 3. 兜底硬切在 end。
+///
+/// 括号深度同时计 ASCII 与全角括号(P2-17:聊天场景中文全角 `（）【】｛｝`
+/// 不计入 depth 时,括号内换行会被误当选为断点)。
 fn find_break(chars: &[char], start: usize, end: usize) -> usize {
     let mut depth = 0usize;
     let mut last_newline = None;
     let mut last_space = None;
     for (offset, &c) in chars[start..end].iter().enumerate() {
         match c {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '(' | '[' | '{' | '（' | '【' | '｛' => depth += 1,
+            ')' | ']' | '}' | '）' | '】' | '｝' => depth = depth.saturating_sub(1),
             '\n' if depth == 0 => last_newline = Some(start + offset),
             ' ' | '\t' if depth == 0 => last_space = Some(start + offset),
             _ => {}
@@ -214,6 +217,22 @@ mod tests {
             },
         );
         assert_eq!(chunks[0], "第一行", "应优先括号外换行作为断点");
+    }
+
+    /// P2-17:全角括号同样计入括号深度 —— 括号内换行不当断点。
+    #[test]
+    fn fullwidth_brackets_count_toward_depth() {
+        // 括号深度:第二处换行在全角括号内,不得作断点;第一处换行在括号外
+        let text = "第一行\n第二行（全角括号\n内换行）\n第三行内容继续到底";
+        let chunks = chunk_text(
+            text,
+            ChunkOptions {
+                limit: 12,
+                mode: ChunkMode::Length,
+                markdown: false,
+            },
+        );
+        assert_eq!(chunks[0], "第一行", "全角括号内的换行不是断点: {chunks:?}");
     }
 
     #[test]

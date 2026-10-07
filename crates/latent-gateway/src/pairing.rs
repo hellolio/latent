@@ -182,13 +182,16 @@ fn getrandom_bytes(buf: &mut [u8]) {
             }
         }
     }
-    // 兜底:RandomState 熵(hash 迭代)
+    // 兜底:RandomState 熵 —— 同一 hasher 反复写同一常量输出恒定(P1-3),
+    // 必须混合下标让每个字节独立;RandomState::new() 每次构造仍引入线程级
+    // 随机键,两次调用产出不同序列
     let seed = std::collections::hash_map::RandomState::new();
-    for byte in buf.iter_mut() {
+    for (index, byte) in buf.iter_mut().enumerate() {
         let hash = {
             use std::hash::{BuildHasher, Hasher};
             let mut hasher = seed.build_hasher();
             hasher.write_u64(0x9E3779B97F4A7C15);
+            hasher.write_u64(index as u64);
             hasher.finish()
         };
         *byte = (hash & 0xFF) as u8;
@@ -301,6 +304,15 @@ mod tests {
                 code.chars().all(|c| CODE_ALPHABET.contains(&(c as u8))),
                 "{code}"
             );
+        }
+    }
+
+    /// P1-3:连续两次生成必须不同 —— 兜底熵源退化为恒定输出时码空间
+    /// 从 32⁸ 塌缩到 32(全同字符 ×8)。
+    #[test]
+    fn consecutive_codes_differ() {
+        for _ in 0..20 {
+            assert_ne!(generate_code(), generate_code());
         }
     }
 }
