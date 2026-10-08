@@ -10,8 +10,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use thiserror::Error;
 
-use latent_agent::{AgentError, AgentEvent, AgentMessage, LoopHooks, Subscriber, Tool};
-use latent_ai::{is_context_overflow, Model, Provider, StreamOptions};
+use latent_agent::{
+    AgentError, AgentEvent, AgentMessage, LoopHooks, RequestUpdate, Subscriber, Tool, ToolBlock,
+    ToolCallCtx, ToolExecution, ToolPatch, ToolResultCtx, TurnCtx, TurnDecision, TurnUpdate,
+};
+use latent_ai::{is_context_overflow, Message, Model, Provider, StreamOptions, ThinkingLevel};
 
 use crate::extensions::{ExtensionActions, ExtensionDiagnostic, ExtensionRegistry, ExtensionUi};
 use crate::permission::{
@@ -253,7 +256,23 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
         SystemPromptState::Forced(_) => SystemPromptSections::default(),
     };
 
-    let agent = latent_agent::create_agent(config.provider, config.hooks);
+    let subscribers = config
+        .subscribers
+        .clone()
+        .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+
+    // run 内自动压缩钩子(06 文档 §3.1):包住装配方 hooks(洋葱最内层),
+    // 工具结果回到模型前按阈值压缩 —— 模型连续调工具的长 run 不必等整轮结束
+    // 才触发;切点与 EndTurn 后的自动压缩完全一致,其余钩子全部透传内层
+    let hooks: Arc<dyn LoopHooks> = Arc::new(SessionCompactionHooks {
+        inner: config.hooks.clone(),
+        compactor: config.compactor.clone(),
+        subscribers: subscribers.clone(),
+        permission: config.permission.clone(),
+        session_sink: config.session_sink.clone(),
+    });
+
+    let agent = latent_agent::create_agent(config.provider, hooks);
     agent.set_model(config.model.clone());
     agent.set_system_prompt(Some(state.to_text()));
     agent.install_tools(active_tools);
@@ -266,10 +285,6 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
             .map_err(CoreError::Agent)?;
     }
 
-    let subscribers = config
-        .subscribers
-        .clone()
-        .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
     agent.subscribe(Arc::new(SessionBridge {
         subscribers: subscribers.clone(),
         sink: config.session_sink.clone(),
@@ -306,6 +321,139 @@ pub fn create_session_persistence_subscriber(
         subscribers: Arc::new(Mutex::new(Vec::new())),
         sink: Some(sink),
     })
+}
+
+/// run 内自动压缩钩子(06 文档 §3.1 的工具边界触发点):包住装配方 hooks,
+/// 在工具结果回到模型前按阈值检查并压缩 —— 模型连续调工具的长 run 不再必须
+/// 等整轮结束才触发。切点与 EndTurn 后的自动压缩完全一致(run_compaction
+/// 只在完整用户请求循环边界切,进行中 turn 的工具调用与结果在保留段);
+/// 压缩后转录经钩子返回值被循环整体采纳,Agent 状态由 AgentHookAdapter 同步。
+struct SessionCompactionHooks {
+    inner: Arc<dyn LoopHooks>,
+    compactor: Option<Arc<dyn ContextCompactor>>,
+    subscribers: Arc<Mutex<Vec<SessionSharedSubscriber>>>,
+    /// 当前模式来源(apply_mode 经 engine.set_mode 同步):压缩吞掉模式节时补追加
+    permission: Option<Arc<PermissionEngine>>,
+    session_sink: Option<Arc<dyn SessionSink>>,
+}
+
+impl SessionCompactionHooks {
+    async fn broadcast(&self, event: &AgentSessionEvent) {
+        let subscribers = self.subscribers.lock().unwrap().clone();
+        for subscriber in subscribers {
+            subscriber.on_session_event(event).await;
+        }
+    }
+
+    /// 压缩投影可能吞掉当前模式节点(切点之前):补追加保约束在上下文中。
+    /// 语义同 `ensure_mode_node`,但 run 期间 `set_messages` 被拒,改为把节点
+    /// 追加进压缩后转录并直接落盘(转录替换由循环采纳钩子返回值完成)。
+    /// 从未应用过模式节的会话不凭空注入(与 run_with_recovery 的 EndTurn 分支同守卫)。
+    async fn restore_mode_node(&self, compacted: &mut Vec<AgentMessage>, before: &[AgentMessage]) {
+        let had_mode_section = before
+            .iter()
+            .any(|message| matches!(message, AgentMessage::ModeSection { .. }));
+        if !had_mode_section {
+            return;
+        }
+        let Some(engine) = &self.permission else {
+            return;
+        };
+        let Some(content) = crate::permission::mode_section(engine.mode()) else {
+            return;
+        };
+        let last = compacted.iter().rev().find_map(|message| match message {
+            AgentMessage::ModeSection { content, .. } => Some(content.clone()),
+            _ => None,
+        });
+        if last.as_deref() == Some(content.as_str()) {
+            return;
+        }
+        let message = AgentMessage::mode_section(content);
+        if let Some(sink) = &self.session_sink {
+            if let Err(error) = sink.append(&message).await {
+                eprintln!("[latent] session sink mode section append failed: {error}");
+            }
+        }
+        compacted.push(message);
+    }
+}
+
+#[async_trait]
+impl LoopHooks for SessionCompactionHooks {
+    fn convert_to_llm(&self, msgs: &[AgentMessage]) -> Vec<Message> {
+        self.inner.convert_to_llm(msgs)
+    }
+
+    async fn transform_context(&self, msgs: Vec<AgentMessage>) -> Vec<AgentMessage> {
+        self.inner.transform_context(msgs).await
+    }
+
+    async fn get_api_key(&self, provider: &str) -> Option<String> {
+        self.inner.get_api_key(provider).await
+    }
+
+    async fn prepare_request(
+        &self,
+        model: &Model,
+        thinking: Option<ThinkingLevel>,
+    ) -> Option<RequestUpdate> {
+        self.inner.prepare_request(model, thinking).await
+    }
+
+    async fn prepare_next_turn(&self, ctx: TurnCtx) -> Option<TurnUpdate> {
+        self.inner.prepare_next_turn(ctx).await
+    }
+
+    async fn finish_turn(&self, ctx: TurnCtx) -> Option<TurnDecision> {
+        self.inner.finish_turn(ctx).await
+    }
+
+    async fn before_tool_call(&self, ctx: ToolCallCtx) -> Option<ToolBlock> {
+        self.inner.before_tool_call(ctx).await
+    }
+
+    async fn after_tool_call(&self, ctx: ToolResultCtx) -> Option<ToolPatch> {
+        self.inner.after_tool_call(ctx).await
+    }
+
+    fn tool_execution(&self) -> ToolExecution {
+        self.inner.tool_execution()
+    }
+
+    /// 工具结果回到模型前:阈值满足即压缩(事件面同 maybe_auto_compact)。
+    async fn auto_compact_context(
+        &self,
+        model: &Model,
+        messages: &[AgentMessage],
+    ) -> Option<Vec<AgentMessage>> {
+        let compactor = self.compactor.as_ref()?;
+        if !compactor.should_auto_compact(model, messages) {
+            return None;
+        }
+        self.broadcast(&AgentSessionEvent::AutoRetryStart {
+            attempt: 1,
+            delay_ms: 0,
+            reason: "context threshold reached: auto-compacting".into(),
+        })
+        .await;
+        let outcome = match compactor.compact(model).await {
+            Ok(mut compacted) => {
+                self.restore_mode_node(&mut compacted, messages).await;
+                Some(compacted)
+            }
+            Err(error) => {
+                eprintln!("[latent] auto compaction failed: {error}");
+                None
+            }
+        };
+        self.broadcast(&AgentSessionEvent::AutoRetryEnd {
+            success: outcome.is_some(),
+            reason: "auto compaction".into(),
+        })
+        .await;
+        outcome
+    }
 }
 
 /// agent 事件 → session 事件 + 持久化 + AgentSettled 的翻译层

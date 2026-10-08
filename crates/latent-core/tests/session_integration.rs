@@ -787,3 +787,81 @@ async fn resume_without_mode_section_appends_node() {
     assert_eq!(messages.len(), 2, "历史 + 补追加的模式节点");
     assert!(matches!(&messages[1], AgentMessage::ModeSection { content, .. } if content.contains("entering Plan mode")));
 }
+
+/// run 内自动压缩(06 文档 §3.1 工具边界触发点):模型连续调工具、run 未结束
+/// 时,工具结果回到模型前按阈值压缩;压缩后转录被采纳(run 继续到正常结束),
+/// Agent 状态同步(下次 prompt 从压缩后上下文开始)。
+#[tokio::test]
+async fn auto_compact_fires_mid_run_at_tool_boundary() {
+    use std::sync::atomic::AtomicBool;
+
+    struct OnceCompactor {
+        armed: AtomicBool,
+        calls: AtomicU32,
+    }
+    #[async_trait]
+    impl latent_core::ContextCompactor for OnceCompactor {
+        async fn compact(&self, _model: &Model) -> Result<Vec<AgentMessage>, String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![AgentMessage::user("压缩后的上下文")])
+        }
+        fn should_auto_compact(&self, _model: &Model, _messages: &[AgentMessage]) -> bool {
+            self.armed.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    let m = model();
+    let tool = Arc::new(TestTool {
+        name: "test_tool".into(),
+        calls: AtomicU32::new(0),
+    });
+    let compactor = Arc::new(OnceCompactor {
+        armed: AtomicBool::new(true),
+        calls: AtomicU32::new(0),
+    });
+    let provider = Arc::new(ScriptedProvider::new(
+        &m,
+        vec![
+            ScriptedTurn::tool_calls(&m, vec![tool_call("t1", "test_tool")]),
+            ScriptedTurn::text(&m, "第二轮回复"),
+        ],
+    ));
+    let session = create_agent_session(AgentSessionConfig {
+        provider,
+        model: m.clone(),
+        hooks: Arc::new(PassthroughHooks),
+        ui: Arc::new(NoopUi),
+        extensions: latent_core::ExtensionRegistry::default(),
+        tools: vec![tool],
+        active_tool_names: None,
+        system_prompt: SystemPromptOptions::default(),
+        limits: latent_agent::TurnLimits::default(),
+        stream_options: Default::default(),
+        session_sink: None,
+        seed_messages: Vec::new(),
+        compactor: Some(compactor.clone()),
+        subscribers: None,
+        permission: None,
+    })
+    .await
+    .unwrap();
+
+    let stop = session.prompt("第一问").await.unwrap().stop();
+    assert_eq!(stop, latent_agent::RunStop::EndTurn);
+    // 压缩恰好一次且发生在 run 中途:EndTurn 后阈值已撤销(armed=false),不再触发
+    assert_eq!(
+        compactor.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "工具结果回到模型时触发一次,EndTurn 后不再重复触发"
+    );
+    // 压缩后转录被采纳且 run 继续完成:压缩摘要在先,第二轮回复在后
+    let messages = session.agent().messages();
+    assert_eq!(messages.len(), 2);
+    assert!(
+        matches!(&messages[0], AgentMessage::User { content, .. } if content == "压缩后的上下文"),
+        "Agent 状态应同步为压缩后转录"
+    );
+    let last = messages.last().unwrap().as_assistant().unwrap();
+    assert_eq!(last.text_content(), "第二轮回复");
+}

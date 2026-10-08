@@ -819,6 +819,15 @@ impl LoopHooks for ExtensionHooks {
         }
     }
 
+    // 观察类直通(不经总线):压缩是宿主侧业务,无扩展埋点
+    async fn auto_compact_context(
+        &self,
+        model: &latent_ai::Model,
+        messages: &[AgentMessage],
+    ) -> Option<Vec<AgentMessage>> {
+        self.inner.auto_compact_context(model, messages).await
+    }
+
     async fn before_tool_call(&self, mut ctx: ToolCallCtx) -> Option<ToolBlock> {
         if !self.bus.has_subscriber(ExtensionEvent::ToolCall) {
             return self.inner.before_tool_call(ctx).await;

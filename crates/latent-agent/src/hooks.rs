@@ -152,6 +152,21 @@ pub trait LoopHooks: Send + Sync {
         None
     }
 
+    /// 工具结果回到模型前的自动压缩检查点(06 文档 §3.1 的 run 内触发点):
+    /// 长 run(模型连续调工具、run 不结束)在每次工具批结算后按阈值检查,
+    /// 满足则执行压缩并返回压缩后的完整转录,循环整体替换当前转录继续本
+    /// run —— 不必等整轮结束才触发。None = 不压缩。
+    /// 切点语义由实现保证与 run 结束后的自动压缩一致:只在完整用户请求
+    /// 循环边界切(切点落在 turn 中间时回溯 turn 起始),进行中 turn 的
+    /// assistant 工具调用与工具结果在保留段,配对不破。不得 panic。
+    async fn auto_compact_context(
+        &self,
+        _model: &Model,
+        _messages: &[AgentMessage],
+    ) -> Option<Vec<AgentMessage>> {
+        None
+    }
+
     /// 批执行默认模式(逐工具可用 `Tool::execution_mode` 覆盖)。
     fn tool_execution(&self) -> ToolExecution {
         ToolExecution::Parallel

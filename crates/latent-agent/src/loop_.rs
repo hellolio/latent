@@ -956,6 +956,17 @@ async fn step_settling(state: &mut LoopState) -> Phase {
         || !state.deferred_steering.is_empty()
         || !state.follow_up_batch.is_empty();
     if natural {
+        // 工具结果回到模型:run 内自动压缩检查点(06 文档 §3.1)——阈值触发
+        // 则整体替换转录继续本 run,长工具循环不必等整轮结束才压缩。切点
+        // 语义由压缩实现保证:只在完整用户请求循环边界切,进行中 turn 的
+        // 工具调用与结果在保留段,配对不破
+        if let Some(compacted) = state
+            .hooks
+            .auto_compact_context(&state.model, &state.current)
+            .await
+        {
+            state.current = compacted;
+        }
         // 工具调用软上限:模型仍要继续调工具时,在工具结果之后跟一条
         // user 收敛提示(每次 run 一次;硬停在上方 budget_stop 兜底)
         if has_more_tool_calls {

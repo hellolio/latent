@@ -221,6 +221,9 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [x] ui颜色调整优化
  - [x] @符号添加文件到上下文
  - [x] 当前全屏模式下，如果模型正在输出，我滚动屏幕，正在输出的部分不会跟着滚动，但是我需要输入框以上的部分全部跟随滚动
+ - [ ] 默认使用user加载AGENTS.md
+ - [ ] 探索30轮无反馈仅在plan模式生效
+ - [x] 模型右下角显示的128k应该是1M
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 

@@ -1640,3 +1640,100 @@ fn trim_oldest_keeps_last_messages() {
     agent.trim_oldest_messages(5);
     assert_eq!(agent.messages().len(), 2);
 }
+
+/// run 内自动压缩检查点(06 文档 §3.1 工具边界触发点):模型连续调工具、
+/// run 未结束时,工具结果回到模型前钩子按阈值压缩并整体替换转录,run 继续
+/// 到正常结束;切点语义由实现保证 —— 本测试模拟压缩只保留尾部工具结果。
+#[tokio::test]
+async fn auto_compact_fires_at_tool_result_boundary_and_run_continues() {
+    struct CompactAtToolBoundaryHooks {
+        inner: PassthroughHooks,
+        /// 每次请求看到的完整转录(transform_context 记录)
+        request_contexts: Arc<Mutex<Vec<Vec<AgentMessage>>>>,
+        compact_calls: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl LoopHooks for CompactAtToolBoundaryHooks {
+        fn convert_to_llm(&self, msgs: &[AgentMessage]) -> Vec<latent_ai::Message> {
+            self.inner.convert_to_llm(msgs)
+        }
+
+        async fn transform_context(&self, msgs: Vec<AgentMessage>) -> Vec<AgentMessage> {
+            self.request_contexts.lock().unwrap().push(msgs.clone());
+            msgs
+        }
+
+        async fn auto_compact_context(
+            &self,
+            _model: &Model,
+            messages: &[AgentMessage],
+        ) -> Option<Vec<AgentMessage>> {
+            self.compact_calls.fetch_add(1, Ordering::SeqCst);
+            // 模拟压缩:压缩摘要打头 + 尾部保留段(最后一条工具结果)
+            let tail = messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m, AgentMessage::ToolResult { .. }))?
+                .clone();
+            Some(vec![
+                AgentMessage::CompactionSummary {
+                    summary: "压缩摘要".into(),
+                    timestamp: latent_agent::now_ms(),
+                },
+                tail,
+            ])
+        }
+    }
+
+    let m = model();
+    let tool = TestTool::new("test_tool");
+    let contexts = Arc::new(Mutex::new(Vec::new()));
+    let compact_calls = Arc::new(AtomicU32::new(0));
+    let hooks = Arc::new(CompactAtToolBoundaryHooks {
+        inner: PassthroughHooks,
+        request_contexts: contexts.clone(),
+        compact_calls: compact_calls.clone(),
+    });
+    let provider = ScriptedProvider::new(
+        &m,
+        vec![
+            ScriptedTurn::tool_calls(
+                &m,
+                vec![tool_call("t1", "test_tool", serde_json::json!({"x": "1"}))],
+            ),
+            ScriptedTurn::text(&m, "完成"),
+        ],
+    );
+    let output = run_loop(
+        provider,
+        vec![AgentMessage::user("开始")],
+        vec![tool],
+        hooks,
+    )
+    .await;
+
+    assert_eq!(output.stop, latent_agent::RunStop::EndTurn);
+    assert_eq!(
+        compact_calls.load(Ordering::SeqCst),
+        1,
+        "工具结果回到模型时恰好触发一次压缩"
+    );
+    // 工具配对不破:run 新增消息 = 初始 prompt + assistant(工具调用) + toolResult + 终轮回复
+    assert_eq!(output.messages.len(), 4);
+    assert!(matches!(&output.messages[2], AgentMessage::ToolResult { .. }));
+    let last = output.messages[3].as_assistant().unwrap();
+    assert_eq!(last.text_content(), "完成");
+
+    // 第二次请求使用压缩后转录:摘要打头 + 尾部工具结果,压缩前历史不再出现
+    let contexts = contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 2, "共两次 LLM 请求");
+    assert_eq!(contexts[0].len(), 1, "首次请求只有初始 prompt");
+    assert!(matches!(&contexts[1][0], AgentMessage::CompactionSummary { .. }));
+    assert!(matches!(&contexts[1][1], AgentMessage::ToolResult { .. }));
+    assert_eq!(
+        contexts[1].len(),
+        2,
+        "压缩后的转录不包含被摘要掉的历史"
+    );
+}

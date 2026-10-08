@@ -65,8 +65,11 @@ pub enum AgentError {
 
 /// 用户 hooks 的透传绑定(pi 的 createLoopConfig;steering/follow-up 走
 /// mpsc 注入通道,不再经钩子)。
+/// `agent` 是 Weak 回指:转录被 `auto_compact_context` 整体替换时同步
+/// reducer 状态(下次 run 的种子;MessageEnd 只 append,无法表达替换)。
 struct AgentHookAdapter {
     inner: Arc<dyn LoopHooks>,
+    agent: Weak<Agent>,
 }
 
 #[async_trait]
@@ -100,6 +103,20 @@ impl LoopHooks for AgentHookAdapter {
 
     async fn finish_turn(&self, ctx: crate::hooks::TurnCtx) -> Option<crate::hooks::TurnDecision> {
         self.inner.finish_turn(ctx).await
+    }
+
+    async fn auto_compact_context(
+        &self,
+        model: &Model,
+        messages: &[AgentMessage],
+    ) -> Option<Vec<AgentMessage>> {
+        let compacted = self.inner.auto_compact_context(model, messages).await?;
+        // 转录替换同步到 Agent 状态(唯一写路径 reducer 之外的例外:压缩替换
+        // 不是事件可表达的消息追加;此刻无并发,循环单任务内同步执行)
+        if let Some(agent) = self.agent.upgrade() {
+            agent.state.lock().unwrap().messages = compacted.clone();
+        }
+        Some(compacted)
     }
 
     async fn before_tool_call(
@@ -160,6 +177,7 @@ impl Agent {
         let depth = sender.depth();
         let adapter = Arc::new(AgentHookAdapter {
             inner: hooks.clone(),
+            agent: self_weak.clone(),
         });
         let (streaming, streaming_rx) = watch::channel(false);
         Self {

@@ -299,21 +299,34 @@ fn left_right_align(
     truncate_line(Line::from(spans), width)
 }
 
-/// token 数紧凑格式:≥1000 显示 k(1100 → 1.1k,128000 → 128k),≥1e6 显示 m。
+/// token 数紧凑格式:≥1000 显示 k(1100 → 1.1k,128000 → 128k),≥1e6 显示 m,
+/// ≥1e9 显示 g;四舍五入后整数部分超 3 位即换更大单位(999_999 → 1m 而非 1000k)。
 fn format_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
-        let m = n as f64 / 1_000_000.0;
-        let formatted = format!("{m:.1}");
-        let formatted = formatted.strip_suffix(".0").unwrap_or(&formatted);
-        format!("{formatted}m")
-    } else if n >= 1000 {
-        let k = n as f64 / 1000.0;
-        let formatted = format!("{k:.1}");
-        let formatted = formatted.strip_suffix(".0").unwrap_or(&formatted);
-        format!("{formatted}k")
-    } else {
-        n.to_string()
+    if n >= 1_000_000_000 {
+        return format_compact(n, 1_000_000_000.0, "g");
     }
+    if n >= 1_000_000 {
+        // m 单位下四舍五入到 4 位整数(999_999_999 → "1000.0m")→ 换 g
+        if (n as f64 / 1_000_000.0 * 10.0).round() >= 10_000.0 {
+            return format_compact(n, 1_000_000_000.0, "g");
+        }
+        return format_compact(n, 1_000_000.0, "m");
+    }
+    if n >= 1000 {
+        // k 单位下四舍五入到 4 位整数(999.999 → "1000.0k")→ 换 m
+        if (n as f64 / 1000.0 * 10.0).round() >= 10_000.0 {
+            return format_compact(n, 1_000_000.0, "m");
+        }
+        return format_compact(n, 1000.0, "k");
+    }
+    n.to_string()
+}
+
+fn format_compact(n: u64, factor: f64, unit: &str) -> String {
+    let value = n as f64 / factor;
+    let formatted = format!("{value:.1}");
+    let formatted = formatted.strip_suffix(".0").unwrap_or(&formatted);
+    format!("{formatted}{unit}")
 }
 
 /// ctx% 段(pi footer 阈值)的独立格式化:0 窗口/无用量返回空。
@@ -345,8 +358,9 @@ pub fn abbreviate_home(path: &str, home: Option<&str>) -> String {
 }
 
 fn format_window(window: u64) -> String {
-    if window >= 1000 && window.is_multiple_of(1000) {
-        format!("{}k", window / 1000)
+    if window >= 1000 {
+        // 统一走紧凑格式:整数部分超 3 位换单位(1_000_000 → 1m,131_072 → 131.1k)
+        format_tokens(window)
     } else {
         window.to_string()
     }
@@ -615,9 +629,24 @@ mod tests {
         assert_eq!(format_tokens(11_000), "11k");
         assert_eq!(format_tokens(1_100), "1.1k");
         assert_eq!(format_tokens(128_000), "128k");
-        assert_eq!(format_tokens(999_999), "1000k");
+        // 四舍五入后整数部分超 3 位 → 换更大单位
+        assert_eq!(format_tokens(999_999), "1m");
+        assert_eq!(format_tokens(999_949), "999.9k");
         assert_eq!(format_tokens(1_000_000), "1m");
         assert_eq!(format_tokens(1_100_000), "1.1m");
         assert_eq!(format_tokens(12_800_000), "12.8m");
+        assert_eq!(format_tokens(999_999_999), "1g");
+        assert_eq!(format_tokens(1_000_000_000), "1g");
+    }
+
+    #[test]
+    fn format_window_compact() {
+        assert_eq!(format_window(128_000), "128k");
+        assert_eq!(format_window(200_000), "200k");
+        // 超过 3 位数换单位
+        assert_eq!(format_window(1_000_000), "1m");
+        // 非 1000 整数倍也紧凑化
+        assert_eq!(format_window(131_072), "131.1k");
+        assert_eq!(format_window(999), "999");
     }
 }

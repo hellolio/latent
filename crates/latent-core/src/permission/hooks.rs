@@ -100,6 +100,14 @@ impl LoopHooks for ApprovalHooks {
         self.inner.convert_to_llm(msgs)
     }
 
+    async fn auto_compact_context(
+        &self,
+        model: &latent_ai::Model,
+        messages: &[AgentMessage],
+    ) -> Option<Vec<AgentMessage>> {
+        self.inner.auto_compact_context(model, messages).await
+    }
+
     async fn before_tool_call(&self, ctx: ToolCallCtx) -> Option<ToolBlock> {
         let risk = classify_tool(&ctx.name);
         match self.engine.evaluate(&ctx, risk) {
