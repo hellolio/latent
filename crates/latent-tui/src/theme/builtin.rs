@@ -43,6 +43,9 @@ pub fn dark() -> Theme {
         border_bash: Color::Rgb(0x9e, 0xce, 0x6a),
         spinner: Color::Rgb(0xbb, 0x9a, 0xf7),
         footer_cwd: Color::Rgb(0x9e, 0xce, 0x6a),
+        // footer agent 值与 thinking 段统一纯白(与弱文字灰拉开亮度差)
+        footer_agent: Color::Rgb(0xff, 0xff, 0xff),
+        footer_thinking: Color::Rgb(0xff, 0xff, 0xff),
         usage_input: Color::Rgb(0x7d, 0xcf, 0xff),
         usage_output: Color::Rgb(0x9e, 0xce, 0x6a),
         usage_cache: Color::Rgb(0xbb, 0x9a, 0xf7),
@@ -93,6 +96,8 @@ pub fn dark_ansi() -> Theme {
         border_bash: Color::Green,
         spinner: Color::Magenta,
         footer_cwd: Color::Green,
+        footer_agent: Color::White,
+        footer_thinking: Color::White,
         usage_input: Color::Cyan,
         usage_output: Color::Green,
         usage_cache: Color::Magenta,

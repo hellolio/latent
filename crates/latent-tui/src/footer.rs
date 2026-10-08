@@ -65,10 +65,10 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
     let line1 = left_right_align(Line::from(first), usage_line(data, theme), width);
 
     // 第二行:左侧 agent 会话标记(主会话显示 agent:main)+ 模式标记,右侧模型
-    // agent 标签双色:"agent:" 前缀弱化,值区分主会话(muted)与激活子 agent
+    // agent 标签双色:"agent:" 前缀弱化,值区分主会话(白)与激活子 agent
     let (agent_value, agent_style) = match &data.active_agent {
         Some(name) => (name.clone(), Style::new().fg(theme.subagent)),
-        None => ("main".to_string(), Style::new().fg(theme.muted)),
+        None => ("main".to_string(), Style::new().fg(theme.footer_agent)),
     };
     let mut left2: Vec<Span<'static>> = vec![
         Span::styled("agent:", dim),
@@ -87,11 +87,14 @@ pub fn lines(data: &FooterData, width: usize, theme: &Theme) -> Vec<Line<'static
     let mut right2: Vec<Span<'static>> = vec![
         Span::styled(
             data.model.clone(),
-            // 模型行与 cwd 同色(此前 muted 过暗,与背景区分度不足)
-            Style::new().fg(theme.footer_cwd),
+            // 模型行黄色(warning,与 git 分支/subagent 计数同色)
+            Style::new().fg(theme.warning),
         ),
-        // thinking 段弱化(与 ctx 段的 (auto) 标记同色)
-        Span::styled(format!(" · thinking:{}", data.thinking), dim),
+        // thinking 段整段白色(含 · 分隔符)
+        Span::styled(
+            format!(" · thinking:{}", data.thinking),
+            Style::new().fg(theme.footer_thinking),
+        ),
     ];
     if data.subagent_active > 0 {
         // 后台 subagent 运行数(14 文档 §4.3 进度可见:footer 状态段,不做活组件)
@@ -460,7 +463,7 @@ mod tests {
         let second = line_text(&out[1]);
         assert!(second.starts_with("agent:reviewer │ plan"), "{second}");
         // agent 标签双色:"agent:" 前缀弱化(dim),激活子 agent 值用
-        // subagent 色,主会话值用 muted(均非 warning 黄)
+        // subagent 色,主会话值用 footer_agent 白(均非 warning 黄)
         let prefix = out[1]
             .spans
             .iter()
@@ -479,7 +482,7 @@ mod tests {
             .iter()
             .find(|s| s.content == "main")
             .unwrap_or_else(|| panic!("主会话也应显示 agent:main"));
-        assert_eq!(main_span.style.fg, Some(theme.muted));
+        assert_eq!(main_span.style.fg, Some(theme.footer_agent));
     }
 
     #[test]
@@ -532,20 +535,20 @@ mod tests {
         assert_eq!(output_span.style.fg, Some(theme.usage_output));
         let cost_span = first.spans.iter().find(|s| s.content.starts_with('$')).unwrap();
         assert_eq!(cost_span.style.fg, Some(theme.usage_cost));
-        // 模型行与 cwd 同色(footer_cwd),不再用 muted
+        // 模型行黄色(warning,与 git 分支/subagent 计数同色)
         let model_span = out[1]
             .spans
             .iter()
             .find(|s| s.content.contains("mock/m1"))
             .unwrap();
-        assert_eq!(model_span.style.fg, Some(theme.footer_cwd));
-        // thinking 段弱化,与 ctx 段的 (auto) 标记同色(dim)
+        assert_eq!(model_span.style.fg, Some(theme.warning));
+        // thinking 段整段白色(含 · 分隔符)
         let thinking_span = out[1]
             .spans
             .iter()
             .find(|s| s.content.starts_with(" · thinking:"))
             .unwrap_or_else(|| panic!("thinking 段应独立成 span"));
-        assert_eq!(thinking_span.style.fg, Some(theme.dim));
+        assert_eq!(thinking_span.style.fg, Some(theme.footer_thinking));
     }
 
     #[test]

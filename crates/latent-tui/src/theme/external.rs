@@ -41,6 +41,13 @@ pub fn from_name(name: ThemeName) -> Theme {
     // 信息第二色阶:info 与 secondary 的中点(蓝紫过渡),与信息主色同段显示时
     // 可区分(中点必异于两端),又不逸出冷色信息家族
     let info_alt = blend(p.info, p.secondary, 0.5);
+    // footer agent 值与 thinking 段:深色主题统一纯白(与弱文字灰拉开亮度
+    // 差);浅色主题退化为正文字色,避免白底白字不可读
+    let footer_white = if p.is_dark() {
+        Color::Rgb(0xff, 0xff, 0xff)
+    } else {
+        Color::Rgb(0x38, 0x3a, 0x42)
+    };
     let mut theme = Theme {
         // 绿=主色:与 success 同源,用于选中项/cwd/行内代码等强调
         accent: p.success,
@@ -89,6 +96,8 @@ pub fn from_name(name: ThemeName) -> Theme {
         border_bash: p.success,
         spinner: p.secondary,
         footer_cwd: p.success,
+        footer_agent: footer_white,
+        footer_thinking: footer_white,
         usage_input: p.info,
         usage_output: p.success,
         usage_cache: p.secondary,

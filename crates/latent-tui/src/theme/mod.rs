@@ -61,6 +61,10 @@ pub struct Theme {
     pub border_bash: Color,
     pub spinner: Color,
     pub footer_cwd: Color,
+    /// footer agent 值(main;深色主题统一白色,浅色主题退化为正文字色)
+    pub footer_agent: Color,
+    /// footer thinking 段(含 · 分隔符整段;深色主题统一白色)
+    pub footer_thinking: Color,
     /// footer token 段:输入 token(pi usageInput)
     pub usage_input: Color,
     /// footer token 段:输出 token(pi usageOutput)
