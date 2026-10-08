@@ -258,13 +258,15 @@ fn convert_messages(model: &Model, messages: &[Message], compat: &ResolvedCompat
                     render_system_message_update(msg)
                 };
                 if !text.is_empty() {
-                    params.push(json!({"role": instruction_role, "content": text}));
+                    // 系统提示词(含中途系统更新)恒用 system 角色:
+                    // developer 角色只保留给 Developer 指令消息(模式节/项目上下文)
+                    params.push(json!({"role": "system", "content": text}));
                 }
                 last_role = Some("system");
                 index += 1;
             }
             Message::Developer { content, .. } => {
-                // 可切换模式节等请求级补充指令:保持在原位(消息数组末尾),
+                // 指令型消息(模式节/项目上下文等):保持在原位,
                 // reasoning 模型用 developer 角色,否则降级 system
                 if !content.is_empty() {
                     params.push(json!({"role": instruction_role, "content": content}));
@@ -1119,6 +1121,30 @@ mod tests {
         let out = convert_messages(&reasoning, &[Message::developer("mode reminder")], &compat);
         assert_eq!(out[0]["role"], "developer");
         assert_eq!(out[0]["content"], "mode reminder");
+    }
+
+    #[test]
+    fn system_message_always_maps_to_system_role() {
+        // 系统提示词恒用 system 角色:即使 reasoning 模型支持 developer,
+        // developer 角色只保留给 Developer 指令消息
+        let plain = Model::minimal("m", "openai-completions", "openai");
+        let reasoning = Model {
+            reasoning: true,
+            ..plain.clone()
+        };
+        for model in [&plain, &reasoning] {
+            let compat = resolve_compat(model);
+            let context =
+                crate::transcript::normalize_context(crate::types::Context {
+                    system_prompt: Some("base prompt".into()),
+                    messages: vec![Message::user_text("hi")],
+                    tools: vec![],
+                });
+            let out = convert_messages(model, &context.messages, &compat);
+            assert_eq!(out[0]["role"], "system");
+            assert_eq!(out[0]["content"], "base prompt");
+            assert_eq!(out[1]["role"], "user");
+        }
     }
 
     #[test]

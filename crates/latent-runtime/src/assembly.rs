@@ -714,6 +714,14 @@ fn resolve_tool_call_limit(configured: Option<u32>) -> Option<u32> {
     }
 }
 
+/// 项目根 AGENTS.md → 项目上下文内容(新会话装配期注入;不存在/为空/
+/// 读取失败 = None,静默跳过)。
+fn load_agents_md(cwd: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(cwd.join("AGENTS.md")).ok()?;
+    let trimmed = content.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// 检索忽略规则 → 系统提示词规则(无规则 = 关闭过滤 = 不注入)。主会话检索多经
 /// bash(rg/find/ls),工具层过滤只覆盖只读工具集;这里把同一份忽略规则同步给
 /// 模型,约束 bash 等绕过工具层过滤的检索路径。
@@ -1063,7 +1071,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
 
     // transcript 统一:resume 时从 Session projection 回填初始转录(source of
     // truth → context);设置态(thinking level、激活工具集、会话模式)一并恢复
-    let (seed_messages, seed_thinking_level, seed_active_tools, seed_mode) = match &session_store {
+    let (mut seed_messages, seed_thinking_level, seed_active_tools, seed_mode) = match &session_store {
         SessionStore::Resume { .. } => {
             let context = latent_session::build_session_context(
                 &session_manager.branch_entries(),
@@ -1074,6 +1082,20 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         }
         _ => (Vec::new(), "off".to_string(), None, None),
     };
+    // 项目根 AGENTS.md → 项目上下文:仅新会话装配期注入(resume 不重复注入,
+    // 历史转录已有)。固定在首条用户消息之前,经 convert_to_llm 折叠为
+    // developer 消息;同步落盘为 message entry,恢复后仍在上下文。
+    // 文件不存在/读取失败 = 静默跳过;Memory 会话(测试)不注入保雲测试不依赖仓库根文件。
+    if matches!(session_store, SessionStore::New { .. }) {
+        if let Some(content) = load_agents_md(&cwd) {
+            let message = latent_agent::AgentMessage::project_context(content);
+            seed_messages.push(message.clone());
+            let sink = SessionManagerSink(manager_holder.clone());
+            if let Err(error) = sink.append(&message).await {
+                eprintln!("[latent] agents.md append failed: {error}");
+            }
+        }
+    }
     // 模式优先级(13 文档 §8.1):CLI 显式 > resume 的 ModeChange entry > 默认
     let resume_or_default = match &session_store {
         SessionStore::Resume { .. } => seed_mode.unwrap_or(default_session_mode),
@@ -1826,6 +1848,24 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    // ---- AGENTS.md 项目上下文 ----
+
+    #[test]
+    fn load_agents_md_reads_trims_and_skips_missing_or_blank() {
+        let project = TempDir::new("agents_md");
+        // 文件不存在 = None
+        assert_eq!(load_agents_md(&project.0), None);
+        // 纯空白 = None
+        project.write_file("AGENTS.md", "   \n\t\n");
+        assert_eq!(load_agents_md(&project.0), None);
+        // 有内容 = trim 后原样
+        project.write_file("AGENTS.md", "\n# Rules\n- use pnpm\n");
+        assert_eq!(
+            load_agents_md(&project.0),
+            Some("# Rules\n- use pnpm".to_string())
+        );
     }
 
     // ---- contextSnapshot 开关(默认关) ----

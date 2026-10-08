@@ -225,9 +225,10 @@ pub struct AgentContext {
 #[derive(Debug, Clone, Copy)]
 pub struct TurnLimits {
     pub max_turns: Option<u32>,
-    /// 工具调用连续次数软上限:达标后循环注入一条 user 收敛提示
-    /// (每次 run 一次),再超 `TOOL_CALL_LIMIT_GRACE` 次仍不停则以
-    /// `BudgetExhausted(MaxToolCalls)` 硬停。
+    /// 工具调用连续次数上限:达标后循环注入一条 user 收敛提示(每次 run
+    /// 一次),再超 `TOOL_CALL_LIMIT_GRACE` 次仍不停则以
+    /// `BudgetExhausted(MaxToolCalls)` 硬停。软/硬两段均受
+    /// `LoopHooks::tool_call_guard_enabled` 门控(业务层按会话模式决定)。
     pub max_tool_calls: Option<u32>,
     pub max_total_tokens: Option<u64>,
     pub deadline: Option<std::time::Instant>,
@@ -490,12 +491,15 @@ impl LoopState {
         {
             return Some(RunStop::BudgetExhausted(BudgetKind::MaxTurns));
         }
-        if self
-            .limits
-            .max_tool_calls
-            .is_some_and(|max| {
-                self.tool_call_count >= max.saturating_add(TOOL_CALL_LIMIT_GRACE)
-            })
+        // 工具调用硬上限受 hooks 接缝门控(业务层按会话模式决定是否生效;
+        // 关闭时软/硬护栏均不应用,其余预算护栏不受影响)
+        if self.hooks.tool_call_guard_enabled()
+            && self
+                .limits
+                .max_tool_calls
+                .is_some_and(|max| {
+                    self.tool_call_count >= max.saturating_add(TOOL_CALL_LIMIT_GRACE)
+                })
         {
             return Some(RunStop::BudgetExhausted(BudgetKind::MaxToolCalls));
         }
@@ -520,11 +524,14 @@ impl LoopState {
     }
 
     /// 工具调用软上限的收敛提示:首次 `tool_call_count >= max_tool_calls`
-    /// 时返回一条 user 消息并置位(每次 run 只提示一次);未配置上限或尚未
-    /// 达标返回 None。
+    /// 时返回一条 user 消息并置位(每次 run 只提示一次);未配置上限、尚未
+    /// 达标或护栏被 hooks 门控关闭时返回 None。
     fn take_tool_limit_warning(&mut self) -> Option<AgentMessage> {
         let max_calls = self.limits.max_tool_calls?;
-        if self.tool_limit_warned || self.tool_call_count < max_calls {
+        if !self.hooks.tool_call_guard_enabled()
+            || self.tool_limit_warned
+            || self.tool_call_count < max_calls
+        {
             return None;
         }
         self.tool_limit_warned = true;

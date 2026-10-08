@@ -385,6 +385,15 @@ impl LoopHooks for SessionCompactionHooks {
         self.inner.convert_to_llm(msgs)
     }
 
+    /// 工具调用护栏仅 Plan 模式生效(收敛提示 + 宽限后硬停);无引擎时
+    /// 保持默认启用(纯 loop 层测试/无权限装配行为不变)。
+    fn tool_call_guard_enabled(&self) -> bool {
+        self.permission
+            .as_ref()
+            .map(|engine| engine.mode() == SessionMode::Plan)
+            .unwrap_or(true)
+    }
+
     async fn transform_context(&self, msgs: Vec<AgentMessage>) -> Vec<AgentMessage> {
         self.inner.transform_context(msgs).await
     }

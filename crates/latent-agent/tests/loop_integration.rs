@@ -1463,7 +1463,13 @@ async fn max_tool_calls_budget_stops_batch_loops() {
     // 硬上限(软上限 + GRACE):终止通知作为最后一条消息进转录
     let last = output.messages.last().expect("messages");
     let assistant = last.as_assistant().expect("last is assistant notice");
-    assert!(assistant.text_content().contains("已达上限"));
+    assert!(
+        assistant
+            .text_content()
+            .contains("maximum number of consecutive tool calls"),
+        "终止通知应说明护栏触发: {}",
+        assistant.text_content()
+    );
     // 收敛提示只在达标时注入一次
     let user_count = output
         .messages
@@ -1528,13 +1534,91 @@ async fn tool_call_limit_injects_convergence_warning_then_model_answers() {
         unreachable!("filtered above");
     };
     assert!(
-        content.contains("2 次工具"),
+        content.contains("2 consecutive tool calls"),
         "提示应携带实际调用次数: {content}"
     );
     // 提示之后模型文本作答为最后一条消息
     let last = output.messages.last().expect("messages");
     let assistant = last.as_assistant().expect("last is assistant");
     assert_eq!(assistant.text_content(), "结论:已收敛");
+}
+
+/// 关闭工具调用护栏的 hooks(业务层“按会话模式决定是否生效”的 L1 接缝)。
+struct GuardDisabledHooks;
+
+#[async_trait]
+impl LoopHooks for GuardDisabledHooks {
+    fn convert_to_llm(&self, msgs: &[AgentMessage]) -> Vec<latent_ai::Message> {
+        PassthroughHooks.convert_to_llm(msgs)
+    }
+
+    fn tool_call_guard_enabled(&self) -> bool {
+        false
+    }
+}
+
+/// 工具调用护栏受 hooks 门控:关闭后(业务层非 Plan 模式)软上限收敛提示
+/// 与宽限后硬停均不生效,run 跑满脚本正常 EndTurn。
+#[tokio::test]
+async fn tool_call_guard_disabled_by_hooks_skips_warning_and_hard_stop() {
+    let m = model();
+    let tool = TestTool::new("loop");
+    // 49 轮工具调用(远超软上限 4 + GRACE 10)+ 末轮文本作答
+    let turns: Vec<ScriptedTurn> = (0..49)
+        .map(|i| {
+            ScriptedTurn::tool_calls(
+                &m,
+                vec![tool_call(
+                    format!("t{i}").leak(),
+                    "loop",
+                    serde_json::json!({"x": "1"}),
+                )],
+            )
+        })
+        .chain(std::iter::once(text_turn(&m, "完成")))
+        .collect();
+    let provider = ScriptedProvider::new(&m, turns);
+    let limits = latent_agent::TurnLimits {
+        max_tool_calls: Some(4),
+        ..Default::default()
+    };
+    let (output, _receiver) = latent_agent::run_agent_loop(
+        vec![AgentMessage::user("hi")],
+        latent_agent::AgentContext {
+            system: None,
+            messages: Vec::new(),
+            tools: vec![tool],
+        },
+        Arc::new(GuardDisabledHooks),
+        latent_agent::LoopConfig {
+            limits,
+            ..latent_agent::LoopConfig::new(model())
+        },
+        Arc::new(provider),
+        Arc::new(Collector::default()),
+        CancellationToken::new(),
+        latent_agent::create_injection_endpoints().1,
+    )
+    .await;
+
+    // 不硬停:跑满脚本正常结束
+    assert_eq!(output.stop, latent_agent::RunStop::EndTurn);
+    // 无收敛提示(仅初始 prompt 一条 user),无终止通知
+    let user_count = output
+        .messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::User { .. }))
+        .count();
+    assert_eq!(user_count, 1, "不应注入收敛提示");
+    assert!(
+        !output.messages.iter().any(|message| message
+            .as_assistant()
+            .map(|a| a
+                .text_content()
+                .contains("maximum number of consecutive tool calls"))
+            .unwrap_or(false)),
+        "不应合成终止通知"
+    );
 }
 
 #[tokio::test]

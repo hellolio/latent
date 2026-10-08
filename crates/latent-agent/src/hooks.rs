@@ -171,6 +171,13 @@ pub trait LoopHooks: Send + Sync {
     fn tool_execution(&self) -> ToolExecution {
         ToolExecution::Parallel
     }
+
+    /// 工具调用护栏(`max_tool_calls` 软上限收敛提示 + 宽限后硬停)是否启用。
+    /// 默认启用;业务层按会话模式覆盖(如仅 Plan 模式生效)。L1 不感知
+    /// SessionMode,经此接缝查询当前是否应用护栏。
+    fn tool_call_guard_enabled(&self) -> bool {
+        true
+    }
 }
 
 /// 默认 hooks:AgentMessage → LLM 消息的折叠(`Custom` 不进上下文)。
@@ -235,6 +242,9 @@ impl LoopHooks for PassthroughHooks {
                     summary
                 ))),
                 AgentMessage::ModeSection { content, timestamp: _ } => {
+                    Some(Message::developer(content.clone()))
+                }
+                AgentMessage::ProjectContext { content, timestamp: _ } => {
                     Some(Message::developer(content.clone()))
                 }
                 AgentMessage::Custom(_) => None,

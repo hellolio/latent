@@ -393,7 +393,7 @@ pub fn viewport(
             // 流式中全量滚动显示:prose 行保持 ✻ 前缀,围栏代码块实时 syntect
             // 高亮(已闭合围栏走增量缓存);≤ preview_cap 行全显,超出取尾部
             // 窗口;完成定稿后由 thinking_block 折叠为 4 行 + 余量提示
-            let mut rows = thinking_rows(
+            let rows = thinking_rows(
                 text,
                 theme,
                 width,

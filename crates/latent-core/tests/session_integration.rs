@@ -1,17 +1,18 @@
 //! AgentSession 集成测试(04 文档):装配、事件层、steer/followUp、
 //! setActiveToolsByName、系统提示词 diff、overflow 恢复、持久化。
 
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use latent_agent::{
-    AgentEvent, AgentMessage, PassthroughHooks, Tool, ToolCall, ToolError, ToolOutput, ToolUpdater,
+    AgentEvent, AgentMessage, BudgetKind, PassthroughHooks, RunStop, Tool, ToolCall, ToolError,
+    ToolOutput, ToolUpdater, TurnLimits,
 };
 use latent_ai::{Model, ScriptedProvider, ScriptedTurn};
 use latent_core::{
-    create_agent_session, AgentSessionConfig, AgentSessionEvent, CoreError, NoopUi,
-    SessionSubscriber, SystemPromptOptions,
+    create_agent_session, AgentSessionConfig, AgentSessionEvent, ApprovalRules, CoreError, NoopUi,
+    PermissionEngine, SandboxConfig, SessionSubscriber, SystemPromptOptions,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -864,4 +865,106 @@ async fn auto_compact_fires_mid_run_at_tool_boundary() {
     );
     let last = messages.last().unwrap().as_assistant().unwrap();
     assert_eq!(last.text_content(), "第二轮回复");
+}
+
+// ---- 工具调用护栏仅 Plan 模式生效(SessionCompactionHooks 门控) ----
+
+/// 带 PermissionEngine 的护栏测试会话:12 轮工具调用 + 1 轮文本作答,
+/// max_tool_calls = 2(硬停阈值 = 2 + GRACE 10 = 12)。
+async fn build_guard_session(mode: SessionMode) -> (latent_core::AgentSession, Arc<TestTool>) {
+    let m = model();
+    let turns: Vec<ScriptedTurn> = (0..12)
+        .map(|i| ScriptedTurn::tool_calls(&m, vec![tool_call(&format!("t{i}"), "counter")]))
+        .chain(std::iter::once(ScriptedTurn::text(&m, "完成")))
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(&m, turns));
+    let tool = Arc::new(TestTool {
+        name: "counter".into(),
+        calls: AtomicU32::new(0),
+    });
+    let engine = Arc::new(PermissionEngine::new(
+        mode,
+        SandboxConfig::default(),
+        ApprovalRules::default(),
+        std::env::temp_dir(),
+        true,
+    ));
+    let session = create_agent_session(AgentSessionConfig {
+        provider,
+        model: m,
+        hooks: Arc::new(PassthroughHooks),
+        ui: Arc::new(NoopUi),
+        extensions: latent_core::ExtensionRegistry::default(),
+        tools: vec![tool.clone()],
+        active_tool_names: None,
+        system_prompt: SystemPromptOptions::default(),
+        limits: TurnLimits {
+            max_tool_calls: Some(2),
+            ..Default::default()
+        },
+        stream_options: Default::default(),
+        subscribers: None,
+        session_sink: None,
+        seed_messages: Vec::new(),
+        compactor: None,
+        permission: Some(engine),
+    })
+    .await
+    .unwrap();
+    (session, tool)
+}
+
+#[tokio::test]
+async fn tool_call_guard_hard_stops_in_plan_mode() {
+    let (session, tool) = build_guard_session(SessionMode::Plan).await;
+    let outcome = session.prompt("hi").await.unwrap();
+    assert_eq!(
+        outcome.stop(),
+        RunStop::BudgetExhausted(BudgetKind::MaxToolCalls),
+        "Plan 模式下达 12 次工具调用(2 + GRACE 10)应硬停"
+    );
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 12);
+
+    // 收敛提示恰好一条(初始 prompt + 提示),终止通知为最后一条消息
+    let messages = session.agent().messages();
+    let user_count = messages
+        .iter()
+        .filter(|m| matches!(m, AgentMessage::User { .. }))
+        .count();
+    assert_eq!(user_count, 2, "初始 prompt + 恰好一条收敛提示");
+    let last = messages.last().unwrap().as_assistant().unwrap();
+    assert!(
+        last.text_content()
+            .contains("maximum number of consecutive tool calls"),
+        "终止通知应说明护栏触发"
+    );
+}
+
+#[tokio::test]
+async fn tool_call_guard_inactive_in_confirm_mode() {
+    let (session, tool) = build_guard_session(SessionMode::Confirm).await;
+    let outcome = session.prompt("hi").await.unwrap();
+    assert_eq!(
+        outcome.stop(),
+        RunStop::EndTurn,
+        "非 Plan 模式不设工具调用上限,跑满脚本正常结束"
+    );
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 12);
+
+    // 无收敛提示、无终止通知
+    let messages = session.agent().messages();
+    let user_count = messages
+        .iter()
+        .filter(|m| matches!(m, AgentMessage::User { .. }))
+        .count();
+    assert_eq!(user_count, 1, "不应注入收敛提示");
+    assert!(
+        !messages.iter().any(|m| m
+            .as_assistant()
+            .map(|a| a
+                .text_content()
+                .contains("maximum number of consecutive tool calls"))
+            .unwrap_or(false)),
+        "不应合成终止通知"
+    );
 }

@@ -100,6 +100,10 @@ impl LoopHooks for ApprovalHooks {
         self.inner.convert_to_llm(msgs)
     }
 
+    fn tool_call_guard_enabled(&self) -> bool {
+        self.inner.tool_call_guard_enabled()
+    }
+
     async fn auto_compact_context(
         &self,
         model: &latent_ai::Model,

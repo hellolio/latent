@@ -77,6 +77,15 @@ pub enum AgentMessage {
         #[serde(default)]
         timestamp: i64,
     },
+    /// 项目上下文(AGENTS.md 等项目根指令文件):新会话装配期注入,固定在
+    /// 首条用户消息之前(convert_to_llm → developer 消息);内容构造时已包好
+    /// `<agents_md>` 标记,转录与持久化所见即所得
+    #[serde(rename_all = "camelCase")]
+    ProjectContext {
+        content: String,
+        #[serde(default)]
+        timestamp: i64,
+    },
     /// 扩展/自定义消息逃生口;`kind` 做判别,details 边界统一 `serde_json::Value`(09 B5.4)
     Custom(CustomMessage),
 }
@@ -136,6 +145,14 @@ impl AgentMessage {
     pub fn mode_section(content: impl Into<String>) -> Self {
         AgentMessage::ModeSection { content: content.into(), timestamp: now_ms() }
     }
+
+    /// 项目上下文消息便捷构造:内容包一层 `<agents_md>` 标记。
+    pub fn project_context(content: impl Into<String>) -> Self {
+        AgentMessage::ProjectContext {
+            content: format!("<agents_md>\n{}\n</agents_md>", content.into()),
+            timestamp: now_ms(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -159,6 +176,7 @@ mod tests {
             AgentMessage::BranchSummary { summary: "s".into(), timestamp: 0 },
             AgentMessage::CompactionSummary { summary: "c".into(), timestamp: 0 },
             AgentMessage::mode_section("You are entering Plan mode"),
+            AgentMessage::ProjectContext { content: "<agents_md>\nhi\n</agents_md>".into(), timestamp: 0 },
         ];
         for message in messages {
             let value = serde_json::to_value(&message).unwrap();

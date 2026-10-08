@@ -3,7 +3,8 @@
 use latent_agent::{AgentMessage, AssistantMessage, ContentBlock, CustomMessage, StopReason, Usage};
 use latent_session::compaction::SummarizationRequest;
 use latent_session::{
-    build_context_entries, build_session_projection, create_fixed_summarizer, create_session,
+    build_context_entries, build_session_context, build_session_projection,
+    create_fixed_summarizer, create_session,
     create_session_in_dir, create_session_with, estimate_context_tokens, estimate_tokens,
     find_cut_point, run_compaction, serialize_conversation, should_compact, CompactionOutcome,
     CompactionSettings, ContextReplacement, Entry, SummarizationResponse, Summarizer,
@@ -51,6 +52,22 @@ fn tool_call_assistant(call_id: &str, name: &str, path: &str) -> AgentMessage {
         end_turn: None,
         timestamp: 0,
     }))
+}
+
+#[test]
+fn project_context_entry_persists_and_projects_back() {
+    // AGENTS.md 项目上下文作为普通 message entry 落盘,恢复投影后仍在上下文
+    let session = create_session(None::<String>).unwrap();
+    let agents_md = AgentMessage::project_context("# Rules\n- use pnpm");
+    session.append_message(agents_md.clone()).unwrap();
+    session.append_message(AgentMessage::user("hi")).unwrap();
+    session
+        .append_message(assistant("ok", 10, StopReason::Stop))
+        .unwrap();
+
+    let context = build_session_context(&session.entries(), None).messages;
+    assert_eq!(context[0], agents_md, "恢复后项目上下文仍在首位");
+    assert!(matches!(context[1], AgentMessage::User { .. }));
 }
 
 #[test]

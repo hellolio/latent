@@ -146,6 +146,12 @@ fn replay_message(message: &AgentMessage, theme: &latent_tui::Theme) -> Vec<Tran
                 ratatui::style::Style::new().fg(theme.dim),
             )),
         )],
+        AgentMessage::ProjectContext { content, .. } => vec![TranscriptItem::Line(
+            ratatui::text::Line::from(ratatui::text::Span::styled(
+                format!("── 项目上下文: {}", first_line(content)),
+                ratatui::style::Style::new().fg(theme.dim),
+            )),
+        )],
         AgentMessage::Custom(_) => vec![TranscriptItem::Blank],
     }
 }

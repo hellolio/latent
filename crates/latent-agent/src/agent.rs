@@ -78,6 +78,10 @@ impl LoopHooks for AgentHookAdapter {
         self.inner.convert_to_llm(msgs)
     }
 
+    fn tool_call_guard_enabled(&self) -> bool {
+        self.inner.tool_call_guard_enabled()
+    }
+
     async fn transform_context(&self, msgs: Vec<AgentMessage>) -> Vec<AgentMessage> {
         self.inner.transform_context(msgs).await
     }
