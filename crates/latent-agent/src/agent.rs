@@ -524,6 +524,7 @@ impl Agent {
         let start = AgentEvent::MessageStart {
             message: Box::new(entry.clone()),
             partial: None,
+            started_at_ms: None,
         };
         let end = AgentEvent::MessageEnd {
             message: Box::new(entry.clone()),
@@ -545,7 +546,7 @@ impl Agent {
     fn reduce(&self, event: &AgentEvent) {
         let mut state = self.state.lock().unwrap();
         match event {
-            AgentEvent::MessageStart { message, partial } => {
+            AgentEvent::MessageStart { message, partial, .. } => {
                 state.streaming_partial = partial.clone();
                 if let AgentMessage::Assistant(assistant) = &**message {
                     state.streaming_message = Some((**assistant).clone());

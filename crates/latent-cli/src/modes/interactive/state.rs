@@ -3,7 +3,7 @@
 //! 按 `theme + width + expanded` 从状态推导,handlers.rs 只改状态。
 
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use latent_tui::{CommandPopup, Editor, FilePopup, Key, SelectList, Theme, UiLine};
 
@@ -298,8 +298,11 @@ pub struct InteractiveState {
     /// 流式中的 thinking 累积(预览尾部;首个文本 delta 时提交进转录)
     pub pending_thinking: Option<String>,
     pub usage: UsageTracker,
-    /// 当前回合流式计时(MessageStart 起点与首个 delta 时刻):TurnEnd 时
-    /// 换算 TTFT 与 TPS。无 tokio 依赖,全部本地 Instant。
+    /// 当前回合流式计时(请求发出起点与首个 delta 时刻):TurnEnd 时
+    /// 换算 TTFT 与 TPS。无 tokio 依赖,全部本地 Instant。起点由
+    /// MessageStart 携带的 started_at_ms 回推(instant_from_ms):重试
+    /// 装饰器把 Start 帧缓冲到首个内容 delta 才放行,事件到达时刻
+    /// 不能作 TTFT 起点(否则恒 0)。
     pub stream_started: Option<Instant>,
     pub first_delta_at: Option<Instant>,
     /// 最近一回合输出速度(tok/s)与首 token 延迟(秒),用量行展示
@@ -560,9 +563,34 @@ impl InteractiveState {
     }
 }
 
+/// epoch ms → Instant(TTFT 计时起点):以当下时刻回推。负差值(时钟
+/// 偏移/乱序)回退当下;超出单调时钟原点(开机以来)的差值同样回退当下。
+pub(crate) fn instant_from_ms(ms: Option<i64>) -> Instant {
+    let Some(ms) = ms else {
+        return Instant::now();
+    };
+    let delta = (latent_agent::now_ms() - ms).max(0) as u64;
+    Instant::now()
+        .checked_sub(Duration::from_millis(delta))
+        .unwrap_or_else(Instant::now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instant_from_ms_reconstructs_elapsed_and_saturates() {
+        // 正常回推:1s 前的 epoch ms → 约早 1s 的 Instant
+        let past = latent_agent::now_ms() - 1_000;
+        let instant = instant_from_ms(Some(past));
+        let back = Instant::now().duration_since(instant);
+        assert!(back >= Duration::from_millis(900) && back <= Duration::from_millis(1_100), "{back:?}");
+        // None(非请求路径)与未来时刻/时钟偏移:回退当下(差值≈0)
+        assert!(Instant::now().duration_since(instant_from_ms(None)) < Duration::from_millis(50));
+        let future = latent_agent::now_ms() + 60_000;
+        assert!(Instant::now().duration_since(instant_from_ms(Some(future))) < Duration::from_millis(50));
+    }
 
     #[test]
     fn stream_wrap_cache_incremental_matches_one_shot() {

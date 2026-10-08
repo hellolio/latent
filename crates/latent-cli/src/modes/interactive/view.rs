@@ -407,6 +407,7 @@ pub fn viewport(
         output_tokens: state.usage.total.output,
         cache_read: state.usage.total.cache_read,
         cache_write: state.usage.total.cache_write,
+        cache_reported: state.usage.cache_ever_reported,
         cost_total: state.usage.total.cost.total,
         context_window: state.context_window,
         context_tokens: state.context_tokens,

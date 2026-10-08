@@ -222,6 +222,7 @@ fn assistant_start() -> latent_agent::AgentEvent {
             latent_ai::AssistantMessage::pending(&model),
         ))),
         partial: None,
+        started_at_ms: None,
     }
 }
 

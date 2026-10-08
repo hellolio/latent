@@ -14,7 +14,8 @@ use super::bash;
 use super::events::UiEvent;
 use super::replay;
 use super::state::{
-    InteractiveState, ScrollRequest, SelectKind, SelectRequest, Status, ToolStatus, TranscriptItem,
+    instant_from_ms, InteractiveState, ScrollRequest, SelectKind, SelectRequest, Status, ToolStatus,
+    TranscriptItem,
 };
 use super::usage::{context_tokens_of, usage_line};
 use super::view;
@@ -1716,14 +1717,20 @@ async fn handle_session_event(
                 }
                 }
             },
-        AgentSessionEvent::Agent(latent_agent::AgentEvent::MessageStart { message, .. }) => {
+        AgentSessionEvent::Agent(latent_agent::AgentEvent::MessageStart {
+            message,
+            started_at_ms,
+            ..
+        }) => {
             // 新 assistant 消息:重置流式缓冲与 thinking 累积,并作为消息组
             // 起始补一个空行(外框移除后组间靠空行分隔;commit_blank 去重)
             if matches!(message.as_ref(), latent_agent::AgentMessage::Assistant(_)) {
                 state.stream_text.clear();
                 state.pending_thinking = None;
-                // 流式计时起点:首个 delta 时记 TTFT,TurnEnd 时换算 TPS/TTFT
-                state.stream_started = Some(Instant::now());
+                // 流式计时起点:重试装饰器把 Start 帧缓冲到首个内容 delta
+                // 才放行,事件到达时刻不能作为 TTFT 起点(否则恒 0),用
+                // 请求发出时刻回推;非请求路径(注入)回退当下时刻
+                state.stream_started = Some(instant_from_ms(started_at_ms));
                 state.first_delta_at = None;
                 state.commit_blank();
             }
@@ -1945,7 +1952,8 @@ async fn handle_session_event(
 }
 
 /// 回合结束换算最近一回合的输出速度与首 token 延迟(footer 展示):
-/// TTFT = 首 delta − MessageStart(prefill);TPS = 输出 token ÷ 生成时长
+/// TTFT = 首 delta − 请求发出时刻(record_turn_speed;起点由 MessageStart
+/// 携带的 started_at_ms 回推);TPS = 输出 token ÷ 生成时长
 /// (首 delta → TurnEnd;TurnEnd 在工具执行前发出,时长即纯流式生成)。
 /// 计时缺失或输出为 0 不更新,保留上一回合数值。
 fn record_turn_speed(state: &mut InteractiveState, usage: &latent_ai::Usage) {
@@ -1992,7 +2000,12 @@ fn usage_item_of(state: &InteractiveState, usage: &latent_ai::Usage) -> Vec<Tran
     let speed = state.last_tps.zip(state.last_ttft);
     vec![
         TranscriptItem::Blank,
-        TranscriptItem::Line(latent_tui::UiLine::from(usage_line(usage, speed, &state.theme))),
+        TranscriptItem::Line(latent_tui::UiLine::from(usage_line(
+            usage,
+            state.usage.cache_ever_reported,
+            speed,
+            &state.theme,
+        ))),
         TranscriptItem::Blank,
     ]
 }

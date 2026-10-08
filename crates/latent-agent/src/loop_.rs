@@ -930,6 +930,7 @@ async fn emit_message_events(sink: &Arc<dyn Subscriber>, message: &AgentMessage)
     sink.on_event(&AgentEvent::MessageStart {
         message: Box::new(message.clone()),
         partial: None,
+        started_at_ms: None,
     })
     .await;
     sink.on_event(&AgentEvent::MessageEnd {
@@ -982,6 +983,11 @@ async fn stream_assistant_response(
         opts.api_key = hooks.get_api_key(&model.provider).await;
     }
 
+    // 请求发出时刻(epoch ms):重试装饰器把 Start 帧缓冲到首个内容 delta
+    // 才放行,MessageStart 事件的到达时刻不能作为 UI 的 TTFT 起点(否则
+    // 恒 0),以请求发出时刻为准(含建连/prefill/重试退避)
+    let request_started_ms = now_ms();
+
     let stream = provider.stream(model, transcript, opts).await;
     let mut stream = std::pin::pin!(stream);
     let shared_partial: SharedPartial = Arc::new(RwLock::new(AssistantMessage::pending(model)));
@@ -1021,6 +1027,7 @@ async fn stream_assistant_response(
                         AssistantMessage::pending(model),
                     ))),
                     partial: Some(shared_partial.clone()),
+                    started_at_ms: Some(request_started_ms),
                 })
                 .await;
             }
@@ -1077,6 +1084,7 @@ async fn stream_assistant_response(
                             AssistantMessage::pending(model),
                         ))),
                         partial: Some(shared_partial.clone()),
+                        started_at_ms: Some(request_started_ms),
                     })
                     .await;
                 }
@@ -1117,6 +1125,7 @@ async fn stream_assistant_response(
                     AssistantMessage::pending(model),
                 ))),
                 partial: Some(shared_partial.clone()),
+                started_at_ms: Some(request_started_ms),
             })
             .await;
             // 与终态路径事件序一致:update(快照) 先于 end

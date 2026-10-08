@@ -24,6 +24,10 @@ pub struct FooterData {
     pub cache_read: u64,
     /// 累计缓存写 token(命中率分母的一部分)
     pub cache_write: u64,
+    /// 会话曾上报过缓存(pi 主线 sticky 语义):本轮读/写均为 0(未命中)时
+    /// 仍显示括号并明确 0%,而非整段消失;从未上报(provider 无缓存)时
+    /// 退化为裸 ↑ input
+    pub cache_reported: bool,
     pub cost_total: f64,
     /// 上下文窗口(0 = 未知,不显示 ctx%)
     pub context_window: u64,
@@ -156,11 +160,12 @@ fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
     {
         // ↑ 显示完整 prompt 规模(input + cache 读 + cache 写),括号内给出
         // 缓存明细与命中率:U = input + cache_write(未命中,本次新发送),
-        // R = cache_read(命中),命中率 = R / ↑ 总量。
-        // 无缓存读写(如不带 prompt cache 的 provider)时退化为裸 ↑ input。
+        // R = cache_read(命中),命中率 = R / ↑ 总量。sticky:会话曾上报
+        // 过缓存时,本轮 0/0(未命中)仍显示括号并明确 0%;从未上报
+        // (provider 不带 prompt cache)时退化为裸 ↑ input。
         let prompt_total = data.input_tokens + data.cache_read + data.cache_write;
         let miss_total = data.input_tokens + data.cache_write;
-        let up = if data.cache_read + data.cache_write > 0 {
+        let up = if data.cache_read + data.cache_write > 0 || data.cache_reported {
             let hit_pct = (data.cache_read * 100).checked_div(prompt_total).unwrap_or(0);
             format!(
                 "↑ {} (U {} / R {} · {}%)",
@@ -178,7 +183,7 @@ fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
             Span::styled(up, Style::new().fg(theme.usage_input)),
         );
         // 命中/未命中明细随 ↑ 段的括号展示(替代旧 cache N% 段:数量信息
-        // 更完整且 80 列内放得下);无缓存读写的 provider 不展示
+        // 更完整且 80 列内放得下)
         push(
             &mut spans,
             &mut sep,
@@ -212,6 +217,8 @@ pub struct TurnUsageLine<'a> {
     pub cache_write: u64,
     pub reasoning: Option<u64>,
     pub cost_total: f64,
+    /// 会话曾上报过缓存(0/0 未命中轮仍显示括号,见 FooterData)
+    pub cache_reported: bool,
     /// (输出速度 tok/s, 首 token 延迟 s);None = 不显示速度段
     pub speed: Option<(f64, f64)>,
     pub theme: &'a Theme,
@@ -225,6 +232,7 @@ pub fn turn_usage_line(params: TurnUsageLine<'_>) -> Line<'static> {
         cache_write,
         reasoning,
         cost_total,
+        cache_reported,
         speed,
         theme,
     } = params;
@@ -234,6 +242,7 @@ pub fn turn_usage_line(params: TurnUsageLine<'_>) -> Line<'static> {
         output_tokens: output,
         cache_read,
         cache_write,
+        cache_reported,
         cost_total,
         ..FooterData::default()
     };
@@ -367,7 +376,34 @@ mod tests {
             subagent_active: 0,
             active_agent: None,
             mode: Some("confirm".into()),
+            cache_reported: true,
         }
+    }
+
+    #[test]
+    fn sticky_cache_reported_shows_zero_percent_bracket() {
+        // sticky(pi 主线语义):会话曾上报过缓存后,本轮 0/0(未命中)仍显示
+        // 括号并明确 0%(修前整段消失,看起来像"有时不显示命中率")
+        let mut d = data();
+        d.input_tokens = 115;
+        d.cache_read = 0;
+        d.cache_write = 0;
+        d.cache_reported = true;
+        let first = line_text(&lines(&d, 200, &theme())[0]);
+        assert!(first.contains("↑ 115 (U 115 / R 0 · 0%)"), "{first}");
+    }
+
+    #[test]
+    fn never_reported_cache_keeps_bare_input() {
+        // 从未上报缓存(provider 无 prompt cache):0/0 仍退化为裸 ↑ input
+        let mut d = data();
+        d.input_tokens = 115;
+        d.cache_read = 0;
+        d.cache_write = 0;
+        d.cache_reported = false;
+        let first = line_text(&lines(&d, 200, &theme())[0]);
+        assert!(first.contains("↑ 115"), "{first}");
+        assert!(!first.contains("R 0"), "{first}");
     }
 
     #[test]

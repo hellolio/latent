@@ -59,6 +59,11 @@ pub enum AgentEvent {
         /// partial 读口仅进程内有效:serde 跳过(跨进程由 delta 重建)
         #[serde(skip)]
         partial: Option<SharedPartial>,
+        /// 请求发出时刻(epoch ms,仅流式路径携带):重试装饰器把 Start 帧
+        /// 缓冲到首个内容 delta 才放行,事件到达时刻不能作为 UI 的 TTFT
+        /// 起点(否则恒为 0);None = 注入等非请求路径,UI 回退为当下时刻
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<i64>,
     },
     /// 流式增量(thinking/toolCall 参数逐块可见;完整快照经 partial 读口取用)
     MessageDelta { delta: MessageDeltaPayload },
