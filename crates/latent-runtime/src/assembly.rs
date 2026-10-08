@@ -79,6 +79,10 @@ struct SettingsFile {
     /// 超长 tool result 进转录的字符上限(头尾裁剪);未配置 = 默认 20000
     #[serde(rename = "toolResultMaxChars", alias = "tool_result_max_chars", default)]
     tool_result_max_chars: Option<usize>,
+    /// 工具调用连续次数软上限(`maxToolCalls`):达标后循环注入一条收敛
+    /// 提示,再超 10 次仍不停则强制终止本次执行;未配置 = 默认 30,0 = 不限制
+    #[serde(rename = "maxToolCalls", alias = "max_tool_calls", default)]
+    max_tool_calls: Option<u32>,
     /// 图片输入开关(`blockImages`):true = 发送给模型前把转录里的 Image 块
     /// 替换为文本占位符(模型不支持图片时无论此值都会替换);未配置 = false
     #[serde(rename = "blockImages", alias = "block_images", default)]
@@ -503,6 +507,9 @@ pub struct BuildOptions {
     pub search_ignore: latent_tools::SearchIgnore,
     /// 超长 tool result 字符上限:None = 默认 20000;Some(0) = 不裁剪。
     pub tool_result_max_chars: Option<usize>,
+    /// 工具调用连续次数软上限(settings `maxToolCalls`;None = 默认 30,
+    /// Some(0) = 不限制)。
+    pub max_tool_calls: Option<u32>,
     /// 图片输入开关(settings `blockImages`):true = 发送前 Image 块替换为
     /// 文本占位符(默认 false = 允许图片进转录)。
     pub block_images: bool,
@@ -604,6 +611,9 @@ pub struct SessionSettings {
     /// settings `toolResultMaxChars`:超长 tool result 进转录的字符上限
     /// (头尾裁剪);None = 默认 20000,0 = 不裁剪
     pub tool_result_max_chars: Option<usize>,
+    /// settings `maxToolCalls`:工具调用连续次数软上限(达标注入收敛提示,
+    /// 再超 10 次硬停);None = 默认 30,Some(0) = 不限制
+    pub max_tool_calls: Option<u32>,
     /// settings `blockImages`:发送前把转录里的 Image 块替换为文本占位符
     pub block_images: bool,
     /// settings 压缩配置(自动压缩阈值,见 `CompactionConfig`)
@@ -664,6 +674,7 @@ impl Default for SessionSettings {
             active_tools: None,
             search_ignore: latent_tools::SearchIgnore::default(),
             tool_result_max_chars: None,
+            max_tool_calls: None,
             block_images: false,
             compaction: CompactionConfig::default(),
             session_mode: SessionMode::Plan,
@@ -686,6 +697,20 @@ fn parse_headless_approval(name: Option<&String>) -> HeadlessApproval {
             HeadlessApproval::AutoApprove
         }
         _ => HeadlessApproval::Deny,
+    }
+}
+
+/// `maxToolCalls` 默认软上限(工具调用连续次数;达标注入收敛提示,再超
+/// `latent_agent::TOOL_CALL_LIMIT_GRACE` 次硬停)。
+const DEFAULT_MAX_TOOL_CALLS: u32 = 30;
+
+/// settings `maxToolCalls` → 循环层上限(纯函数,可测):未配置 = 默认 30;
+/// 0 = 不限制(None);其余透传。
+fn resolve_tool_call_limit(configured: Option<u32>) -> Option<u32> {
+    match configured {
+        None => Some(DEFAULT_MAX_TOOL_CALLS),
+        Some(0) => None,
+        Some(limit) => Some(limit),
     }
 }
 
@@ -725,6 +750,9 @@ pub fn load_session_settings() -> SessionSettings {
     let tool_result_max_chars = files
         .iter()
         .find_map(|settings| settings.tool_result_max_chars);
+    let max_tool_calls = files
+        .iter()
+        .find_map(|settings| settings.max_tool_calls);
     let block_images = files
         .iter()
         .find_map(|settings| settings.block_images)
@@ -759,6 +787,7 @@ pub fn load_session_settings() -> SessionSettings {
         active_tools: load_active_tool_names(),
         search_ignore: search_ignore_from(cwd.as_deref(), dir.as_deref()),
         tool_result_max_chars,
+        max_tool_calls,
         block_images,
         compaction,
         session_mode: parse_session_mode(session_mode.as_ref()),
@@ -924,6 +953,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         active_tools,
         search_ignore,
         tool_result_max_chars,
+        max_tool_calls,
         block_images,
         compaction,
         session_mode,
@@ -1337,7 +1367,10 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
                 custom_rules: merge_rules(prompt_override.1, search_ignore_rule(&search_ignore)),
                 ..Default::default()
             },
-            limits: latent_agent::TurnLimits::default(),
+            limits: latent_agent::TurnLimits {
+                max_tool_calls: resolve_tool_call_limit(max_tool_calls),
+                ..latent_agent::TurnLimits::default()
+            },
             stream_options,
             session_sink: Some(Arc::new(SessionManagerSink(manager_holder.clone()))),
             seed_messages,
@@ -1450,6 +1483,7 @@ pub async fn run_session(request: SessionRequest) -> Result<RunStop, String> {
         active_tools: request.settings.active_tools,
         search_ignore: request.settings.search_ignore,
         tool_result_max_chars: request.settings.tool_result_max_chars,
+        max_tool_calls: request.settings.max_tool_calls,
         block_images: request.settings.block_images,
         compaction: request.settings.compaction,
         session_mode: request.session_mode_override,
@@ -1884,6 +1918,45 @@ mod tests {
             Some("timeout 300".into()),
             "T10:settings commandPrefix 应进入装配通道"
         );
+    }
+
+    // ---- maxToolCalls(工具调用连续次数软上限) ----
+
+    #[test]
+    fn max_tool_calls_unset_defaults_to_30_and_zero_disables() {
+        assert_eq!(
+            resolve_tool_call_limit(None),
+            Some(30),
+            "未配置 = 默认 30"
+        );
+        assert_eq!(resolve_tool_call_limit(Some(0)), None, "0 = 不限制");
+        assert_eq!(resolve_tool_call_limit(Some(12)), Some(12), "显式值透传");
+    }
+
+    #[test]
+    fn max_tool_calls_project_wins_over_global_and_alias_works() {
+        let project = TempDir::new("mtc_prio");
+        let global = TempDir::new("mtc_prio_global");
+        let read = |project: &TempDir, global: &TempDir| {
+            read_settings_files(Some(&project.0), Some(&global.0.join(".latent")))
+                .iter()
+                .find_map(|settings| settings.max_tool_calls)
+        };
+        assert_eq!(
+            read(&project, &global),
+            None,
+            "未配置 = None(装配层回退默认 30)"
+        );
+        global.write_settings(r#"{"maxToolCalls": 50}"#);
+        assert_eq!(
+            read(&project, &global),
+            Some(50),
+            "项目未配置时回退全局"
+        );
+        project.write_settings(r#"{"maxToolCalls": 12}"#);
+        assert_eq!(read(&project, &global), Some(12), "项目显式配置优先");
+        project.write_settings(r#"{"max_tool_calls": 7}"#);
+        assert_eq!(read(&project, &global), Some(7), "snake_case alias 可用");
     }
 
     // ---- shell 运行时限 settings(bashTimeoutSecs / backgroundAfterSecs) ----

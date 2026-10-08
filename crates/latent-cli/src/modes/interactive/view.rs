@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use latent_tui::footer::FooterData;
 use latent_tui::{loader, markdown, tool_card, Theme, UiLine};
 
-use super::state::{InteractiveState, Status, TranscriptItem};
+use super::state::{InteractiveState, Status, ThinkingFenceCache, TranscriptItem};
 
 /// 流式输出实时预览的兜底行数(仅极端收缩场景;流式内容活跃时
 /// build_frame 按屏高给全量预算)。全帧差分渲染下尾部高度可自由
@@ -132,34 +132,127 @@ pub fn assistant_markdown(source: &str, theme: &Theme, width: usize) -> Vec<UiLi
         .render(source, width)
 }
 
-/// thinking 块(✻ 前缀,dim;进转录可回看)。折叠逻辑与工具输出一致:
-/// 默认保留前 `COLLAPSED_OUTPUT_ROWS` 行 + 余量提示,ctrl+o 展开全部。
+/// thinking 块(✻ 前缀,dim;进转录可回看,围栏代码块以高亮代码盒呈现)。
+/// 折叠逻辑与工具输出一致:默认保留前 `COLLAPSED_OUTPUT_ROWS` 行 + 余量
+/// 提示,ctrl+o 展开全部。
 pub fn thinking_block(text: &str, theme: &Theme, width: usize, expanded: bool) -> Vec<UiLine> {
-    let style = Style::new().fg(theme.thinking);
-    let mark = format!("  {} ", loader::THINKING_MARK);
-    let indent = " ".repeat(latent_tui::display_width(&mark));
-    let mark_width = latent_tui::display_width(&mark);
-    let inner = width.max(mark_width + 1) - mark_width;
-    let mut rows: Vec<UiLine> = Vec::new();
-    for raw in text.lines().filter(|raw| !raw.trim().is_empty()) {
-        for (i, piece) in latent_tui::wrap_to_width(raw, inner).into_iter().enumerate() {
-            let prefix = if i == 0 { mark.clone() } else { indent.clone() };
-            rows.push(Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(piece, style),
-            ]));
-        }
-    }
+    let mut rows = thinking_rows(text, theme, width, None, true);
     if expanded || rows.len() <= tool_card::COLLAPSED_OUTPUT_ROWS {
         return rows;
     }
+    let mark = format!("  {} ", loader::THINKING_MARK);
     let more = rows.len() - tool_card::COLLAPSED_OUTPUT_ROWS;
     rows.truncate(tool_card::COLLAPSED_OUTPUT_ROWS);
     rows.push(Line::from(Span::styled(
-        format!("{indent}… +{more} lines (ctrl+o to expand)"),
+        format!("{}… +{more} lines (ctrl+o to expand)", " ".repeat(latent_tui::display_width(&mark))),
         Style::new().fg(theme.dim),
     )));
     rows
+}
+
+/// thinking 内容渲染(流式预览与定稿转录共用):prose 行保持思考灰
+/// (流式逐行 ✻ 前缀 + 截断;定稿折行,首行 ✻、续行缩进),围栏代码块
+/// 渲染成 2 空格缩进的 syntect 高亮代码盒(与正文代码块同款,盒内空行
+/// 保留、不带 ✻)。`fences` 提供时已闭合围栏走增量缓存(流式逐帧调用);
+/// `prose_wrap` = 定稿路径(折行),否则流式截断。
+pub fn thinking_rows(
+    text: &str,
+    theme: &Theme,
+    width: usize,
+    mut fences: Option<&mut ThinkingFenceCache>,
+    prose_wrap: bool,
+) -> Vec<UiLine> {
+    let style = Style::new().fg(theme.thinking);
+    let mark = format!("  {} ", loader::THINKING_MARK);
+    let mark_width = latent_tui::display_width(&mark);
+    let highlighter = latent_tui::Highlighter::shared(theme.is_dark);
+    let mut rows: Vec<UiLine> = Vec::new();
+    // 围栏段整体收集渲染成代码盒(判定与 Markdown::render 同源:trim 后
+    // ``` 开头;空行仅在围栏内保留,prose 空行跳过与既有行为一致)
+    let mut fence: Option<(String, Vec<String>, usize)> = None; // (lang, 内容, 字节起点)
+    let mut offset = 0usize;
+    for piece in text.split_inclusive('\n') {
+        let raw = piece.strip_suffix('\n').unwrap_or(piece);
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let line_start = offset;
+        offset += piece.len();
+        if fence.is_some() {
+            if line.trim_start().starts_with("```") {
+                let (lang, code, start) = fence.take().unwrap();
+                rows.extend(fence_box_rows(
+                    &lang,
+                    &code,
+                    start,
+                    theme,
+                    highlighter,
+                    width,
+                    fences.as_deref_mut(),
+                ));
+            } else {
+                fence.as_mut().unwrap().1.push(line.to_string());
+            }
+            continue;
+        }
+        if line.trim_start().starts_with("```") {
+            fence = Some((line.trim_start()[3..].trim().to_string(), Vec::new(), line_start));
+            continue;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if prose_wrap {
+            let inner = width.max(mark_width + 1) - mark_width;
+            for (i, piece) in latent_tui::wrap_to_width(line, inner).into_iter().enumerate() {
+                let prefix = if i == 0 {
+                    mark.clone()
+                } else {
+                    " ".repeat(mark_width)
+                };
+                rows.push(Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(piece, style),
+                ]));
+            }
+        } else {
+            rows.push(Line::from(vec![
+                Span::styled(mark.clone(), style),
+                Span::styled(truncate_plain(line, width.saturating_sub(4)), style),
+            ]));
+        }
+    }
+    // 未闭合围栏照常成盒(与 Markdown::render 的尾部行为一致)
+    if let Some((lang, code, start)) = fence {
+        rows.extend(fence_box_rows(&lang, &code, start, theme, highlighter, width, fences));
+    }
+    rows
+}
+
+/// 围栏代码盒(2 空格缩进对齐 ✻);`fences` 提供时走增量缓存(流式路径)。
+fn fence_box_rows(
+    lang: &str,
+    code: &[String],
+    byte_start: usize,
+    theme: &Theme,
+    highlighter: &'static latent_tui::Highlighter,
+    width: usize,
+    fences: Option<&mut ThinkingFenceCache>,
+) -> Vec<UiLine> {
+    let source = code.join("\n");
+    let box_width = width.saturating_sub(2).max(1); // 左侧 2 空格缩进
+    let rendered = match fences {
+        Some(cache) => cache.rows(byte_start, &source, Some(lang), theme, highlighter, box_width),
+        None => {
+            latent_tui::markdown::code_block(&source, Some(lang), theme, Some(highlighter), box_width)
+        }
+    };
+    rendered
+        .into_iter()
+        .map(|row| {
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(row.spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// 错误/警告行。
@@ -274,23 +367,21 @@ pub fn viewport(
         content.extend(latent_tui::SelectList::render(&select.list, inner_w, theme));
         preview.extend(latent_tui::popup::frame(content, width, theme));
     } else if !state.stream_text.is_empty() {
-        // 全量折行读自增量缓存(append-only 时仅重折最后一个未完成源行,
-        // 长回复不再逐帧 O(n) 重算)。尾窗 = 全量行尾切 preview_cap,预览
-        // 恒为固定尾部窗口(不随 ctrl+o 展开态变化:展开态只作用于定稿转录)
-        let text_style = Style::new().fg(theme.assistant_text);
+        // 全量 Markdown 渲染读自增量缓存(append-only 下稳定块只渲染一次,
+        // 逐帧仅重渲未稳定尾段,长回复不再逐帧 O(n) 重算 + 全量 syntect)。
+        // 尾窗 = 全量行尾切 preview_cap,预览恒为固定尾部窗口(不随 ctrl+o
+        // 展开态变化:展开态只作用于定稿转录)
+        let md = markdown::Markdown::new(theme)
+            .with_highlight(latent_tui::Highlighter::shared(theme.is_dark));
         {
-            let mut cache = state.stream_wrap.borrow_mut();
-            let full = cache.update(&state.stream_text, width);
+            let mut cache = state.stream_markdown.borrow_mut();
+            let full = cache.update(&state.stream_text, width, &md);
             preview_full_len = full.len();
             if !state.following {
-                scroll_extra.extend(
-                    full.iter().map(|row| Line::from(Span::styled(row.clone(), text_style))),
-                );
+                scroll_extra.extend(full.iter().cloned());
             }
             let skip = full.len().saturating_sub(preview_cap);
-            for row in full.iter().skip(skip) {
-                preview.push(Line::from(Span::styled(row.clone(), text_style)));
-            }
+            preview.extend(full.iter().skip(skip).cloned());
         }
         preview_window = preview.len();
     } else if state
@@ -299,29 +390,22 @@ pub fn viewport(
         .is_some_and(|t| !t.trim().is_empty())
     {
         if let Some(text) = state.pending_thinking.as_ref() {
-            // 流式中全量滚动显示:≤ preview_cap 行全显,超出取尾部窗口;
-            // 完成定稿后由 thinking_block 折叠为 4 行 + 余量提示
-            let think_row = |row: &str| {
-                Line::from(vec![
-                    Span::styled(
-                        format!("  {} ", loader::THINKING_MARK),
-                        Style::new().fg(theme.thinking),
-                    ),
-                    Span::styled(
-                        truncate_plain(row, width.saturating_sub(4)),
-                        Style::new().fg(theme.thinking),
-                    ),
-                ])
-            };
-            let rows: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            // 流式中全量滚动显示:prose 行保持 ✻ 前缀,围栏代码块实时 syntect
+            // 高亮(已闭合围栏走增量缓存);≤ preview_cap 行全显,超出取尾部
+            // 窗口;完成定稿后由 thinking_block 折叠为 4 行 + 余量提示
+            let mut rows = thinking_rows(
+                text,
+                theme,
+                width,
+                Some(&mut state.thinking_fences.borrow_mut()),
+                false,
+            );
             preview_full_len = rows.len();
             if !state.following {
-                scroll_extra.extend(rows.iter().map(|row| think_row(row)));
+                scroll_extra.extend(rows.iter().cloned());
             }
-            let start = rows.len().saturating_sub(preview_cap);
-            for row in rows[start..].iter() {
-                preview.push(think_row(row));
-            }
+            let skip = rows.len().saturating_sub(preview_cap);
+            preview.extend(rows.iter().skip(skip).cloned());
             preview_window = preview.len();
         }
     } else {
@@ -752,6 +836,89 @@ mod tests {
     }
 
     #[test]
+    fn thinking_preview_renders_fenced_code_as_highlighted_box() {
+        let mut st = state();
+        st.status = Status::Thinking;
+        st.pending_thinking = Some(
+            "Before the code\n```rust\nlet a = 1;\n\nlet b = 2;\n```\nAfter the code".into(),
+        );
+        let frame = viewport(&st, None, 20, 6, 8);
+        let rows = &frame.lines[..frame.preview_window];
+        let texts: Vec<String> = rows.iter().map(line_text).collect();
+        // prose 行保持 ✻ 前缀;围栏渲染为代码盒(语言标注行)
+        assert!(
+            texts.iter().any(|t| t.contains(loader::THINKING_MARK) && t.contains("Before the code")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|t| t.contains("╭── rust")), "{texts:?}");
+        // 代码盒行不带 ✻(2 空格缩进);盒内空行保留(两行代码夹一行空行)
+        let box_rows: Vec<&String> = texts.iter().filter(|t| t.starts_with("  │")).collect();
+        assert_eq!(box_rows.len(), 3, "{texts:?}");
+        assert!(box_rows.iter().all(|t| !t.contains(loader::THINKING_MARK)), "{box_rows:?}");
+        assert!(box_rows.iter().any(|t| t.contains("let a = 1;")), "{box_rows:?}");
+        assert!(box_rows[1].trim() == "│", "空行应保留在盒内: {box_rows:?}");
+        // 代码行带语法高亮(≥2 种前景色);prose 尾行在盒后
+        let code_line = rows.iter().find(|l| line_text(l).contains("let a = 1;")).unwrap();
+        let colored: std::collections::HashSet<_> =
+            code_line.spans.iter().filter_map(|s| s.style.fg).collect();
+        assert!(colored.len() > 1, "rust 代码应有语法高亮: {colored:?}");
+        assert!(texts.iter().any(|t| t.contains("After the code")), "{texts:?}");
+        // 二次渲染走缓存:行内容不变
+        let again = thinking_rows(
+            st.pending_thinking.as_ref().unwrap(),
+            &st.theme,
+            st.width,
+            Some(&mut st.thinking_fences.borrow_mut()),
+            false,
+        );
+        assert_eq!(
+            again.iter().map(line_text).collect::<Vec<_>>(),
+            rows.iter().map(line_text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn thinking_rows_renders_unclosed_fence_while_streaming() {
+        let t = theme();
+        let rows = thinking_rows("```rust\nlet a = 1;", &t, 80, None, false);
+        let texts: Vec<String> = rows.iter().map(line_text).collect();
+        assert!(texts.iter().any(|t| t.contains("╭── rust")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("let a = 1;")), "{texts:?}");
+    }
+
+    #[test]
+    fn thinking_block_boxes_code_and_keeps_prose_mark() {
+        let t = theme();
+        let lines = thinking_block("a\n```rust\nlet x = 1;\n```\nb", &t, 80, true);
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(texts[0].contains(loader::THINKING_MARK), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("╭── rust")), "{texts:?}");
+        assert!(
+            texts.iter().filter(|t| t.contains("let x")).all(|t| !t.contains(loader::THINKING_MARK)),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|t| t.contains(" b") || t.ends_with('b')), "{texts:?}");
+    }
+
+    #[test]
+    fn viewport_stream_renders_markdown_code_block_live() {
+        let mut st = state();
+        st.status = Status::Thinking;
+        st.stream_text = "回答正文\n```rust\nlet a = 1;\n```".into();
+        let frame = viewport(&st, None, 10, 6, 8);
+        let rows = &frame.lines[..frame.preview_window];
+        let texts: Vec<String> = rows.iter().map(line_text).collect();
+        // 正文流式中代码块实时渲染为高亮盒(而非纯文本行)
+        assert!(texts.iter().any(|t| t.contains("回答正文")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("╭── rust")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("│ let a = 1;")), "{texts:?}");
+        let code_line = rows.iter().find(|l| line_text(l).contains("let a = 1;")).unwrap();
+        let colored: std::collections::HashSet<_> =
+            code_line.spans.iter().filter_map(|s| s.style.fg).collect();
+        assert!(colored.len() > 1, "代码块应带语法高亮: {colored:?}");
+    }
+
+    #[test]
     fn viewport_tool_live_output_full_scroll_then_tail_window() {
         let mut st = state();
         st.status = Status::Tool("bash".into());
@@ -1100,3 +1267,4 @@ mod tests {
         InteractiveState::new(*theme, 80)
     }
 }
+

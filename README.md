@@ -135,7 +135,7 @@ latent --continue
 
 | 文件 | 作用 |
 |---|---|
-| `.latent/settings.json` | 默认模型、权限模式、bash 超时、MCP 扩展声明（`mcpServers`）、主题等 |
+| `.latent/settings.json` | 默认模型、权限模式、bash 超时、工具调用上限（`maxToolCalls`，默认 30，0 = 不限制）、MCP 扩展声明（`mcpServers`）、主题等 |
 | `.latent/models.json` | 自定义 provider / model（baseUrl、定价、兼容开关） |
 | `.latent/skills/<name>/SKILL.md` | 技能定义，AI 通过 `load_skill` 工具按需加载 |
 | `.latent/agents/<name>.md` | 子代理定义（frontmatter 声明 name/model/tools，正文即系统提示词） |
@@ -217,7 +217,7 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [ ] 无效模型清理
  - [ ] 实现一个扩展用于测试扩展功能（文件搜索加强？）
  - [ ] 实现可配置追加系统提示词（当前仅可替换）
- - [ ] 添加最大轮询限制，不要无限制的查找
+ - [x] 添加最大轮询限制，不要无限制的查找
  - [x] ui颜色调整优化
  - [x] @符号添加文件到上下文
  - [x] 当前全屏模式下，如果模型正在输出，我滚动屏幕，正在输出的部分不会跟着滚动，但是我需要输入框以上的部分全部跟随滚动

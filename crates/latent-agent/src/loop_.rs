@@ -13,7 +13,10 @@
 //! 工具执行四阶段 prepare→execute→finalize→result,批结果以 `Vec<ToolOutcome>`
 //! 返回 —— 长度恒等于 toolCall 数,"每个 toolCall 恰好一个 toolResult" 是类型
 //! 不变量(03 文档 §10.4,修复 pi 串行 abort 缺口的类型化方案)。护栏
-//! `TurnLimits` 超限以 `RunStop::BudgetExhausted` 可区分终止。低层无内建
+//! `TurnLimits` 超限以 `RunStop::BudgetExhausted` 可区分终止;工具调用上限
+//! 分两段 —— 达标后在工具结果后注入一条 user 收敛提示(每次 run 一次),
+//! 再超 `TOOL_CALL_LIMIT_GRACE` 次仍不停则硬停并合成终止通知进转录(用户
+//! 在所有运行模式下都拿得到可读结果)。低层无内建
 //! provider 重试(不变量 I2)—— 重试经装饰 `Provider` 在上层注入。
 
 use std::collections::HashMap;
@@ -222,6 +225,9 @@ pub struct AgentContext {
 #[derive(Debug, Clone, Copy)]
 pub struct TurnLimits {
     pub max_turns: Option<u32>,
+    /// 工具调用连续次数软上限:达标后循环注入一条 user 收敛提示
+    /// (每次 run 一次),再超 `TOOL_CALL_LIMIT_GRACE` 次仍不停则以
+    /// `BudgetExhausted(MaxToolCalls)` 硬停。
     pub max_tool_calls: Option<u32>,
     pub max_total_tokens: Option<u64>,
     pub deadline: Option<std::time::Instant>,
@@ -278,6 +284,11 @@ impl LoopConfig {
 /// 超长 tool result 的默认字符上限(约 5k token;内置工具 bash/read 已有
 /// 各自的行/字节截断,此上限兜底任意工具/扩展的超长输出)。
 pub const DEFAULT_TOOL_RESULT_MAX_CHARS: usize = 20_000;
+
+/// 工具调用软上限的宽限次数:`max_tool_calls` 达标后循环注入一条 user
+/// 收敛提示(每次 run 一次),再超此次数仍不停则以
+/// `BudgetExhausted(MaxToolCalls)` 硬停并合成终止通知。
+pub const TOOL_CALL_LIMIT_GRACE: u32 = 10;
 
 /// 工具自我约束输出时预留的余量:工具在内容之后还要附续读指引等文本,
 /// 预留后"内容 + 指引"恒不触发上面的头尾裁剪(避免转录中间出现挖洞)。
@@ -466,6 +477,8 @@ struct LoopState {
     tool_call_count: u32,
     total_tokens: u64,
     truncation_turns: u32,
+    /// 工具调用软上限的收敛提示是否已注入(每次 run 最多一次)
+    tool_limit_warned: bool,
 }
 
 impl LoopState {
@@ -480,7 +493,9 @@ impl LoopState {
         if self
             .limits
             .max_tool_calls
-            .is_some_and(|max| self.tool_call_count >= max)
+            .is_some_and(|max| {
+                self.tool_call_count >= max.saturating_add(TOOL_CALL_LIMIT_GRACE)
+            })
         {
             return Some(RunStop::BudgetExhausted(BudgetKind::MaxToolCalls));
         }
@@ -502,6 +517,20 @@ impl LoopState {
             return Some(RunStop::BudgetExhausted(BudgetKind::TruncationRetries));
         }
         None
+    }
+
+    /// 工具调用软上限的收敛提示:首次 `tool_call_count >= max_tool_calls`
+    /// 时返回一条 user 消息并置位(每次 run 只提示一次);未配置上限或尚未
+    /// 达标返回 None。
+    fn take_tool_limit_warning(&mut self) -> Option<AgentMessage> {
+        let max_calls = self.limits.max_tool_calls?;
+        if self.tool_limit_warned || self.tool_call_count < max_calls {
+            return None;
+        }
+        self.tool_limit_warned = true;
+        Some(AgentMessage::user(format!(
+            "You have made {max_calls} consecutive tool calls. The information-gathering process should now converge. Please stop further exploration as soon as possible and summarize the results for the user. If there are still unresolved issues, honestly explain the current status and the reasons."
+        )))
     }
 
     /// 注入一条消息(message_start/message_end 事件 + 转录 + new_messages)。
@@ -619,6 +648,7 @@ pub async fn run_agent_loop(
         tool_call_count: 0,
         total_tokens: 0,
         truncation_turns: 0,
+        tool_limit_warned: false,
     };
 
     sink.on_event(&AgentEvent::AgentStart).await;
@@ -862,6 +892,19 @@ async fn step_executing_tools(state: &mut LoopState) -> Phase {
     Phase::Settling
 }
 
+/// 工具调用硬上限的终止通知:合成的 assistant 文本消息(stop_reason=Stop,
+/// usage 零值)作为本次 run 的最后一条消息进转录 —— gateway 回复/TUI/print
+/// 的最终结果送达路径都能把它交给用户。非模型产出,属护栏行为。
+fn tool_limit_stop_notice(model: &Model, max_calls: u32) -> AgentMessage {
+    let mut message = AssistantMessage::pending(model);
+    message.content = vec![ContentBlock::text(format!(
+        "The maximum number of consecutive tool calls has been reached ({} calls). No further tool calls can be made, so execution is aborted here. The tool outputs above are the results that have been completed; please respond to the user immediately.",
+        max_calls.saturating_add(TOOL_CALL_LIMIT_GRACE)
+    ))];
+    message.stop_reason = StopReason::Stop;
+    AgentMessage::Assistant(Box::new(message))
+}
+
 /// Settling:finishTurn → turn_end → 预算/决策 → 下一个 Phase(wake 显式化)。
 async fn step_settling(state: &mut LoopState) -> Phase {
     let message = state
@@ -892,6 +935,15 @@ async fn step_settling(state: &mut LoopState) -> Phase {
         .await;
 
     if let Some(budget) = state.budget_stop() {
+        // 工具调用硬上限(软上限 + GRACE):终止通知作为最后一条消息进转录
+        // 后终止,用户在所有运行模式下都能拿到可读的最终结果
+        if budget == RunStop::BudgetExhausted(BudgetKind::MaxToolCalls) {
+            let notice = tool_limit_stop_notice(
+                &state.model,
+                state.limits.max_tool_calls.unwrap_or_default(),
+            );
+            state.inject(notice).await;
+        }
         return Phase::Done(budget);
     }
     if decision == Some(TurnDecision::End) {
@@ -904,6 +956,13 @@ async fn step_settling(state: &mut LoopState) -> Phase {
         || !state.deferred_steering.is_empty()
         || !state.follow_up_batch.is_empty();
     if natural {
+        // 工具调用软上限:模型仍要继续调工具时,在工具结果之后跟一条
+        // user 收敛提示(每次 run 一次;硬停在上方 budget_stop 兜底)
+        if has_more_tool_calls {
+            if let Some(warning) = state.take_tool_limit_warning() {
+                state.inject(warning).await;
+            }
+        }
         return Phase::AwaitingRequest { wake: None };
     }
 

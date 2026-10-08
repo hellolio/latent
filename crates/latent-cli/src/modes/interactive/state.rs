@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use latent_tui::markdown::Markdown;
 use latent_tui::{CommandPopup, Editor, FilePopup, Key, SelectList, Theme, UiLine};
 
 use super::usage::UsageTracker;
@@ -209,63 +210,181 @@ pub enum ScrollRequest {
     Lines(isize),
 }
 
-/// 流式文本增量折行缓存(全屏滚动视口的预览全量行数据源)。正文流式
-/// 期间文本 append-only,而 `wrap_to_width` 对各源行独立折行,故追加时
-/// 只需重折最后一个未完成源行;宽度变化或文本收缩(flush/新回合)时
-/// 全量重建。空文本 = 空行集(区别于 `wrap_to_width` 的单行空串)。
-#[derive(Default)]
-pub struct StreamWrapCache {
-    /// 已折完的源字节偏移(其后是待续的最后一个源行;恒位于行边界)
-    done: usize,
-    width: usize,
-    lines: Vec<String>,
-    /// `lines` 末尾属于待续行的行数(待续行可折成多行,追加时整体截断重折)
-    pending_lines: usize,
+fn last_non_empty(lines: &[UiLine]) -> bool {
+    lines
+        .last()
+        .map(|line| !latent_tui::text::line_text(line).is_empty())
+        .unwrap_or(false)
 }
 
-impl StreamWrapCache {
-    /// 按当前文本与宽度刷新缓存,返回全量折行(每行 ≤ width 显示宽)。
-    pub fn update(&mut self, src: &str, width: usize) -> &[String] {
+/// 与 `Markdown::render` 的标题判定一致:首行 `#{1,6}` 后跟空格或行尾。
+fn is_heading_line(raw: &str) -> bool {
+    let first = raw.lines().next().unwrap_or("");
+    let hashes = first.chars().take_while(|c| *c == '#').count();
+    (1..=6).contains(&hashes)
+        && (first[hashes..].starts_with(' ') || first[hashes..].trim_start().is_empty())
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// 流式 Markdown 增量渲染缓存(正文流式预览的实时样式:代码块 syntect
+/// 高亮、标题/列表/粗体/表格)。流式文本 append-only,按「空行段边界 /
+/// 围栏闭合行」切块:已稳定块用 `Markdown::render` 只渲染一次,逐帧仅重
+/// 渲未稳定尾部(含正在输出的未闭合围栏)。接合规则复刻整篇渲染:空行
+/// 段边界即时补一行空行(连续空行折叠为一),标题在上一行非空时前置空行。
+/// 宽度变化或文本收缩(flush/新回合 clear)时全量重建。
+pub struct StreamMarkdownCache {
+    /// 已稳定渲染的字节偏移(恒位于稳定边界:空行段末或围栏闭合行末)
+    done: usize,
+    width: usize,
+    /// 稳定块渲染输出;`lines[tail_start..]` 为上帧尾段渲染(下帧截断重渲)
+    lines: Vec<UiLine>,
+    tail_start: usize,
+}
+
+impl StreamMarkdownCache {
+    /// 全量失效(新会话复位;常规流式依赖宽度/收缩自动判据,无需调用)
+    pub fn reset(&mut self) {
+        self.done = 0;
+        self.width = 0;
+        self.lines.clear();
+        self.tail_start = 0;
+    }
+
+    /// 按当前文本与宽度刷新缓存,返回全量渲染行(与整篇
+    /// `Markdown::render(src, width)` 逐行等价;property test 锚定)。
+    pub fn update(&mut self, src: &str, width: usize, md: &Markdown) -> &[UiLine] {
         let width = width.max(1);
         if self.width != width || src.len() < self.done {
             self.done = 0;
-            self.lines.clear();
-            self.pending_lines = 0;
             self.width = width;
-        }
-        if src.is_empty() {
-            self.done = 0;
             self.lines.clear();
-            self.pending_lines = 0;
-            return &self.lines;
+            self.tail_start = 0;
         }
-        if src.len() > self.done {
-            // 追加:从上一轮的待续行起点重折。先截断待续行的旧折行(可能
-            // 多行),逐个折出已完成源行(以 '\n' 结尾),最后重折当前待续
-            // 行(空也算一行,与 wrap_to_width 的全量折行逐行一致)
-            let tail = &src[self.done..];
-            let keep = self.lines.len().saturating_sub(self.pending_lines);
-            self.lines.truncate(keep);
-            let mut consumed = 0usize;
-            for piece in tail.split_inclusive('\n') {
-                match piece.strip_suffix('\n') {
-                    Some(raw) => {
-                        for row in latent_tui::wrap_to_width(raw, width) {
-                            self.lines.push(row);
-                        }
-                        consumed += piece.len();
+        self.lines.truncate(self.tail_start);
+        // 从上一稳定边界续扫(边界处围栏态恒为闭合,块内重扫与逐帧追加
+        // 天然一致);围栏判定与 `Markdown::render` 同源(trim 后 ``` 开头)
+        let mut fence = false;
+        let mut seg_start = self.done;
+        let mut blank_run: Option<(usize, usize)> = None; // (首空行起点, 段末)
+        let mut offset = self.done;
+        for piece in src[self.done..].split_inclusive('\n') {
+            let line = piece.strip_suffix('\n').unwrap_or(piece);
+            let next = offset + piece.len();
+            // 未终结行(末尾无换行)不稳定:围栏可能下一帧才闭合、空行段
+            // 可能继续延长,一律留给尾段下帧重扫(split_inclusive 中它必为
+            // 最后一个 piece,直接 break)
+            if !piece.ends_with('\n') {
+                break;
+            }
+            if fence {
+                if line.trim_start().starts_with("```") {
+                    self.push_segment(&src[seg_start..next], md, width);
+                    self.done = next;
+                    seg_start = next;
+                    fence = false;
+                }
+            } else if line.trim().is_empty() {
+                blank_run.get_or_insert((offset, next)).1 = next;
+            } else {
+                if let Some((start, end)) = blank_run.take() {
+                    self.push_segment(&src[seg_start..start], md, width);
+                    // 空行折叠:上一行非空时补一行空行(与整篇渲染一致)
+                    if last_non_empty(&self.lines) {
+                        self.lines.push(UiLine::raw(""));
                     }
-                    None => break,
+                    self.done = end;
+                    seg_start = end;
+                }
+                if line.trim_start().starts_with("```") {
+                    fence = true;
                 }
             }
-            self.done += consumed;
-            self.pending_lines = 0;
-            for row in latent_tui::wrap_to_width(&tail[consumed..], width) {
-                self.lines.push(row);
-                self.pending_lines += 1;
+            offset = next;
+        }
+        // EOF 收尾:未消费的空行段照常成边界(尾部空行与整篇渲染一致)
+        if let Some((start, end)) = blank_run.take() {
+            self.push_segment(&src[seg_start..start], md, width);
+            if last_non_empty(&self.lines) {
+                self.lines.push(UiLine::raw(""));
             }
+            self.done = end;
+        }
+        // 尾段(未稳定内容,含未闭合围栏)逐帧重渲;首行为标题且上一行
+        // 非空时补前置空行(与 push_segment 的标题规则同源;稳定后该空行
+        // 由段路径一次性落盘,此处仅为过渡帧)
+        self.tail_start = self.lines.len();
+        let tail = &src[self.done..];
+        if !tail.is_empty() {
+            if is_heading_line(tail) && last_non_empty(&self.lines) {
+                self.lines.push(UiLine::raw(""));
+            }
+            self.lines.extend(md.render(tail, width));
         }
         &self.lines
+    }
+
+    /// 渲染并追加一个稳定段;段首为标题且上一行非空时补前置空行(标题
+    /// 规则;空行段边界后上一行恒为空行,规则自然不触发,与整篇渲染一致)
+    fn push_segment(&mut self, seg: &str, md: &Markdown, width: usize) {
+        if is_heading_line(seg) && last_non_empty(&self.lines) {
+            self.lines.push(UiLine::raw(""));
+        }
+        self.lines.extend(md.render(seg, width));
+    }
+}
+
+/// thinking 流式围栏代码块渲染缓存:流式期间文本 append-only,已闭合围
+/// 栏的 syntect 渲染结果不再变化,按 (字节起点, 内容哈希) 缓存复用;
+/// 未闭合尾围栏与 prose 行逐帧重渲。缓存自校验(宽度/明暗变化自动失效,
+/// 键含内容哈希,thinking 重置后旧键不可能误命中),清空点无需埋 reset。
+pub struct ThinkingFenceCache {
+    width: usize,
+    is_dark: bool,
+    entries: Vec<(usize, u64, Vec<UiLine>)>,
+}
+
+impl ThinkingFenceCache {
+    /// 全量失效(新会话复位;常规流式依赖宽度/明暗/内容哈希自校验)
+    pub fn reset(&mut self) {
+        self.width = 0;
+        self.entries.clear();
+    }
+
+    /// 已闭合围栏的渲染行(缓存命中或渲染后入库;行宽按 `width` 折行,
+    /// 调用方自行缩进/加前缀)。
+    pub fn rows(
+        &mut self,
+        byte_start: usize,
+        source: &str,
+        lang: Option<&str>,
+        theme: &Theme,
+        highlighter: &'static latent_tui::Highlighter,
+        width: usize,
+    ) -> Vec<UiLine> {
+        if self.width != width || self.is_dark != theme.is_dark {
+            self.width = width;
+            self.is_dark = theme.is_dark;
+            self.entries.clear();
+        }
+        let hash = fnv1a(source.as_bytes());
+        if let Some((.., rows)) = self
+            .entries
+            .iter()
+            .find(|(start, h, ..)| *start == byte_start && *h == hash)
+        {
+            return rows.clone();
+        }
+        let rows = latent_tui::markdown::code_block(source, lang, theme, Some(highlighter), width);
+        self.entries.push((byte_start, hash, rows.clone()));
+        rows
     }
 }
 
@@ -291,12 +410,15 @@ pub struct InteractiveState {
     pub spin: usize,
     /// 流式中的 assistant 文本(预览区尾部展示,定稿时整体转 Assistant)
     pub stream_text: String,
-    /// 流式文本的全量折行缓存(`StreamWrapCache`,RefCell 让 `view::viewport`
-    /// 保持 `&state` 签名自刷新;UI 单线程)。文本收缩(flush/新回合)时
-    /// 缓存经 len < done 判据自动重建,无需手动清理
-    pub stream_wrap: std::cell::RefCell<StreamWrapCache>,
+    /// 流式正文的增量 Markdown 渲染缓存(`StreamMarkdownCache`,RefCell 让
+    /// `view::viewport` 保持 `&state` 签名自刷新;UI 单线程)。宽度变化或
+    /// 文本收缩(flush/新回合)时缓存经判据自动重建,无需手动清理
+    pub stream_markdown: std::cell::RefCell<StreamMarkdownCache>,
     /// 流式中的 thinking 累积(预览尾部;首个文本 delta 时提交进转录)
     pub pending_thinking: Option<String>,
+    /// thinking 流式围栏代码块渲染缓存(`ThinkingFenceCache`,自校验设计:
+    /// 宽度/明暗/内容哈希失效,无需在各清空点埋 reset)
+    pub thinking_fences: std::cell::RefCell<ThinkingFenceCache>,
     pub usage: UsageTracker,
     /// 当前回合流式计时(请求发出起点与首个 delta 时刻):TurnEnd 时
     /// 换算 TTFT 与 TPS。无 tokio 依赖,全部本地 Instant。起点由
@@ -395,8 +517,18 @@ impl InteractiveState {
             active_agent: None,
             subagent_active: 0,
             stream_text: String::new(),
-            stream_wrap: std::cell::RefCell::new(StreamWrapCache::default()),
+            stream_markdown: std::cell::RefCell::new(StreamMarkdownCache {
+                done: 0,
+                width: 0,
+                lines: Vec::new(),
+                tail_start: 0,
+            }),
             pending_thinking: None,
+            thinking_fences: std::cell::RefCell::new(ThinkingFenceCache {
+                width: 0,
+                is_dark: true,
+                entries: Vec::new(),
+            }),
             usage: UsageTracker::default(),
             stream_started: None,
             first_delta_at: None,
@@ -490,6 +622,8 @@ impl InteractiveState {
         self.pending.clear();
         self.stream_text.clear();
         self.pending_thinking = None;
+        self.stream_markdown.borrow_mut().reset();
+        self.thinking_fences.borrow_mut().reset();
         self.pending_tools.clear();
         self.pending_tool_output = None;
         self.subagent_run_cards.clear();
@@ -592,44 +726,118 @@ mod tests {
         assert!(Instant::now().duration_since(instant_from_ms(Some(future))) < Duration::from_millis(50));
     }
 
+    fn line_texts(lines: &[UiLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| latent_tui::text::line_text(l))
+            .collect()
+    }
+
     #[test]
-    fn stream_wrap_cache_incremental_matches_one_shot() {
-        let mut cache = StreamWrapCache::default();
-        let full = "first line here\nsecond\n\n fourth with  several words to wrap ok\n";
-        // 逐块追加,与一次性全量折行逐行一致
+    fn stream_markdown_cache_incremental_matches_one_shot() {
+        // 覆盖:围栏(闭合/未闭合)、围栏后直接跟标题、连续空行折叠、
+        // 表格、列表、引用、EOF 尾部空行
+        let full = "# 标题\n\n正文 **bold** 与 `code`。\n\n```rust\nlet a = 1;\nlet s = \"x\";\n```\n# 围栏后直接跟标题\n- 列表项\n- 第二项\n\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> 引用\n\n尾段\n\n\n```python\nx = 1";
+        let theme = Theme::dark_ansi();
+        let md = Markdown::new(&theme);
+        let mut cache = StreamMarkdownCache {
+            done: 0,
+            width: 0,
+            lines: Vec::new(),
+            tail_start: 0,
+        };
         let mut src = String::new();
-        for chunk in full.as_bytes().chunks(3) {
-            src.push_str(std::str::from_utf8(chunk).unwrap());
-            let lines = cache.update(&src, 12).to_vec();
-            assert_eq!(lines, latent_tui::wrap_to_width(&src, 12), "src={src:?}");
+        // 逐字符追加(覆盖多字节字符):每帧全量行与整篇渲染逐行一致(含接合规则)
+        for ch in full.chars() {
+            src.push(ch);
+            let got = line_texts(cache.update(&src, 40, &md));
+            let want = line_texts(&md.render(&src, 40));
+            assert_eq!(got, want, "src={src:?}");
         }
     }
 
     #[test]
-    fn stream_wrap_cache_empty_is_empty() {
-        let mut cache = StreamWrapCache::default();
-        assert!(cache.update("", 40).is_empty());
-        // 空文本 ≠ 单行空串(区别于 wrap_to_width)
-        cache.update("x", 40);
-        assert_eq!(cache.update("", 40).len(), 0);
+    fn stream_markdown_cache_ascii_chunks_match_one_shot() {
+        let full = "first line here\nsecond\n\n fourth with  several words to wrap ok\n\n```js\nconst x = 1;\n```\n\nend block";
+        let theme = Theme::dark_ansi();
+        let md = Markdown::new(&theme);
+        let mut cache = StreamMarkdownCache {
+            done: 0,
+            width: 0,
+            lines: Vec::new(),
+            tail_start: 0,
+        };
+        let mut src = String::new();
+        for chunk in full.as_bytes().chunks(3) {
+            src.push_str(std::str::from_utf8(chunk).unwrap());
+            let got = line_texts(cache.update(&src, 24, &md));
+            let want = line_texts(&md.render(&src, 24));
+            assert_eq!(got, want, "src={src:?}");
+        }
     }
 
     #[test]
-    fn stream_wrap_cache_rebuilds_on_width_change_and_shrink() {
-        let mut cache = StreamWrapCache::default();
-        let src = "some reasonably long line to be wrapped at narrow width";
-        cache.update(src, 80);
-        let wide: Vec<String> = cache.update(src, 80).to_vec();
-        let narrow = cache.update(src, 20).to_vec();
-        assert_eq!(narrow, latent_tui::wrap_to_width(src, 20));
+    fn stream_markdown_cache_empty_is_empty() {
+        let theme = Theme::dark_ansi();
+        let md = Markdown::new(&theme);
+        let mut cache = StreamMarkdownCache {
+            done: 0,
+            width: 0,
+            lines: Vec::new(),
+            tail_start: 0,
+        };
+        assert!(cache.update("", 40, &md).is_empty());
+        cache.update("x", 40, &md);
+        // 收缩回空(flush/新回合)= 空行集
+        assert_eq!(cache.update("", 40, &md).len(), 0);
+    }
+
+    #[test]
+    fn stream_markdown_cache_rebuilds_on_width_change_and_shrink() {
+        let theme = Theme::dark_ansi();
+        let md = Markdown::new(&theme);
+        let src = "some reasonably long line to be wrapped at narrow width\n\n```rust\nlet a = 1;\n```";
+        let mut cache = StreamMarkdownCache {
+            done: 0,
+            width: 0,
+            lines: Vec::new(),
+            tail_start: 0,
+        };
+        cache.update(src, 80, &md);
+        let wide = line_texts(cache.update(src, 80, &md));
+        let narrow = line_texts(cache.update(src, 20, &md));
+        assert_eq!(narrow, line_texts(&md.render(src, 20)));
         assert_ne!(narrow, wide);
-        // 收缩(flush take)→ 空
-        cache.update("tail text", 20);
-        assert_eq!(cache.update("", 20).len(), 0);
-        // 重新追加正常工作
+        // 收缩(flush take)→ 重建后与整篇渲染一致
         assert_eq!(
-            cache.update("tail text", 20),
-            latent_tui::wrap_to_width("tail text", 20)
+            line_texts(cache.update("tail text", 20, &md)),
+            line_texts(&md.render("tail text", 20))
         );
+    }
+
+    #[test]
+    fn thinking_fence_cache_hits_by_content_hash() {
+        let theme = Theme::dark_ansi();
+        let highlighter = latent_tui::Highlighter::shared(true);
+        let mut cache = ThinkingFenceCache {
+            width: 0,
+            is_dark: true,
+            entries: Vec::new(),
+        };
+        let code = "let a = 1;\nlet b = 2;";
+        let first = cache.rows(8, code, Some("rust"), &theme, highlighter, 60);
+        // 同起点同内容:命中缓存
+        assert_eq!(cache.rows(8, code, Some("rust"), &theme, highlighter, 60), first);
+        assert_eq!(cache.entries.len(), 1);
+        // 同起点不同内容(thinking 重置后新围栏):哈希不同,不误命中
+        let other = cache.rows(8, "let c = 3;", Some("rust"), &theme, highlighter, 60);
+        assert_ne!(
+            other.iter().map(latent_tui::text::line_text).collect::<Vec<_>>(),
+            first.iter().map(latent_tui::text::line_text).collect::<Vec<_>>()
+        );
+        assert_eq!(cache.entries.len(), 2);
+        // 宽度变化:全量失效
+        cache.rows(8, code, Some("rust"), &theme, highlighter, 40);
+        assert_eq!(cache.entries.len(), 1);
     }
 }

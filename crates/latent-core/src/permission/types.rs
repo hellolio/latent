@@ -274,9 +274,9 @@ pub fn mode_baseline_tools(mode: SessionMode, _sandbox_available: bool) -> Vec<S
 /// 位置永久固定;不并入系统提示词)。
 /// Plan 进/出各一句:进 Plan 提示只读+产出计划;切出后的 Confirm/FullAccess
 /// 沿用退出句(后半句"可写"恒为真,提醒模型可以动手)。
-pub const PLAN_MODE_ENTER_SECTION: &str = "You are entering Plan mode: files cannot be created, modified, or deleted, and commands that clearly write files or system state are blocked; read-only inspection and network queries (curl/ping/DNS lookups) are allowed. Inspect the codebase and produce an implementation plan. Read the project's entry points and README first, then read only what the plan needs; batch independent lookups into single turns. If something the user referenced (a file, a doc) cannot be found, ask rather than searching at length. A clarifying question is a valid intermediate deliverable: if the request admits two plausible readings, present them with your recommendation and wait instead of building the plan on a guess. State the final plan as concrete file-level changes.";
+pub const PLAN_MODE_ENTER_SECTION: &str = "You are in Plan mode. Do not modify, create, or delete files or system state.Inspect the codebase as needed to understand the request. Ask the user about unresolved ambiguities or non-trivial decisions rather than guessing.Produce a clear, easy-to-understand implementation plan.";
 
-pub const PLAN_MODE_EXIT_SECTION: &str = "You are exiting Plan mode: you may now create, modify, and delete files; implement the agreed plan. Work from the plan agreed in Plan mode; re-inspect a file only right before modifying it.";
+pub const PLAN_MODE_EXIT_SECTION: &str = "You are exiting Plan mode. You may now create, modify, and delete files.";
 
 pub fn mode_section(mode: SessionMode) -> Option<String> {
     match mode {

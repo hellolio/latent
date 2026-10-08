@@ -1460,6 +1460,81 @@ async fn max_tool_calls_budget_stops_batch_loops() {
         output.stop,
         latent_agent::RunStop::BudgetExhausted(latent_agent::BudgetKind::MaxToolCalls)
     );
+    // 硬上限(软上限 + GRACE):终止通知作为最后一条消息进转录
+    let last = output.messages.last().expect("messages");
+    let assistant = last.as_assistant().expect("last is assistant notice");
+    assert!(assistant.text_content().contains("已达上限"));
+    // 收敛提示只在达标时注入一次
+    let user_count = output
+        .messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::User { .. }))
+        .count();
+    assert_eq!(user_count, 2, "初始 prompt + 恰好一条收敛提示");
+}
+
+/// 工具调用软上限:达标后在工具结果之后跟一条 user 收敛提示(每次 run
+/// 恰一次),模型改为文本作答后 run 正常 EndTurn —— 用户拿得到结果。
+#[tokio::test]
+async fn tool_call_limit_injects_convergence_warning_then_model_answers() {
+    let m = model();
+    let tool = TestTool::new("loop");
+    // 前 2 轮各调 1 次工具(触达软上限 2),第 3 轮改为文本作答
+    let turns: Vec<ScriptedTurn> = (0..2)
+        .map(|i| {
+            ScriptedTurn::tool_calls(
+                &m,
+                vec![tool_call(
+                    format!("t{i}").leak(),
+                    "loop",
+                    serde_json::json!({"x": "1"}),
+                )],
+            )
+        })
+        .chain(std::iter::once(text_turn(&m, "结论:已收敛")))
+        .collect();
+    let provider = ScriptedProvider::new(&m, turns);
+    let limits = latent_agent::TurnLimits {
+        max_tool_calls: Some(2),
+        ..Default::default()
+    };
+    let (output, _receiver) = latent_agent::run_agent_loop(
+        vec![AgentMessage::user("hi")],
+        latent_agent::AgentContext {
+            system: None,
+            messages: Vec::new(),
+            tools: vec![tool],
+        },
+        Arc::new(PassthroughHooks),
+        latent_agent::LoopConfig {
+            limits,
+            ..latent_agent::LoopConfig::new(model())
+        },
+        Arc::new(provider),
+        Arc::new(Collector::default()),
+        CancellationToken::new(),
+        latent_agent::create_injection_endpoints().1,
+    )
+    .await;
+
+    assert_eq!(output.stop, latent_agent::RunStop::EndTurn);
+    let users: Vec<&AgentMessage> = output
+        .messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::User { .. }))
+        .collect();
+    assert_eq!(users.len(), 2, "初始 prompt + 恰好一条收敛提示");
+    let AgentMessage::User { content, .. } = users[1] else {
+        unreachable!("filtered above");
+    };
+    assert!(
+        content.contains("2 次工具"),
+        "提示应携带实际调用次数: {content}"
+    );
+    // 提示之后模型文本作答为最后一条消息
+    let last = output.messages.last().expect("messages");
+    let assistant = last.as_assistant().expect("last is assistant");
+    assert_eq!(assistant.text_content(), "结论:已收敛");
 }
 
 #[tokio::test]

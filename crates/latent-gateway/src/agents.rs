@@ -82,6 +82,7 @@ impl SessionFactory {
             active_tools: self.settings.active_tools.clone(),
             search_ignore: self.settings.search_ignore.clone(),
             tool_result_max_chars: self.settings.tool_result_max_chars,
+            max_tool_calls: self.settings.max_tool_calls,
             block_images: self.settings.block_images,
             compaction: self.settings.compaction.clone(),
             session_mode: None,

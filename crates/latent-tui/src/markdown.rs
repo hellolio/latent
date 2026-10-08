@@ -239,33 +239,7 @@ impl<'a> Markdown<'a> {
         lang: Option<&str>,
         width: usize,
     ) -> Vec<Line<'static>> {
-        let border = Style::new().fg(self.theme.md_code_block_border);
-        let mut out = Vec::new();
-        let label = match lang {
-            Some(lang) if !lang.is_empty() => format!("── {lang} "),
-            _ => "── ".to_string(),
-        };
-        let used = 1 + label.chars().count(); // ╭ + label
-        let mut top = vec![Span::styled("╭", border), Span::styled(label, border)];
-        if used < width {
-            top.push(Span::styled("─".repeat(width - used), border));
-        }
-        out.push(Line::from(top));
-        let inner = width.saturating_sub(4).max(1); // "│ " 前缀 + 右侧留白
-        let source = code.join("\n");
-        let highlighted = match self.highlighter {
-            Some(highlighter) => highlighter.highlight(&source, lang),
-            None => vec![Line::from(source)],
-        };
-        for line in highlighted {
-            for wrapped in wrap_line(&line, inner) {
-                let mut spans = vec![Span::styled("│ ", border)];
-                spans.extend(wrapped.spans);
-                out.push(Line::from(spans));
-            }
-        }
-        out.push(Line::from(Span::styled("╰".to_string(), border)));
-        out
+        code_block(&code.join("\n"), lang, self.theme, self.highlighter, width)
     }
 
     /// 行内标记 → spans(`` `code` ``、**粗体**、*斜体*、[文本](链接))。
@@ -345,6 +319,43 @@ impl<'a> Markdown<'a> {
     fn wrap_styled(&self, spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
         wrap_line(&Line::from(spans), width.max(1))
     }
+}
+
+/// 独立代码块渲染(thinking 围栏等无 Markdown 文档上下文的场景复用):
+/// 语言标注行 + 高亮正文 + 边框,与 `Markdown::render_code_block` 同款。
+pub fn code_block(
+    source: &str,
+    lang: Option<&str>,
+    theme: &Theme,
+    highlighter: Option<&Highlighter>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let border = Style::new().fg(theme.md_code_block_border);
+    let mut out = Vec::new();
+    let label = match lang {
+        Some(lang) if !lang.is_empty() => format!("── {lang} "),
+        _ => "── ".to_string(),
+    };
+    let used = 1 + label.chars().count(); // ╭ + label
+    let mut top = vec![Span::styled("╭", border), Span::styled(label, border)];
+    if used < width {
+        top.push(Span::styled("─".repeat(width - used), border));
+    }
+    out.push(Line::from(top));
+    let inner = width.saturating_sub(4).max(1); // "│ " 前缀 + 右侧留白
+    let highlighted = match highlighter {
+        Some(highlighter) => highlighter.highlight(source, lang),
+        None => vec![Line::from(source)],
+    };
+    for line in highlighted {
+        for wrapped in wrap_line(&line, inner) {
+            let mut spans = vec![Span::styled("│ ", border)];
+            spans.extend(wrapped.spans);
+            out.push(Line::from(spans));
+        }
+    }
+    out.push(Line::from(Span::styled("╰".to_string(), border)));
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
