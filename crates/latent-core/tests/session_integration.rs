@@ -11,8 +11,9 @@ use latent_agent::{
 };
 use latent_ai::{Model, ScriptedProvider, ScriptedTurn};
 use latent_core::{
-    create_agent_session, AgentSessionConfig, AgentSessionEvent, ApprovalRules, CoreError, NoopUi,
-    PermissionEngine, SandboxConfig, SessionSubscriber, SystemPromptOptions,
+    create_agent_session, permission::PLAN_MODE_ENTER_SECTION, permission::PLAN_MODE_EXIT_SECTION,
+    AgentSessionConfig, AgentSessionEvent, ApprovalRules, CoreError, NoopUi, PermissionEngine,
+    SandboxConfig, SessionSubscriber, SystemPromptOptions,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -598,12 +599,12 @@ async fn set_mode_appends_mode_section_and_dedupes() {
     session.set_mode(SessionMode::Plan).await.unwrap();
     let messages = session.agent().messages();
     assert_eq!(messages.len(), 1, "同模式重复切换只追加一条节点");
-    assert!(matches!(&messages[0], AgentMessage::ModeSection { content, .. } if content.contains("entering Plan mode")));
+    assert!(matches!(&messages[0], AgentMessage::ModeSection { content, .. } if content.contains(PLAN_MODE_ENTER_SECTION)));
 
     session.set_mode(SessionMode::FullAccess).await.unwrap();
     let messages = session.agent().messages();
     assert_eq!(messages.len(), 2, "新模式节点追加,旧节点保留");
-    assert!(matches!(&messages[1], AgentMessage::ModeSection { content, .. } if content.contains("exiting Plan mode")));
+    assert!(matches!(&messages[1], AgentMessage::ModeSection { content, .. } if content.contains(PLAN_MODE_EXIT_SECTION)));
 
     // 持久化:sink 收到两条 ModeSection(mode_change entry 走 trait 默认空实现)
     let persisted = sink.0.lock().unwrap();
@@ -703,7 +704,7 @@ async fn mode_switch_while_streaming_heals_section_at_turn_end() {
         })
         .expect("转录应含模式节");
     assert!(
-        last.contains("exiting Plan mode"),
+        last.contains(PLAN_MODE_EXIT_SECTION),
         "turn 结束应补齐退出 Plan 的模式节,实际 {last}"
     );
 }
@@ -752,7 +753,7 @@ async fn compact_reappends_current_mode_section() {
     assert!(matches!(&messages[0], AgentMessage::User { .. }));
     assert!(matches!(
         &messages[1],
-        AgentMessage::ModeSection { content, .. } if content.contains("entering Plan mode")
+        AgentMessage::ModeSection { content, .. } if content.contains(PLAN_MODE_ENTER_SECTION)
     ));
 }
 
@@ -786,7 +787,7 @@ async fn resume_without_mode_section_appends_node() {
     session.apply_mode_without_persist(SessionMode::Plan).await.unwrap();
     let messages = session.agent().messages();
     assert_eq!(messages.len(), 2, "历史 + 补追加的模式节点");
-    assert!(matches!(&messages[1], AgentMessage::ModeSection { content, .. } if content.contains("entering Plan mode")));
+    assert!(matches!(&messages[1], AgentMessage::ModeSection { content, .. } if content.contains(PLAN_MODE_ENTER_SECTION)));
 }
 
 /// run 内自动压缩(06 文档 §3.1 工具边界触发点):模型连续调工具、run 未结束

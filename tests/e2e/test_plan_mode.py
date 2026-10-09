@@ -38,7 +38,7 @@ def test_plan_mode_blocks_writes_then_approval_flow():
             app.sendline("帮我写一个文件")
             bodies = app.wait_for_requests(1)
             assert (
-                "You are entering Plan mode" in str(bodies[0])
+                "You are in Plan mode" in str(bodies[0])
             ), "Plan 模式请求应携带模式指令消息"
             # system 提示词与模式解耦:不再包含 <mode> 节
             assert "<mode>" not in str(bodies[0]), "system 提示词不应再含 <mode> 节"
@@ -66,7 +66,7 @@ def test_plan_mode_blocks_writes_then_approval_flow():
             bodies = app.wait_for_requests(3)
             tail = str(bodies[2])
             assert (
-                "You are entering Plan mode" in tail
+                "You are in Plan mode" in tail
             ), "旧模式节应持久留在历史中随请求携带"
             assert "You are exiting Plan mode" in tail, "切换模式后应追加新节点"
             app.expect_text("审批 bash")

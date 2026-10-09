@@ -180,6 +180,7 @@ impl Tool for StubTool {
 mod tests {
     use super::*;
     use crate::permission::SandboxConfig;
+    use crate::permission::PLAN_MODE_ENTER_SECTION;
     use crate::SessionMode;
     use latent_ai::{ScriptedProvider, ScriptedTurn};
 
@@ -399,7 +400,7 @@ mod tests {
         assert_eq!(roles.len(), 3, "{roles:?}");
         assert!(roles[0].starts_with("system:You are a reviewer."));
         assert!(
-            roles[1].starts_with("developer:You are entering Plan mode"),
+            roles[1].starts_with(&format!("developer:{PLAN_MODE_ENTER_SECTION}")),
             "模式节应为 Plan 进入提示词,append 在用户输入之前:{roles:?}"
         );
         assert_eq!(roles[2], "user:hi", "用户输入在历史末尾");

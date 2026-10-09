@@ -51,7 +51,8 @@ pub type SystemPromptSections = BTreeMap<String, String>;
 const BASE_RULES: &[&str] = &[
     "Be concise; avoid unnecessary explanations.",
     "Understand the request before acting.",
-    "Only inspect relevant files; do not over-explore. Stop once you have enough information to act.",
+    "Only inspect relevant files; stop exploring once you have enough information to proceed. Do not search for completeness or investigate unrelated details.",
+    "After initial exploration, summarize findings and uncertainties, then communicate the next step. Do not silently continue lengthy exploration.",
     "When ambiguity materially affects the result, ask rather than guess.",
     "Do not decide on non-trivial design choices on the user's behalf; present the options and wait for confirmation.",
     "Do not modify files before the plan is approved.",
@@ -317,7 +318,7 @@ mod tests {
         opts.custom_rules = Some("Always answer in Chinese.\n- Prefer ripgrep over grep".into());
         let sections = build_system_prompt_sections(&opts).unwrap();
         let rules = sections.get("rules").unwrap();
-        assert!(rules.contains("- Be extremely terse: deliver the answer or the change"), "{rules}");
+        assert!(rules.contains("- Be concise; avoid unnecessary explanations."), "{rules}");
         assert!(rules.contains("\nAlways answer in Chinese.\n- Prefer ripgrep over grep"), "{rules}");
         // 空白自定义规则不追加
         let mut opts = options();
