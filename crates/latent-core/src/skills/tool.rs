@@ -110,7 +110,12 @@ impl Tool for LoadSkillTool {
         let content = std::fs::read_to_string(&skill.path).map_err(|error| {
             Self::fail(format!("failed to read {}: {error}", skill.path.display()))
         })?;
-        Ok(ToolOutput::text(content))
+        // 包成 <skill> 形态:转录所见即所得;convert_to_llm 出口把它搬进
+        // developer 消息(见 expand 模块),工具结果在模型视图里换短确认
+        Ok(ToolOutput::text(format!(
+            "<skill name=\"{}\">\n{content}\n</skill>",
+            skill.name
+        )))
     }
 }
 
@@ -166,7 +171,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(output.output, "# Review\nFollow these steps.");
+        assert_eq!(
+            output.output,
+            "<skill name=\"review\">\n# Review\nFollow these steps.\n</skill>"
+        );
         assert!(!output.terminate);
         let _ = std::fs::remove_dir_all(&dir);
     }

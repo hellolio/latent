@@ -47,6 +47,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `Cargo.toml` | workspace 定义（12 个 crate；`default-members = ["crates/latent-cli"]`，裸 `cargo build` 只编 CLI）+ `[workspace.dependencies]`（外部依赖统一 pin 在此）+ `unsafe_code = "forbid"` lint |
 | `README.md` | 用户向总览（特性、四模式、provider 表、工具表） |
 | `GATEWAY_PLAN.md` | latent-gateway 开发计划（OpenClaw 架构级复刻，自包含实施指南 + 偏离记录 §8） |
+| `KNOWN_ISSUES.md` | 已确认问题的取证档案（现象/触发条件/证据/代码位置/修复方向；如 KB-001 空唤醒归因幻觉） |
 | `crates/` | 全部源码，逐 crate 索引见下 |
 | `tests/e2e/` | Python E2E 测试（真 PTY + 本地 mock LLM），逐文件索引见"测试方针" |
 | `.latent/` | 项目级配置目录（settings.json / models.json / skills / agents / system-prompt.md） |
@@ -142,7 +143,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `src/subagent/factory.rs` | `/subagent` 平行会话工厂：独立 PermissionEngine、系统提示词被定义 md 整体替换、可选落盘；工具池经 `ToolPoolFactory` 按会话现建（shell 沙箱钩子绑本会话引擎，模式切档即时生效） |
 | `src/subagent/tool.rs` | `SubagentTool`：同步排队（信号量 4）、后台审批默认 Deny（fail-closed）、`action:"list"/"stop"` |
 | `src/subagent/store.rs` | 子会话 JSONL 落盘（`ChildStoreFactory`，条目格式与主会话一致） |
-| `src/skills/mod.rs` + `defs.rs` + `tool.rs` | 技能系统：`.latent/skills/*/SKILL.md`（项目优先）发现；唯一出口是 `load_skill` 工具 description（不注入系统提示词）；调用时才读全文 |
+| `src/skills/mod.rs` + `defs.rs` + `tool.rs` + `expand.rs` | 技能系统：`.latent/skills/*/SKILL.md`（项目优先）发现；摘要唯一出口是 `load_skill` 工具 description（不注入系统提示词），调用时才读全文并包成 `<skill name="…">` 形态；`expand.rs` 在 convert_to_llm 出口做 developer 注入（纯函数后处理，不改转录）：load_skill 工具结果在模型视图换短确认 + 正文进紧随的 developer 消息；输入框伪命令 `/skill <名称>`（slash parse 放行，TUI 弹窗 variants 补全过滤）在 user 消息前注入 developer 正文，未知技能/读文件失败/正文为空不注入、文本原样保留 |
 | `tests/permission_hooks.rs` | Approve/Deny/ApproveForSession/Abort 全路径、Plan 模式拒写 |
 | `tests/session_integration.rs` | 事件流+持久化、steer/followUp、overflow 恢复两路、阈值自动压缩 |
 | `tests/extensions_mcp.rs` / `extensions_registry.rs` | MCP 集成（in-memory transport 23 用例）、坏扩展隔离语义 |
@@ -271,7 +272,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | models.json | `.latent/models.json` / `<数据目录>/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：LATENT_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载 |
 | web-search.json | `.latent/web-search.json` / `<数据目录>/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
 | gateway.json | `.latent/gateway.json` / `<数据目录>/gateway.json` | 聊天网关配置（GATEWAY_PLAN §4.2）：`agents.defaults`（workspace/model/typingMode）、`gateway`（port 18789/bind 127.0.0.1/auth.token **必填**，缺失 → 退出码 78）、`channels`（qq/wecom/telegram/mock 各自 enabled/凭据/textChunkLimit/dmPolicy/allowFrom；渠道扩展键已类型化：telegram `apiBase`/`pollTimeoutSecs`、qq `path`、wecom `wsEndpoint`/`heartbeatIntervalSecs`）、`session`（dmScope=per-channel-peer/groupScope=per-group/reset）、`messages`（queue: steer/500ms/cap 20/summarize + debounceMsByChannel；groupChat: requireMention/groupPolicy=allowlist/groupAllowFrom/mentionPatterns/unmentionedInbound —— **群策略唯一定义点**）、`commands.ownerAllowFrom`。全 deny_unknown_fields，未知键 → 退出码 78；**项目级配置拒绝 `!shell` 凭据来源**（只扫项目文件自身子树，全局合法 `!shell` + 项目文件存在不误拒）；项目级覆盖安全敏感字段（gateway.auth/ownerAllowFrom/groupChat/session）→ stderr 警告 |
-| skills | `.latent/skills/<name>/SKILL.md` / `<数据目录>/skills/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载 |
+| skills | `.latent/skills/<name>/SKILL.md` / `<数据目录>/skills/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载，或输入框 `/skill <名称>` 前缀随消息自动加载 —— 两条路径均以 developer 角色注入模型上下文 |
 | agents | `.latent/agents/<name>.md` / `<数据目录>/agents/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
 | system-prompt.md | `.latent/system-prompt.md` / `<数据目录>/system-prompt.md` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
 

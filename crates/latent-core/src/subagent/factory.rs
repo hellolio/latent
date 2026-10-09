@@ -41,6 +41,9 @@ pub struct SubagentSessionFactory {
     pub resolve_model: super::tool::ModelResolveFn,
     /// 子会话落盘工厂(可选;tag = agent 名;None = 纯内存)
     pub child_store_factory: Option<super::store::ChildStoreFactory>,
+    /// 子会话 skill 定义表:与主会话同源,勾选 load_skill 的子 agent 与
+    /// `/skill <名称>` 前缀展开两路径共用(见 skills::expand)
+    pub skills: Vec<crate::skills::SkillDef>,
 }
 
 impl SubagentSessionFactory {
@@ -125,6 +128,7 @@ impl SubagentSessionFactory {
                 compactor: None,
                 subscribers: Some(subscribers),
                 permission: Some(engine),
+                skills: self.skills.clone(),
             })
             .await
             .map_err(|e| e.to_string())?,
@@ -295,6 +299,7 @@ mod tests {
             sandbox_available: true,
             default_tools: vec![],
             tool_pool_factory: Arc::new(|_engine| vec![]),
+            skills: vec![],
             resolve_model: Arc::new(|spec: &str| Ok(Model::minimal(spec, "mock", "mock"))),
             child_store_factory: Some(Arc::new(move |tag: &str| {
                 let manager = latent_session::create_session_in_dir(
@@ -366,6 +371,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             sandbox_available: true,
             default_tools: vec![read_tool.clone()],
+            skills: vec![],
             tool_pool_factory: Arc::new(move |_engine| {
                 vec![read_tool.clone(), write_tool.clone()]
             }),
@@ -446,6 +452,7 @@ mod tests {
                 sink.lock().unwrap().push(engine);
                 vec![]
             }),
+            skills: vec![],
             resolve_model: Arc::new(|spec: &str| Ok(Model::minimal(spec, "mock", "mock"))),
             child_store_factory: None,
         };

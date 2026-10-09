@@ -1,0 +1,10 @@
+[
+  {
+    "tool_calls": [
+      { "name": "load_skill", "arguments": { "skill": "dev-loop" } }
+    ]
+  },
+  {
+    "text": "已按 dev-loop 技能指引处理。"
+  }
+]

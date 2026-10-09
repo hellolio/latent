@@ -1262,7 +1262,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         eprintln!("[latent][skills] {diagnostic}");
     }
     tools.push(Arc::new(latent_core::LoadSkillTool::new(latent_core::LoadSkillDeps {
-        skills: skill_defs,
+        skills: skill_defs.clone(),
     })));
     let subagent_parent_cell: Arc<Mutex<Weak<latent_agent::Agent>>> = Arc::new(Mutex::new(Weak::new()));
     // /model 同源的解析面(models.json + 内置 provider 默认表);父模型缺省
@@ -1399,6 +1399,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             compactor: Some(compactor),
             subscribers: Some(subscribers.clone()),
             permission: Some(engine.clone()),
+            skills: skill_defs.clone(),
         })
         .await
         .map_err(|e| e.to_string())?,
@@ -1474,6 +1475,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
             tool_pool_factory: factory_tool_pool,
             resolve_model: factory_resolve_model,
             child_store_factory,
+            skills: skill_defs.clone(),
         })),
     })
 }

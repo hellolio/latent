@@ -128,6 +128,7 @@ async fn fixture(
             compactor: None,
             subscribers: None,
             permission: Some(engine),
+            skills: vec![],
         })
         .await
         .unwrap(),

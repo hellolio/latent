@@ -190,6 +190,11 @@ pub async fn run_interactive_mode(
     };
 
     let mut state = InteractiveState::new(theme, app.width());
+    // /skill 伪命令候选:与工具装配同源的 skill 发现(cwd + 数据目录,启动期一次);
+    // 技能变体供弹窗补全/过滤,选中的 `/skill <名称>` 留在输入框随消息发送
+    state.slash_popup = latent_tui::CommandPopup::new(crate::modes::slash::popup_entries(
+        &latent_core::discover_skill_defs(&cwd, dir.as_deref()).0,
+    ));
     state.theme_name = theme_name;
     state.fullscreen = fullscreen;
     state.copy_on_select = copy_on_select;

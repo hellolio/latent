@@ -138,6 +138,7 @@ async fn build_session(
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
+        skills: vec![],
     })
     .await
     .unwrap();
@@ -313,6 +314,7 @@ async fn overflow_recovery_trims_and_retries() {
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
+        skills: vec![],
     })
     .await
     .unwrap();
@@ -392,6 +394,7 @@ async fn extension_registered_tool_joins_session() {
         seed_messages: Vec::new(),
         compactor: None,
         permission: None,
+        skills: vec![],
     })
     .await
     .unwrap();
@@ -486,6 +489,7 @@ async fn overflow_recovery_uses_unified_compactor() {
         compactor: Some(compactor.clone()),
         subscribers: None,
         permission: None,
+        skills: vec![],
     })
     .await
     .unwrap();
@@ -549,6 +553,7 @@ async fn auto_compact_triggers_at_threshold_after_run() {
         compactor: Some(compactor.clone()),
         subscribers: None,
         permission: None,
+        skills: vec![],
     })
     .await
     .unwrap();
@@ -668,6 +673,7 @@ async fn mode_switch_while_streaming_heals_section_at_turn_end() {
             seed_messages: Vec::new(),
             compactor: None,
             permission: None,
+            skills: vec![],
         })
         .await
         .unwrap(),
@@ -738,6 +744,7 @@ async fn compact_reappends_current_mode_section() {
         compactor: Some(Arc::new(DropAllCompactor)),
         subscribers: None,
         permission: None,
+        skills: vec![],
     })
     .await
     .unwrap();
@@ -780,6 +787,7 @@ async fn resume_without_mode_section_appends_node() {
         compactor: None,
         subscribers: None,
         permission: None,
+        skills: vec![],
     })
     .await
     .unwrap();
@@ -845,6 +853,7 @@ async fn auto_compact_fires_mid_run_at_tool_boundary() {
         compactor: Some(compactor.clone()),
         subscribers: None,
         permission: None,
+        skills: vec![],
     })
     .await
     .unwrap();
@@ -909,6 +918,7 @@ async fn build_guard_session(mode: SessionMode) -> (latent_core::AgentSession, A
         seed_messages: Vec::new(),
         compactor: None,
         permission: Some(engine),
+        skills: vec![],
     })
     .await
     .unwrap();

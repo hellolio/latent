@@ -536,7 +536,7 @@ impl LoopState {
         }
         self.tool_limit_warned = true;
         Some(AgentMessage::user(format!(
-            "You have made {max_calls} consecutive tool calls. The information-gathering process should now converge. Please stop further exploration as soon as possible and summarize the results for the user. If there are still unresolved issues, honestly explain the current status and the reasons."
+            "You have made {max_calls} consecutive tool calls. It may be helpful to converge on the findings and respond to the user soon."
         )))
     }
 

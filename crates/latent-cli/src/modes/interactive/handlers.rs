@@ -229,6 +229,12 @@ pub async fn handle_key(
                     state.sync_slash_popup();
                     return false;
                 }
+                if is_variant && completed.starts_with("/skill ") {
+                    // /skill 伪命令:补全技能名后停留编辑,用户继续输入正文
+                    // (与真命令的「补全即执行」不同,不落提交分支)
+                    state.sync_slash_popup();
+                    return false;
+                }
             }
             latent_tui::Key::Esc => {
                 state.slash_popup.dismiss();
@@ -594,6 +600,17 @@ async fn submit_input(
                 inject: !bang_bang,
             });
         });
+        return false;
+    }
+
+    // /skill 伪命令:仅 `/skill` 或 `/skill <名称>`(正文为空)不提交 ——
+    // 补一个尾随空格引导继续输入(弹窗据此展开/保持技能列表);有正文则照常提交
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    if tokens.first() == Some(&"/skill") && tokens.len() <= 2 {
+        if !text.ends_with(' ') {
+            state.editor.set_text(&format!("{text} "));
+        }
+        state.sync_slash_popup();
         return false;
     }
 

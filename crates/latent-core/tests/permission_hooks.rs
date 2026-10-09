@@ -148,6 +148,7 @@ async fn build_with(
             compactor: None,
             subscribers: Some(subscribers),
             permission: Some(engine),
+            skills: vec![],
         })
         .await
         .unwrap(),
@@ -268,6 +269,7 @@ async fn approve_for_session_caches_second_call() {
             compactor: None,
             subscribers: Some(subscribers),
             permission: Some(engine),
+            skills: vec![],
         })
         .await
         .unwrap(),
@@ -357,6 +359,7 @@ async fn ui_channel_closed_means_deny() {
             compactor: None,
             subscribers: Some(subscribers),
             permission: Some(engine),
+            skills: vec![],
         })
         .await
         .unwrap(),
@@ -434,6 +437,7 @@ async fn plan_mode_denies_write_without_asking() {
             compactor: None,
             subscribers: Some(subscribers),
             permission: Some(engine),
+            skills: vec![],
         })
         .await
         .unwrap(),

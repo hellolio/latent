@@ -508,7 +508,7 @@ impl InteractiveState {
             theme_name: None,
             width,
             editor: Editor::new(),
-            slash_popup: CommandPopup::new(crate::modes::slash::popup_entries()),
+            slash_popup: CommandPopup::new(crate::modes::slash::popup_entries(&[])),
             mention_popup: FilePopup::default(),
             mention_loaded: false,
             mention_ignore: std::sync::Arc::new(latent_tools::SearchIgnore::default()),

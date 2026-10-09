@@ -1,8 +1,10 @@
 //! 斜杠命令解析层(pi `BUILTIN_SLASH_COMMANDS` 的核心子集):命令表与
 //! 解析在此,执行(需要 session 状态)由各入口自担 —— TUI 在
 //! interactive.rs,聊天端在 latent-gateway(auto_reply/commands.rs)。
-//! latent 没有动态命令源(扩展命令/prompt 模板/skill),未识别的 `/xxx`
-//! 不像 pi 那样发给模型,而是本地警告。
+//! latent 没有动态命令源(扩展命令/prompt 模板),未识别的 `/xxx` 不像 pi 那样
+//! 发给模型,而是本地警告。唯一例外:`skill` 首词按普通文本放行 ——
+//! `/skill <名称>` 是消息内前缀伪命令(技能随消息自动加载,与工具调用无关),
+//! 不是命令,由会话层 convert_to_llm 解析展开(见 skills::expand)。
 
 /// 命令表条目(/help 展示与解析共用)。
 pub struct SlashCommand {
@@ -148,6 +150,11 @@ pub fn parse(input: &str) -> SlashInput {
         "mode" => SlashInput::Command(SlashAction::Mode {
             arg: arg.map(str::to_string),
         }),
+        "skill" => {
+            // /skill 伪命令:消息内前缀(技能随消息自动加载),不是命令 ——
+            // 按普通文本放行,由会话层 convert_to_llm 解析展开
+            SlashInput::NotACommand(trimmed.to_string())
+        }
         _ => SlashInput::Unknown(format!("/{name}")),
     }
 }
@@ -235,6 +242,18 @@ mod tests {
         // 普通文本里的斜杠不是命令
         assert_eq!(parse("a/b"), SlashInput::NotACommand("a/b".into()));
         assert_eq!(parse(""), SlashInput::NotACommand("".into()));
+    }
+
+    #[test]
+    fn skill_pseudo_command_passes_through_as_plain_text() {
+        // /skill 伪命令:消息内前缀(技能随消息自动加载),按普通文本放行
+        assert_eq!(
+            parse("/skill review 请帮我review"),
+            SlashInput::NotACommand("/skill review 请帮我review".into())
+        );
+        assert_eq!(parse("/skill"), SlashInput::NotACommand("/skill".into()));
+        // 相似词仍是未知命令(本地警告)
+        assert_eq!(parse("/skills list"), SlashInput::Unknown("/skills".into()));
     }
 
     #[test]

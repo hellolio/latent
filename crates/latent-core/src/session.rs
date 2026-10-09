@@ -160,6 +160,9 @@ pub struct AgentSessionConfig {
     /// 权限引擎(可选):未装配 = 无权限行为(现状退化,可拆卸判据)。
     /// `set_mode` 经此触达引擎切档;ApprovalHooks 持有同一 Arc。
     pub permission: Option<Arc<PermissionEngine>>,
+    /// 会话内 skill 定义表(装配期发现,运行期只读):convert_to_llm 出口
+    /// 展开 `/skill <名称>` 消息前缀与 load_skill 工具结果的 developer 注入
+    pub skills: Vec<crate::skills::SkillDef>,
 }
 
 /// 运行期可变状态(锁保护;无全局状态)。
@@ -270,6 +273,7 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
         subscribers: subscribers.clone(),
         permission: config.permission.clone(),
         session_sink: config.session_sink.clone(),
+        skills: config.skills,
     });
 
     let agent = latent_agent::create_agent(config.provider, hooks);
@@ -335,6 +339,8 @@ struct SessionCompactionHooks {
     /// 当前模式来源(apply_mode 经 engine.set_mode 同步):压缩吞掉模式节时补追加
     permission: Option<Arc<PermissionEngine>>,
     session_sink: Option<Arc<dyn SessionSink>>,
+    /// skill 定义表(装配方注入,见 AgentSessionConfig::skills)
+    skills: Vec<crate::skills::SkillDef>,
 }
 
 impl SessionCompactionHooks {
@@ -382,7 +388,10 @@ impl SessionCompactionHooks {
 #[async_trait]
 impl LoopHooks for SessionCompactionHooks {
     fn convert_to_llm(&self, msgs: &[AgentMessage]) -> Vec<Message> {
-        self.inner.convert_to_llm(msgs)
+        // skill 展开(load_skill 工具结果与 `/skill` 消息前缀的 developer 注入,
+        // 见 skills::expand):出口纯函数后处理,不改转录
+        let messages = self.inner.convert_to_llm(msgs);
+        crate::skills::expand_skill_references(&self.skills, messages)
     }
 
     /// 工具调用护栏仅 Plan 模式生效(收敛提示 + 宽限后硬停);无引擎时
