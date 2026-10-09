@@ -224,7 +224,7 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [x] 默认使用user加载AGENTS.md
  - [x] 探索30轮无反馈仅在plan模式生效
  - [x] 模型右下角显示的128k应该是1M
- - [ ] 当全屏模式下，滚动屏幕不是最底部时，就加一个回到最底部的按钮（类似pi）
+ - [x] 当全屏模式下，滚动屏幕不是最底部时，就加一个回到最底部的按钮（类似pi）
  - [x] 测试大量失败需要解决
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
