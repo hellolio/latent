@@ -234,6 +234,13 @@ async fn event_loop(
         state.width = app.width();
         state.fullscreen = app.is_fullscreen();
         app.set_auto_copy_on_select(state.copy_on_select);
+        // 全屏「跳到底部」药丸:主题着色标签每轮供给(渲染/点击命中在 TuiApp;
+        // regular 模式不注入,保持终端 scrollback 原生行为)
+        app.set_scroll_to_end_indicator(
+            state
+                .fullscreen
+                .then(|| view::scroll_to_end_indicator(&state.theme)),
+        );
 
         // 全屏滚动请求:handlers 只置标记,这里转交 TuiApp(下一次
         // render 按新视口位置差分输出)

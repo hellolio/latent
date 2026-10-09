@@ -263,6 +263,15 @@ pub fn error_line(text: &str, theme: &Theme) -> UiLine {
     ))
 }
 
+/// 全屏「跳到底部」药丸标签(pi scrollToEndIndicator 对应):文字前景 +
+/// selectedBg 背景,宿主侧按主题着色;显示时机/布局/点击命中在 TuiApp 层。
+pub fn scroll_to_end_indicator(theme: &Theme) -> UiLine {
+    Line::from(Span::styled(
+        latent_tui::SCROLL_TO_END_LABEL,
+        Style::new().fg(theme.assistant_text).bg(theme.selected_bg),
+    ))
+}
+
 /// 启动区横幅(展开态含完整帮助);分隔线由启动组装层追加。
 pub fn welcome_lines(version: &str, expanded: bool, theme: &Theme, width: usize) -> Vec<UiLine> {
     let mut out = latent_tui::header_view::banner(version, expanded, width, theme);
@@ -675,6 +684,16 @@ mod tests {
 
     fn theme() -> Theme {
         Theme::dark_ansi()
+    }
+
+    #[test]
+    fn scroll_to_end_indicator_uses_theme_colors() {
+        let theme = Theme::dark_ansi();
+        let line = scroll_to_end_indicator(&theme);
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style.bg, Some(theme.selected_bg));
+        assert_eq!(line.spans[0].style.fg, Some(theme.assistant_text));
+        assert!(line.spans[0].content.contains("Jump to latest"));
     }
 
     #[test]

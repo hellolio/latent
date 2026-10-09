@@ -37,7 +37,7 @@ pub mod theme;
 pub mod tool_card;
 pub mod width;
 
-pub use app::{SharedBuf, SharedSize, TuiApp};
+pub use app::{SCROLL_TO_END_LABEL, SharedBuf, SharedSize, TuiApp};
 pub use command_popup::{CommandEntry, CommandPopup};
 pub use editor::{Editor, EditorView};
 pub use file_popup::{FileEntry, FilePopup};

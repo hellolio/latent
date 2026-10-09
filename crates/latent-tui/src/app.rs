@@ -131,6 +131,12 @@ pub struct TuiApp<W: Write = Stdout> {
     /// `last_tail_len` 同一帧间模式)
     last_preview_win: usize,
     last_extra_len: usize,
+    /// fullscreen:「跳到底部」药丸标签(调用方按主题着色注入;None = 隐藏)
+    scroll_to_end: Option<UiLine>,
+    /// fullscreen:上一帧药丸命中矩形(屏幕行、列、宽;渲染时写、点击命中读)
+    scroll_to_end_rect: Option<(u16, u16, u16)>,
+    /// fullscreen:按下落在药丸上时吞掉本次拖动/抬起手势(已有选区不受影响)
+    mouse_on_indicator: bool,
     /// fullscreen:上一帧整屏内容(逐屏行差分;None = 空行/未写过)
     prev_screen: Vec<Option<String>>,
     finished: bool,
@@ -144,6 +150,11 @@ pub struct TuiApp<W: Write = Stdout> {
 /// fullscreen 模式翻页重叠行数(对齐 pi `PAGE_SCROLL_OVERLAP`):翻页后
 /// 上一页末尾仍可见,保持阅读连续性。
 const PAGE_SCROLL_OVERLAP: usize = 4;
+
+/// 全屏非 follow 状态下,视口末行居中绘制的「跳到底部」药丸标签
+/// (对应 pi `scrollToEndIndicator`,文案与上游一致;样式由调用方按
+/// 主题注入,布局与点击命中在本层)。
+pub const SCROLL_TO_END_LABEL: &str = " ↓ Jump to latest message · End ";
 
 /// 右上角复制提示框的显示时长。
 const TOAST_DURATION: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -182,6 +193,9 @@ impl TuiApp<Stdout> {
             scroll_extra: Vec::new(),
             last_preview_win: 0,
             last_extra_len: 0,
+            scroll_to_end: None,
+            scroll_to_end_rect: None,
+            mouse_on_indicator: false,
             prev_screen: vec![None; rows as usize],
             finished: false,
             needs_reshape: false,
@@ -278,6 +292,9 @@ impl<W: Write> TuiApp<W> {
             scroll_extra: Vec::new(),
             last_preview_win: 0,
             last_extra_len: 0,
+            scroll_to_end: None,
+            scroll_to_end_rect: None,
+            mouse_on_indicator: false,
             prev_screen: vec![None; rows as usize],
             finished: false,
             needs_reshape: false,
@@ -323,6 +340,8 @@ impl<W: Write> TuiApp<W> {
         if self.finished {
             return Ok(());
         }
+        // 药丸命中矩形逐帧重算(本帧若未绘制即为 None,点击不误命中)
+        self.scroll_to_end_rect = None;
         self.sync_size();
         if self.needs_reshape {
             // 尺寸已变:本帧跳过,等调用方 redraw_all 后再画
@@ -551,6 +570,44 @@ impl<W: Write> TuiApp<W> {
             new_screen[0] = Some(serialize_line(&toast_line));
         }
 
+        // 「跳到底部」药丸:非 follow 且内容超出一屏时,覆盖绘制在视口
+        // 末行(历史滚动区底边,即输入区上沿)居中处,命中的屏幕矩形记入
+        // `scroll_to_end_rect` 供 on_mouse 点击恢复 follow(对应 pi
+        // scrollToEndIndicator:宿主供给样式化标签,布局与命中在本层)
+        if !following && vh > 0 && self.scroll_max_top() > 0 {
+            if let Some(label) = self.scroll_to_end.clone() {
+                let label_plain = line_plain(&label);
+                let label_w = crate::width::display_width(&label_plain);
+                if label_w > 0 && label_w <= width {
+                    let row = vh - 1;
+                    // 药丸行的原有内容:committed 或非 follow 并入视口的
+                    // 预览全量行(视口顶行为负 = 上方留白,原内容为空)
+                    let li = top + row as isize;
+                    let plain = if li >= 0 {
+                        let i = li as usize;
+                        if i < committed_len {
+                            line_plain(&self.committed_cells[i])
+                        } else {
+                            mid_cells
+                                .get(i - committed_len)
+                                .map(line_plain)
+                                .unwrap_or_default()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    let col = (width - label_w) / 2;
+                    let (head, used) = crate::width::truncate_to_width(&plain, col);
+                    let pad = " ".repeat(col - used);
+                    let mut spans: Vec<ratatui::text::Span<'static>> =
+                        vec![ratatui::text::Span::raw(head), ratatui::text::Span::raw(pad)];
+                    spans.extend(label.spans.iter().cloned());
+                    new_screen[row] = Some(serialize_line(&crate::UiLine::from(spans)));
+                    self.scroll_to_end_rect = Some((row as u16, col as u16, label_w as u16));
+                }
+            }
+        }
+
         // 整屏逐行差分,只重写变化行(不连续的变化行也会被夹在
         // first..=last 里重写,内容相同无副作用)
         let mut first = usize::MAX;
@@ -666,12 +723,21 @@ impl<W: Write> TuiApp<W> {
     /// (按住 Shift 则改为扩展现有选区到点击处,锚点不变),拖动更新终点,
     /// 抬起时若拖出过非零区间则自动复制(对齐 pi
     /// fullscreenCopyOnSelect;单击不产生选区也不复制)。regular 模式无操作。
+    /// 「跳到底部」药丸上的按下例外:恢复 follow 并吞掉本次手势。
     pub fn on_mouse(&mut self, action: MouseAction) -> io::Result<()> {
         if self.finished || !self.fullscreen {
             return Ok(());
         }
         match action {
             MouseAction::Down { col, row, extend } => {
+                if self.hit_scroll_to_end(col, row) {
+                    // 命中药丸:回底 + 吞手势(选区保持不动,对齐 pi:
+                    // 按下落在指示器上时不进入选区流程)
+                    self.mouse_on_indicator = true;
+                    self.scroll_bottom();
+                    return Ok(());
+                }
+                self.mouse_on_indicator = false;
                 let point = self.frame_point(col, row);
                 match (extend, self.selection) {
                     (true, Some((anchor, _))) => self.selection = Some((anchor, point)),
@@ -679,6 +745,9 @@ impl<W: Write> TuiApp<W> {
                 }
             }
             MouseAction::Drag { col, row } => {
+                if self.mouse_on_indicator {
+                    return Ok(());
+                }
                 let point = self.frame_point(col, row);
                 if let Some(sel) = &mut self.selection {
                     sel.1 = point;
@@ -687,6 +756,10 @@ impl<W: Write> TuiApp<W> {
                 }
             }
             MouseAction::Up { col, row } => {
+                if self.mouse_on_indicator {
+                    self.mouse_on_indicator = false;
+                    return Ok(());
+                }
                 let point = self.frame_point(col, row);
                 let anchor = match self.selection {
                     Some((anchor, _)) => anchor,
@@ -705,6 +778,21 @@ impl<W: Write> TuiApp<W> {
             }
         }
         Ok(())
+    }
+
+    /// 屏幕坐标是否落在「跳到底部」药丸命中矩形内(上一帧渲染时记录;
+    /// 无矩形 = 本帧未绘制,恒不命中)。
+    fn hit_scroll_to_end(&self, col: u16, row: u16) -> bool {
+        match self.scroll_to_end_rect {
+            Some((r, c, w)) => row == r && col >= c && col < c.saturating_add(w),
+            None => false,
+        }
+    }
+
+    /// 注入「跳到底部」药丸标签(调用方按主题着色;None = 隐藏)。
+    /// 样式与布局分离:标签由宿主供给,显示时机/绘制/点击命中在 TuiApp 层。
+    pub fn set_scroll_to_end_indicator(&mut self, label: Option<UiLine>) {
+        self.scroll_to_end = label;
     }
 
     /// 设置「松开拖选自动复制」开关(不影响选择/高亮/快捷键复制)。
@@ -2086,6 +2174,140 @@ mod tests {
         assert!(texts[0].trim().is_empty(), "贴底锚定顶部应留白: {texts:?}");
         assert_eq!(texts[6].trim_end(), "s6", "{texts:?}");
         assert_eq!(texts[7].trim_end(), "tail", "{texts:?}");
+    }
+
+    /// 「跳到底部」药丸标签(测试用固定配色;生产由宿主按主题注入)。
+    fn indicator_line() -> UiLine {
+        UiLine::from(Line::from(Span::styled(
+            SCROLL_TO_END_LABEL,
+            Style::new().fg(Color::Gray).bg(Color::Rgb(0x29, 0x2e, 0x42)),
+        )))
+    }
+
+    fn twenty_lines() -> Vec<UiLine> {
+        (1..=20).map(|i| line(&format!("line{i}"))).collect()
+    }
+
+    #[test]
+    fn fullscreen_scroll_to_end_indicator_shows_when_scrolled_up() {
+        let (mut app, sink, _size) = app_fullscreen(40, 8);
+        app.set_scroll_to_end_indicator(Some(indicator_line()));
+        app.append_committed(&twenty_lines());
+        let mut sim = ScreenSim::new(40, 8);
+        app.render(&[line("tail")], None).unwrap();
+        sim.feed(&sink.take());
+        assert!(
+            !sim.texts().iter().any(|t| t.contains("Jump to latest")),
+            "follow 态不显示药丸: {:?}",
+            sim.texts()
+        );
+        // 上滚:视口末行居中出现药丸(覆盖在既有内容行上,行头文字保留)
+        app.scroll_page_up();
+        app.render(&[line("tail")], None).unwrap();
+        let frame = sink.take();
+        sim.feed(&frame);
+        assert!(frame.contains("Jump to latest"), "{frame:?}");
+        let texts = sim.texts();
+        assert!(
+            texts.iter().any(|t| t.contains("Jump to latest")),
+            "药丸应上屏: {:?}",
+            texts
+        );
+        // 回底(follow):药丸消失
+        app.scroll_bottom();
+        app.render(&[line("tail")], None).unwrap();
+        sim.feed(&sink.take());
+        assert!(
+            !sim.texts().iter().any(|t| t.contains("Jump to latest")),
+            "回底后药丸应消失: {:?}",
+            sim.texts()
+        );
+    }
+
+    #[test]
+    fn fullscreen_indicator_click_restores_follow() {
+        let (mut app, sink, _size) = app_fullscreen(40, 8);
+        app.set_scroll_to_end_indicator(Some(indicator_line()));
+        app.append_committed(&twenty_lines());
+        app.render(&[line("tail")], None).unwrap();
+        sink.take();
+        app.scroll_page_up();
+        app.render(&[line("tail")], None).unwrap();
+        sink.take();
+        assert!(!app.is_following());
+        // 药丸:vh=7 → 屏幕第 6 行;(40−32)/2 = 4,矩形列 4..36,列 20 在内
+        app.on_mouse(MouseAction::Down { col: 20, row: 6, extend: false }).unwrap();
+        app.on_mouse(MouseAction::Up { col: 20, row: 6 }).unwrap();
+        assert!(app.is_following(), "点击药丸应恢复 follow");
+        assert!(!sink.take().contains("\x1b]52;"), "点击药丸不应触发复制");
+        // 下一帧回到底部:最新行可见、药丸消失
+        app.render(&[line("tail")], None).unwrap();
+        let mut sim = ScreenSim::new(40, 8);
+        sim.feed(&sink.take());
+        let texts = sim.texts();
+        assert!(texts.iter().any(|t| t.contains("line20")), "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("Jump to latest")), "{texts:?}");
+    }
+
+    #[test]
+    fn fullscreen_indicator_hidden_when_content_fits() {
+        let (mut app, sink, _size) = app_fullscreen(40, 8);
+        app.set_scroll_to_end_indicator(Some(indicator_line()));
+        app.append_committed(&[line("hello world")]);
+        app.render(&[line("tail")], None).unwrap();
+        sink.take();
+        // scroll_top 关闭 follow,但内容不足一屏(scroll_max_top == 0):不显示
+        app.scroll_top();
+        app.render(&[line("tail")], None).unwrap();
+        let frame = sink.take();
+        assert!(
+            !frame.contains("Jump to latest"),
+            "内容不足一屏不应显示药丸: {frame:?}"
+        );
+        // 原药丸位置的点击不滚动(矩形未记录),走普通选区手势
+        app.on_mouse(MouseAction::Down { col: 20, row: 6, extend: false }).unwrap();
+        app.on_mouse(MouseAction::Up { col: 20, row: 6 }).unwrap();
+        assert!(!app.is_following(), "无药丸不应触发回底");
+    }
+
+    #[test]
+    fn fullscreen_indicator_click_off_pill_selects_instead() {
+        let (mut app, sink, _size) = app_fullscreen(40, 8);
+        app.set_scroll_to_end_indicator(Some(indicator_line()));
+        app.append_committed(&twenty_lines());
+        app.render(&[line("tail")], None).unwrap();
+        sink.take();
+        app.scroll_page_up();
+        app.render(&[line("tail")], None).unwrap();
+        sink.take();
+        // 药丸行(第 6 行)上、矩形(列 4..36)外的点击:普通选区手势
+        app.on_mouse(MouseAction::Down { col: 0, row: 6, extend: false }).unwrap();
+        app.on_mouse(MouseAction::Up { col: 2, row: 6 }).unwrap();
+        assert!(!app.is_following(), "药丸外点击不应回底");
+        assert!(app.has_selection(), "药丸外点击应产生选区");
+    }
+
+    #[test]
+    fn fullscreen_indicator_click_preserves_selection() {
+        let (mut app, sink, _size) = app_fullscreen(40, 8);
+        app.set_scroll_to_end_indicator(Some(indicator_line()));
+        app.append_committed(&twenty_lines());
+        app.render(&[line("tail")], None).unwrap();
+        sink.take();
+        app.scroll_page_up();
+        app.render(&[line("tail")], None).unwrap();
+        sink.take();
+        // 先拖选 line11(屏幕第 1 行 = 组合内容第 10 行)
+        app.on_mouse(MouseAction::Down { col: 0, row: 1, extend: false }).unwrap();
+        app.on_mouse(MouseAction::Up { col: 5, row: 1 }).unwrap();
+        assert!(app.has_selection());
+        // 点击药丸:回底,手势被吞掉,既有选区不扩展不清除
+        app.on_mouse(MouseAction::Down { col: 20, row: 6, extend: false }).unwrap();
+        app.on_mouse(MouseAction::Up { col: 20, row: 6 }).unwrap();
+        assert!(app.is_following(), "点击药丸应恢复 follow");
+        assert!(app.copy_selection().unwrap(), "既有选区应保留");
+        let expected = crate::selection::osc52_clipboard("line11");
+        assert!(sink.take().contains(&expected), "选区应仍为 line11");
     }
 
     #[test]

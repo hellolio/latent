@@ -83,6 +83,8 @@ pub struct Theme {
     pub subagent: Color,
     /// 补全弹窗边框(与 dim 区分的独立角色)
     pub popup_border: Color,
+    /// 选中/高亮背景(pi selectedBg):全屏「跳到底部」药丸底色等
+    pub selected_bg: Color,
     /// 深色/浅色主题标记(驱动 syntect 高亮主题选择)
     pub is_dark: bool,
 }
@@ -228,6 +230,18 @@ mod tests {
     fn detect_always_dark_default() {
         // 默认主题链路(TokyoNight / ANSI 兜底)都是深色
         assert!(Theme::detect().is_dark);
+    }
+
+    #[test]
+    fn selected_bg_official_selection_slot() {
+        // external:官方 selection 槽位直通(Tokyo Night #292e42)
+        assert_eq!(
+            Theme::from_theme_name(ThemeName::TokyoNight).selected_bg,
+            Color::Rgb(0x29, 0x2e, 0x42)
+        );
+        // builtin 两板均有值(ANSI 板用 Blue 基本色相)
+        assert_eq!(Theme::dark().selected_bg, Color::Rgb(0x29, 0x2e, 0x42));
+        assert_eq!(Theme::dark_ansi().selected_bg, Color::Blue);
     }
 
     #[test]

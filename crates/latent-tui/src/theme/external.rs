@@ -110,6 +110,8 @@ pub fn from_name(name: ThemeName) -> Theme {
         mode_plan: blend(p.secondary, p.error, 0.4),
         subagent: p.secondary,
         popup_border: blend(p.bg, p.fg, 0.45),
+        // 官方 selection 槽位直通(pi selectedBg 同源):跳到底部药丸等高亮底色
+        selected_bg: p.selection,
         is_dark: p.is_dark(),
     };
     refine(name, &mut theme);

@@ -56,6 +56,8 @@ pub fn dark() -> Theme {
         mode_plan: Color::Rgb(0xff, 0x79, 0xc6),
         subagent: Color::Rgb(0xbb, 0x9a, 0xf7),
         popup_border: Color::Rgb(0x6b, 0x73, 0x94),
+        // Tokyo Night 官方 selection(与 ratatui-themes 槽位同值)
+        selected_bg: Color::Rgb(0x29, 0x2e, 0x42),
         is_dark: true,
     }
 }
@@ -108,6 +110,8 @@ pub fn dark_ansi() -> Theme {
         mode_plan: Color::Magenta,
         subagent: Color::Cyan,
         popup_border: Color::DarkGray,
+        // 16 色无柔和中间色:高亮底用 Blue 基本色相(与 pi selectedBg 蓝系一致)
+        selected_bg: Color::Blue,
         is_dark: true,
     }
 }
