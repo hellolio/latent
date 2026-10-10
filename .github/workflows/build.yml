@@ -24,12 +24,28 @@ env:
 jobs:
   # Run tests on macOS ARM64 only
   test:
-    name: Test (macOS ARM64)
-    runs-on: macos-latest
+    name: Test  (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos-aarch64
+            binary: latent
+
+          # - os: ubuntu-22.04
+          #   platform: linux-x86_64
+          #   binary: latent
+
+          # - os: windows-latest
+          #   platform: windows-x86_64
+          #   binary: latent.exe
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -37,7 +53,7 @@ jobs:
           components: clippy
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.14"
 
@@ -83,7 +99,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -119,7 +135,7 @@ jobs:
             -DestinationPath "dist/latent-${{ matrix.platform }}.zip"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: latent-${{ matrix.platform }}
           path: dist/latent-*
