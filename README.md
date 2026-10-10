@@ -23,6 +23,12 @@ latent 以流式方式驱动大语言模型，并行执行工具调用，支持�
 
 ## 安装
 
+### 一键安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hellolio/latent/main/install.sh | sh
+```
+
 ### 从源码构建（需要 Rust 1.85+）
 
 ```bash
