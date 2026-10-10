@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use latent_agent::{Tool, ToolCall, ToolError, ToolOutput, ToolUpdater};
 
+use crate::background::BackgroundTaskRegistry;
 use crate::output_accumulator::{OutputAccumulator, OutputSnapshot};
 use crate::truncate::{OutputLimits, DEFAULT_MAX_LINES};
 
@@ -28,17 +29,18 @@ const MAX_TIMEOUT_MS: u128 = 2_147_483_647;
 /// 返回空 = 无会话上下文(行为同未配置)。
 pub type SessionEnvFn = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
 
-/// 后台任务完成通知接缝:工具侧只产出通知文本,投递方式(follow_up 唤醒
-/// 模型等)由装配层注入。None = 不武装自动转后台。
+/// 后台任务完成通知接缝:工具侧产出 (task_id, 通知文本),投递方式与是否
+/// 投递(模型已主动获知结局则抑制)由装配层注入的实现决定。None = 不武装
+/// 自动转后台。
 #[async_trait]
 pub trait BackgroundNotifier: Send + Sync {
-    async fn notify(&self, text: String);
+    async fn notify(&self, task_id: String, text: String);
 }
 
 /// shell 运行时限策略:模型未传 `timeout` 时的默认超时,以及运行超过阈值
-/// 自动转后台的秒数。转后台只在生效超时大于阈值时武装:默认 120s 超时
-/// 大于 60s 阈值,不带 timeout 的长命令也会在 60s 转后台(完成时经
-/// notifier 通知);显式传更短 timeout 的命令按超时杀灭。
+/// 自动转后台的秒数。转后台只在生效超时严格大于阈值时武装:默认 600s 超时
+/// 大于 300s 阈值,不带 timeout 的长命令会在 300s 转后台(完成时经
+/// notifier 通知);显式传不大于阈值的 timeout 按超时杀灭,永不转后台。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShellTimeoutPolicy {
     pub default_timeout_secs: u64,
@@ -48,8 +50,8 @@ pub struct ShellTimeoutPolicy {
 impl Default for ShellTimeoutPolicy {
     fn default() -> Self {
         ShellTimeoutPolicy {
-            default_timeout_secs: 120,
-            background_after_secs: 60,
+            default_timeout_secs: 600,
+            background_after_secs: 300,
         }
     }
 }
@@ -62,7 +64,8 @@ pub trait ShellSpawnHook: Send + Sync {
 }
 
 /// shell 工具装配选项(T9/T10):会话环境、命令前缀、spawn 改写钩子、
-/// 运行时限策略、后台完成通知。缺省 = 默认时限、不武装后台化。
+/// 运行时限策略、后台完成通知、后台任务登记表(task_status 工具数据源,
+/// 与通知器共享)。缺省 = 默认时限、不武装后台化。
 #[derive(Clone, Default)]
 pub struct ShellSpawnOptions {
     pub session_env: Option<SessionEnvFn>,
@@ -70,6 +73,9 @@ pub struct ShellSpawnOptions {
     pub spawn_hook: Option<Arc<dyn ShellSpawnHook>>,
     pub timeouts: ShellTimeoutPolicy,
     pub background_notifier: Option<Arc<dyn BackgroundNotifier>>,
+    /// 转后台任务登记于此,task_status 工具据此查询/取结果/kill;
+    /// 注入后 task id 由 registry 单调分配(跨会话不撞号)
+    pub task_registry: Option<Arc<BackgroundTaskRegistry>>,
 }
 
 /// shell 工具配置(bash 与 powershell 共用工厂,05 文档 createShellToolDefinition)。
@@ -151,17 +157,18 @@ fn bash_config(limits: OutputLimits, timeouts: &ShellTimeoutPolicy) -> ShellTool
              truncated to the last {DEFAULT_MAX_LINES} lines or {} bytes (whichever is hit \
              first); the full output is saved to a temp file referenced in details. \
              A command still running after {}s is moved to the background: the call \
-             returns immediately with a task id and an output file, and completion \
-             (exit code and output tail) is reported automatically. Pass a shorter \
-             timeout to kill a command sooner. Batch independent commands into one \
-             call with `;` or `&&`, or issue several calls in a single turn.",
+             returns immediately with a task id, progress and the result can be \
+             fetched with task_status, and completion is reported automatically. \
+             An explicit timeout at or below the background threshold is always \
+             honored as a kill (never backgrounded). Batch independent commands into \
+             one call with `;` or `&&`, or issue several calls in a single turn.",
             limits.effective_max_bytes(),
             timeouts.background_after_secs
         ),
         prompt_snippet: Some(
             "bash(command, timeout?): runs a shell command in the working directory; output is \
-             truncated (tail kept); long-running commands are backgrounded and reported on \
-             completion"
+             truncated (tail kept); long-running commands are backgrounded (check/fetch/kill \
+             via task_status) and reported on completion"
                 .into(),
         ),
         program: "sh",
@@ -279,45 +286,107 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     }
 }
 
-/// 后台 watcher:持有 child 与管道任务,等进程退出后排空输出,经 notifier
-/// 上报完成(exit code + 输出尾段)。latent 进程退出时 watcher 被 drop,
-/// kill_on_drop(true) 兜底杀灭整棵进程树。
-async fn watch_background(
+/// 后台 watcher:持有 child 与管道任务,等进程退出(或收到 kill 令牌后
+/// 杀树收尸)排空输出,回填 registry 终态,经 notifier 上报完成(exit code
+/// 与输出尾段;是否投递由 notifier 的消费检查决定)。latent 进程退出时
+/// watcher 被 drop,kill_on_drop(true) 兜底杀灭整棵进程树。
+struct BackgroundWatch {
     task_id: String,
-    mut child: tokio::process::Child,
+    child: tokio::process::Child,
     pipe_out: tokio::task::JoinHandle<Result<(), ToolError>>,
     pipe_err: tokio::task::JoinHandle<Result<(), ToolError>>,
     accumulator: Arc<Mutex<OutputAccumulator>>,
     started: std::time::Instant,
     notifier: Arc<dyn BackgroundNotifier>,
-) {
-    let code = match child.wait().await {
-        Ok(status) => Ok(exit_code(status)),
-        Err(e) => Err(e.to_string()),
+    registry: Option<Arc<BackgroundTaskRegistry>>,
+    kill: CancellationToken,
+}
+
+async fn watch_background(ctx: BackgroundWatch) {
+    let BackgroundWatch {
+        task_id,
+        mut child,
+        pipe_out,
+        pipe_err,
+        accumulator,
+        started,
+        notifier,
+        registry,
+        kill,
+    } = ctx;
+    // kill 令牌与自然退出竞速:分支落选后借用释放,杀树在块外进行
+    enum Reap {
+        Done(std::io::Result<std::process::ExitStatus>),
+        Killed,
+    }
+    let reap = {
+        // SIGCHLD 唤醒链(tokio 全局 self-pipe → broadcast)偶发丢唤醒时,
+        // wait() 将永不返回;500ms 非阻塞 waitpid 兕底保证收割延迟上限。
+        // 退出状态统一由 try_wait 取(wait() 完成后 FusedChild 已缓存)
+        const REAP_POLL: Duration = Duration::from_millis(500);
+        let work = async {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Err(e) => break Err(e),
+                    Ok(None) => {}
+                }
+                // timeout 到期即回头重查;wait() 先完成也一样
+                let _ = tokio::time::timeout(REAP_POLL, child.wait()).await;
+            }
+        };
+        tokio::pin!(work);
+        tokio::select! {
+            result = &mut work => Reap::Done(result),
+            _ = kill.cancelled() => Reap::Killed,
+        }
     };
+    let (code, saw_kill) = match reap {
+        Reap::Done(result) => (
+            result.map(exit_code).map_err(|e| e.to_string()),
+            false,
+        ),
+        Reap::Killed => {
+            kill_process_tree(&mut child);
+            (
+                child
+                    .wait()
+                    .await
+                    .map(exit_code)
+                    .map_err(|e| e.to_string()),
+                true,
+            )
+        }
+    };
+
     let _ = pipe_out.await;
     let _ = pipe_err.await;
-    let snapshot = {
+    {
         let mut acc = accumulator.lock().unwrap();
         acc.finish();
-        acc.snapshot(true)
-    };
+    }
+    if let Some(registry) = &registry {
+        registry.mark_finished(&task_id, code.clone(), saw_kill);
+    }
     let elapsed = started.elapsed().as_secs();
-    let mut message = match code {
-        Ok(0) => format!("[latent] background task {task_id} finished successfully (elapsed {elapsed}s)."),
-        Ok(code) => {
-            format!("[latent] background task {task_id} failed: exit code {code} (elapsed {elapsed}s).")
-        }
-        Err(error) => format!("[latent] background task {task_id} could not be reaped: {error}"),
+    let outcome = match &code {
+        Ok(0) => "finished successfully".to_string(),
+        Ok(code) => format!("failed: exit code {code}"),
+        Err(error) => format!("could not be reaped: {error}"),
     };
-    let tail = crate::truncate::truncate_tail(&snapshot.content, 40, 2000).content;
-    if !tail.trim().is_empty() {
-        message.push_str(&format!("\nOutput tail:\n{tail}"));
+    let mut message = format!("[latent] background task {task_id} {outcome} (elapsed {elapsed}s).");
+    if saw_kill {
+        message.push_str(" (terminated on request)");
     }
-    if let Some(path) = &snapshot.full_output_path {
-        message.push_str(&format!("\n[Full output: {}]", path.display()));
-    }
-    notifier.notify(message).await;
+    // 通知纯指引化:结果不附带(拉取式)——模型不调 task_status result 就
+    // 永远拿不到输出;指名工具与参数,并告知不会有第二次推送
+    message.push_str(&format!(
+        "\nAutomatic background-task notification — you are woken because the task above \
+         just completed. Its output is not attached here: fetch it with the task_status tool \
+         (action: \"result\", task_id: \"{task_id}\") when you need it; the result is \
+         delivered only on fetch."
+    ));
+    notifier.notify(task_id, message).await;
 }
 
 /// run 的成功产物:正常退出码,或"已转后台"的立即结算结果(execute 据此
@@ -329,10 +398,12 @@ enum RunOutcome {
 
 /// 执行 shell:stdout/stderr 经常驻管道任务流入 accumulator(超时/中止杀
 /// 进程;生效超时大于后台阈值时,运行超阈值自动转后台 —— 进程继续跑,
-/// tool result 立即结算,完成经 notifier 上报)。
+/// tool result 立即结算,完成经 notifier 上报)。display_command 是用于
+/// 展示的命令(沙箱包装前),registry 登记用。
 async fn run(
     tool: &ShellTool,
     command: &str,
+    display_command: &str,
     timeout_secs: Option<u64>,
     cancel: &CancellationToken,
     accumulator: Arc<Mutex<OutputAccumulator>>,
@@ -352,7 +423,8 @@ async fn run(
         return Err(fail("timeout exceeds maximum allowed duration".into()));
     }
     // 转后台只在生效超时严格大于阈值时武装:阈值先到 = 超时杀灭的语义保持
-    // (默认 120s 超时 > 60s 阈值 = 不带 timeout 的长命令也会在 60s 转后台)
+    // (默认 600s 超时 > 300s 阈值 = 不带 timeout 的长命令会在 300s 转后台;
+    // 显式 timeout ≤ 阈值恒按超时杀灭,永不转后台)
     let background_armed = spawn_options.background_notifier.is_some()
         && timeouts.background_after_secs > 0
         && timeouts.background_after_secs < effective_timeout_secs;
@@ -483,43 +555,46 @@ async fn run(
         }
         Exit::Background => {
             // 移交 watcher:进程继续跑,tool result 立即结算(模型不盲等);
-            // 强制全量输出落盘,模型可随时读输出文件查进度
-            let task_number = tool
-                .background_counter
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            let task_id = format!("{name}-{task_number}");
+            // 强制全量输出落盘,模型可随时经 task_status 取结果/终止任务
             let full_path = {
                 let mut acc = accumulator.lock().unwrap();
                 acc.force_temp_file()
             };
-            let snapshot = {
-                let mut acc = accumulator.lock().unwrap();
-                acc.snapshot(false)
+            // 登记 + 分配 task id:有 registry 时由 registry 单调分配(主会话
+            // 与 subagent 池共享,不撞号);无 registry 退回实例内计数
+            let (task_id, kill) = match &spawn_options.task_registry {
+                Some(registry) => {
+                    let (id, kill) =
+                        registry.register(display_command, full_path.clone(), accumulator.clone());
+                    (id, Some(kill))
+                }
+                None => {
+                    let task_number = tool
+                        .background_counter
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    (format!("{name}-{task_number}"), None)
+                }
             };
             let notifier = spawn_options
                 .background_notifier
                 .clone()
                 .expect("background branch only runs when a notifier is armed");
-            tokio::spawn(watch_background(
-                task_id.clone(),
+            tokio::spawn(watch_background(BackgroundWatch {
+                task_id: task_id.clone(),
                 child,
                 pipe_out,
                 pipe_err,
                 accumulator,
                 started,
                 notifier,
-            ));
-            let mut message = format!(
-                "Command still running in background (task {task_id}). It will be reported \
-                 here when it finishes; you may continue with other work in the meantime."
+                registry: spawn_options.task_registry.clone(),
+                kill: kill.unwrap_or_else(CancellationToken::new),
+            }));
+            let message = format!(
+                "Task started in background.\nTask ID: {task_id}\nCheck progress or fetch the \
+                 result with task_status; completion is reported here automatically."
             );
-            if let Some(path) = &full_path {
-                message.push_str(&format!("\nFull output is being written to: {}", path.display()));
-            }
-            if !snapshot.content.trim().is_empty() {
-                message.push_str(&format!("\n\nOutput so far:\n{}", snapshot.content));
-            }
             let mut details = serde_json::Map::new();
             if let Some(path) = &full_path {
                 details.insert(
@@ -608,7 +683,9 @@ impl Tool for ShellTool {
     fn schema(&self) -> serde_json::Value {
         let timeout_description = format!(
             "Optional timeout in seconds. Omit for the default ({}s). Commands running \
-             past {}s are moved to the background and reported on completion.",
+             past {}s are moved to the background and reported on completion; an \
+             explicit timeout at or below the background threshold kills the command \
+             instead of backgrounding it.",
             self.spawn.timeouts.default_timeout_secs,
             self.spawn.timeouts.background_after_secs
         );
@@ -640,12 +717,14 @@ impl Tool for ShellTool {
 
         // T10:prefix 先并入命令,hook 检查/包装的是**最终执行体** ——
         // prefix 一并进沙箱、一并被扩展钩子审计(07 §8.5);hook 返回
-        // Err = 拒绝执行,直接产出错误结果、不 spawn
+        // Err = 拒绝执行,直接产出错误结果、不 spawn。display_command 是
+        // 沙箱包装前的执行体(后台任务登记展示用)
         let mut effective = match effective_prefix(&self.spawn.command_prefix) {
             // 换行拼接(pi bash.ts:prefix 用于 shell setup commands,可含多条语句)
             Some(prefix) => format!("{prefix}\n{command}"),
             None => command,
         };
+        let display_command = effective.clone();
         let mut sandboxed = false;
         if let Some(hook) = &self.spawn.spawn_hook {
             match hook.rewrite(effective).await {
@@ -671,6 +750,7 @@ impl Tool for ShellTool {
         let outcome = run(
             self,
             &effective,
+            &display_command,
             timeout_secs,
             &cancel,
             accumulator.clone(),
@@ -1288,11 +1368,11 @@ mod tests {
     // ---- P3:超阈值自动转后台 + 完成通知 ----
 
     #[derive(Default)]
-    struct CollectingNotifier(Mutex<Vec<String>>);
+    struct CollectingNotifier(Mutex<Vec<(String, String)>>);
     #[async_trait]
     impl BackgroundNotifier for CollectingNotifier {
-        async fn notify(&self, text: String) {
-            self.0.lock().unwrap().push(text);
+        async fn notify(&self, task_id: String, text: String) {
+            self.0.lock().unwrap().push((task_id, text));
         }
     }
 
@@ -1317,26 +1397,28 @@ mod tests {
         )
         .await
         .unwrap();
-        // 立即结算:task id + 输出文件指引,晚到的输出不在结果里
+        // 立即结算:任务开始 + task id(不带输出文件路径与已产出输出,
+        // 模型经 task_status 查询),晚到的输出不在结果里
         assert!(
-            output.output.contains("still running in background"),
+            output.output.contains("Task started in background."),
             "{}",
             output.output
         );
-        assert!(output.output.contains("task bash-1"), "{}", output.output);
+        assert!(output.output.contains("Task ID: bash-1"), "{}", output.output);
         assert!(
-            output.output.contains("Full output is being written to:"),
+            !output.output.contains("Full output is being written to"),
             "{}",
             output.output
         );
+        assert!(!output.output.contains("early-marker"), "{}", output.output);
         assert!(!output.output.contains("late-marker"), "{}", output.output);
         let path = output.details["fullOutputPath"].as_str().unwrap().to_string();
 
-        // 完成通知:exit code + 输出尾段(含转后台后才产出的行)
+        // 完成通知:纯指引(状态 + task_status 取结果指引),不含输出(拉取式)
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let notification = loop {
             let texts = notifier.0.lock().unwrap().clone();
-            if let Some(text) = texts.last() {
+            if let Some((_, text)) = texts.last() {
                 break text.clone();
             }
             assert!(
@@ -1349,7 +1431,15 @@ mod tests {
             notification.contains("background task bash-1 finished successfully"),
             "{notification}"
         );
-        assert!(notification.contains("late-marker"), "{notification}");
+        assert!(notification.contains("task_status tool"), "{notification}");
+        assert!(notification.contains("action: \"result\""), "{notification}");
+        assert!(notification.contains("task_id: \"bash-1\""), "{notification}");
+        assert!(!notification.contains("late-marker"), "{notification}");
+        assert!(!notification.contains("Output tail"), "{notification}");
+        assert!(!notification.contains("[Full output:"), "{notification}");
+        // 通知携带 task id(供装配层核对消费状态)
+        let notified = notifier.0.lock().unwrap();
+        assert_eq!(notified.last().unwrap().0, "bash-1");
         // 全量输出落盘:转后台之后写入的行也在文件里
         let full = std::fs::read_to_string(&path).unwrap();
         assert!(full.contains("early-marker"), "{full}");

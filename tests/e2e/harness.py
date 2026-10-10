@@ -96,6 +96,7 @@ class LatentApp:
         home: str | None = None,
         session_mode: str | None = "full-access",
         show_builtin_models: bool | None = None,
+        settings: dict | None = None,
     ):
         self.mock = MockLLM(turns).start()
         self.timeout = timeout
@@ -123,6 +124,10 @@ class LatentApp:
             models["showBuiltinModels"] = show_builtin_models
         with open(os.path.join(self.home, ".latent", "models.json"), "w", encoding="utf-8") as f:
             json.dump(models, f, ensure_ascii=False)
+        # settings 注入(全局数据目录;如 bash 超时/后台阈值等行为开关)
+        if settings is not None:
+            with open(os.path.join(self.home, ".latent", "settings.json"), "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False)
 
         self._owns_workdir = workdir is None
         self.workdir = workdir or tempfile.mkdtemp(prefix="latent_e2e_cwd_")

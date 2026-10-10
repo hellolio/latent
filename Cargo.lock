@@ -1839,6 +1839,7 @@ dependencies = [
  "globset",
  "ignore",
  "latent-agent",
+ "latent-ai",
  "nix 0.31.3",
  "regex",
  "serde",

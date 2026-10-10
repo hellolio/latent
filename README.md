@@ -9,7 +9,7 @@ latent 以流式方式驱动大语言模型，并行执行工具调用，支持�
 ## 功能特性
 
 - **终端交互界面**：全屏 / 滚动两种渲染模式，Markdown 渲染、语法高亮、流式输出回复与思考过程、工具调用实时可见。
-- **内置工具**：`read` / `bash` / `edit` / `write` / `grep` / `find` / `ls` / `powershell` 八个工具，AI 可以直接读代码、跑命令、改文件。
+- **内置工具**：`read` / `bash` / `edit` / `write` / `grep` / `find` / `ls` / `powershell` 八个工具，AI 可以直接读代码、跑命令、改文件；bash 长命令超 300s 自动转后台（默认超时 600s），`task_status` 工具可查询进度、取已完成任务的结果或终止任务（完成自动上报，主动取过结果则不重复通知）。
 - **多 Provider 接入**：支持 Anthropic、OpenAI、DeepSeek、Google、Z.ai、Moonshot 等 17 家 provider，统一从环境变量读取 API key，也支持自定义模型接入。
 - **会话管理**：对话自动保存为 JSONL 会话文件，`--continue` 一键续聊；上下文接近模型窗口上限时自动压缩摘要，长任务不中断。
 - **权限模式**：Plan（只读规划）/ Confirm（写操作需确认）/ FullAccess（全自动）三种模式，配合可选的 macOS Seatbelt / Linux bubblewrap / Landlock 沙箱。

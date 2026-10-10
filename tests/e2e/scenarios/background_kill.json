@@ -1,0 +1,26 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "sleep 30"
+        }
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "name": "task_status",
+        "arguments": {
+          "action": "kill",
+          "task_id": "bash-1"
+        }
+      }
+    ]
+  },
+  {
+    "text": "后台任务已终止。"
+  }
+]

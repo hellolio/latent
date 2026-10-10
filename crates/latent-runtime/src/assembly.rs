@@ -928,25 +928,6 @@ impl latent_web::BackgroundNotifier for AgentFollowUpNotifier {
     }
 }
 
-/// bash 后台任务完成通知:同一唤醒链(latent_tools::BackgroundNotifier 接缝)。
-struct ShellBackgroundNotifier {
-    agent: Arc<Mutex<Weak<latent_agent::Agent>>>,
-}
-
-#[async_trait]
-impl latent_tools::BackgroundNotifier for ShellBackgroundNotifier {
-    async fn notify(&self, text: String) {
-        let Some(agent) = self.agent.lock().unwrap().upgrade() else {
-            return; // 会话已释放:通知无处投递,丢弃
-        };
-        tokio::spawn(async move {
-            agent.wait_idle().await;
-            agent.follow_up(latent_agent::AgentMessage::user(text));
-            let _ = agent.continue_run().await;
-        });
-    }
-}
-
 /// 共享装配:扩展连接失败不阻断(诊断打 stderr,07 §8.5)。
 pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -1107,10 +1088,14 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // T9/T10:shell 工具装配选项 —— LATENT_* 会话环境 + settings 命令前缀 +
     // 沙箱包装钩子(13 文档 §7.6;外部 spawn 钩子先改写,沙箱最后包整条命令)
     // + 运行时限策略(默认超时/转后台阈值,settings `bashTimeoutSecs`/
-    // `backgroundAfterSecs`)+ 后台完成通知(wait_idle → follow_up 唤醒链,
-    // agent 弱引在会话建好后回填)
+    // `backgroundAfterSecs`)+ 后台完成通知(wait_idle → 消费检查 → follow_up
+    // 唤醒链,agent 弱引在会话建好后回填)+ 后台任务登记表(task_status 工具
+    // 查询/取结果/kill 的数据源,主会话与 subagent 池共享同一实例)
+    let background_registry = Arc::new(latent_tools::BackgroundTaskRegistry::new());
+    let shell_notifier = Arc::new(latent_tools::AgentFollowUpNotifier::new(Some(
+        background_registry.clone(),
+    )));
     let session_cell: Arc<Mutex<Weak<AgentSession>>> = Arc::new(Mutex::new(Weak::new()));
-    let shell_bg_cell: Arc<Mutex<Weak<latent_agent::Agent>>> = Arc::new(Mutex::new(Weak::new()));
     // 沙箱工厂绑定装配期探测结果(单一事实来源,create_sandbox 不再重复探测;
     // 构造失败经钩子转拒绝执行,fail-closed)
     let sandbox_factory: SandboxFactory = Arc::new(move |policy, helper_exe| {
@@ -1149,9 +1134,8 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         command_prefix: load_shell_command_prefix(),
         spawn_hook: None,
         timeouts: load_shell_timeout_policy(),
-        background_notifier: Some(Arc::new(ShellBackgroundNotifier {
-            agent: shell_bg_cell.clone(),
-        })),
+        background_notifier: Some(shell_notifier.clone()),
+        task_registry: Some(background_registry.clone()),
     };
     let shell = latent_tools::ShellSpawnOptions {
         spawn_hook: Some(make_spawn_hook(engine.clone())),
@@ -1175,6 +1159,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     let mut tools = latent_tools::create_tools_at_with_shell_and_limits(&cwd, shell, tool_output_limits)
         .all()
         .to_vec();
+    // 后台任务状态工具:bash 转后台任务的查询/取结果/kill 入口(与 bash 共享
+    // registry;只读类,无需审批)
+    tools.push(latent_tools::create_task_status_tool(background_registry.clone()));
     tools.extend(extension_tools.iter().cloned());
 
     // /subagent 平行会话工具池工厂:每会话按其引擎现建完整池(白名单/缺省集
@@ -1185,6 +1172,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
         let limits = tool_output_limits;
         let extension_tools = extension_tools;
         let make_spawn_hook = make_spawn_hook.clone();
+        let background_registry = background_registry.clone();
         Arc::new(move |engine: Arc<PermissionEngine>| {
             let shell = latent_tools::ShellSpawnOptions {
                 spawn_hook: Some(make_spawn_hook(engine)),
@@ -1194,6 +1182,7 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
                 latent_tools::create_tools_at_with_shell_and_limits(&cwd, shell, limits)
                     .all()
                     .to_vec();
+            pool.push(latent_tools::create_task_status_tool(background_registry.clone()));
             pool.extend(extension_tools.iter().cloned());
             pool
         })
@@ -1437,8 +1426,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     subagent_tool.spawn_supervisor();
     // web 扩展:回填 agent 弱引(后台完成通知 + 当前主模型)
     *web_agent_cell.lock().unwrap() = Arc::downgrade(session.agent());
-    // bash 后台任务:回填 agent 弱引(完成通知经 follow_up 唤醒)
-    *shell_bg_cell.lock().unwrap() = Arc::downgrade(session.agent());
+    // bash 后台任务:回填 agent 弱引(完成通知经 wait_idle → 消费检查 →
+    // follow_up 唤醒)
+    shell_notifier.set_agent(session.agent());
 
     // 装配期诊断(编译期扩展 init 失败跳过等)
     for diagnostic in session.extension_diagnostics() {
@@ -2009,10 +1999,10 @@ mod tests {
         assert_eq!(
             shell_timeout_policy_from(Some(&project.0), None),
             latent_tools::ShellTimeoutPolicy {
-                default_timeout_secs: 120,
-                background_after_secs: 60
+                default_timeout_secs: 600,
+                background_after_secs: 300
             },
-            "未配置 = 默认 120s 超时 / 60s 转后台"
+            "未配置 = 默认 600s 超时 / 300s 转后台"
         );
     }
 
@@ -2023,7 +2013,7 @@ mod tests {
         project.write_settings(r#"{"bashTimeoutSecs": 60}"#);
         let policy = shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent")));
         assert_eq!(policy.default_timeout_secs, 60, "单键配置生效,其余保持默认");
-        assert_eq!(policy.background_after_secs, 60);
+        assert_eq!(policy.background_after_secs, 300, "未配置的键保持新默认");
         global.write_settings(r#"{"bashTimeoutSecs": 30, "backgroundAfterSecs": 45}"#);
         assert_eq!(
             shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent"))),
@@ -2033,10 +2023,10 @@ mod tests {
             },
             "首个含配置的 settings 生效:项目 bash 超时 + 全局后台阈值"
         );
-        project.write_settings(r#"{"backgroundAfterSecs": 300}"#);
+        project.write_settings(r#"{"backgroundAfterSecs": 500}"#);
         let policy = shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent")));
         assert_eq!(policy.default_timeout_secs, 30, "项目未含 bashTimeoutSecs 时回退全局");
-        assert_eq!(policy.background_after_secs, 300, "项目 backgroundAfterSecs 覆盖全局");
+        assert_eq!(policy.background_after_secs, 500, "项目 backgroundAfterSecs 覆盖全局");
     }
 
     #[test]

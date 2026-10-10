@@ -26,7 +26,7 @@ Python(本机为 conda base)环境,不建虚拟环境。
 | 文件 | 职责 |
 |---|---|
 | `mock_llm.py` | 本地 mock LLM 服务:伪装 anthropic-messages 端点，按场景脚本逐 turn 返回 SSE 流（`delay_ms` 响应前延迟、`chunk_delay_ms` delta 间逐块延迟模拟慢速流式）;记录 latent 发来的每个请求供反向断言 |
-| `harness.py` | `LatentApp`:临时隔离 HOME(写入指向 mock 的 models.json)+ pexpect 启动真实二进制 + pyte 解析屏幕;提供打字/断言/退出 API |
+| `harness.py` | `LatentApp`:临时隔离 HOME(写入指向 mock 的 models.json,可经 `settings=` 注入 settings.json)+ pexpect 启动真实二进制 + pyte 解析屏幕;提供打字/断言/退出 API |
 | `test_*.py` | 场景测试,每个对应一条用户使用流程 |
 
 ## 写一个新场景

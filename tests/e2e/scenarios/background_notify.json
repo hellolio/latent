@@ -1,0 +1,18 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "sleep 1.5"
+        }
+      }
+    ]
+  },
+  {
+    "text": "好的,任务在后台跑着。"
+  },
+  {
+    "text": "收到完成通知。"
+  }
+]

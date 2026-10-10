@@ -1,11 +1,14 @@
 //! latent-tools —— 内置工具(05 文档):默认集 read/bash/edit/write,只读集
-//! read/grep/find/ls,全量集含 powershell(8 工具)。
+//! read/grep/find/ls,全量集含 powershell(8 工具)。bash 长命令自动转后台:
+//! 装配层武装后台化时随 bash 注册 task_status 工具(查询/取结果/kill,
+//! background 模块),不在便捷工厂的固定集合里。
 //!
 //! 只依赖 latent-agent 的 `Tool` trait(方针文档 §1);装配经 `create_default_tools()`
 //! 等工厂,本 crate 整体可拆卸。全部输出型工具经 `OutputLimits` 注入输出上限
 //! (默认派生自 agent 转录裁剪上限 - 2k 余量,见 truncate 模块);*_with_limits
 //! 工厂由装配层接线,无参工厂使用默认派生值。
 
+mod background;
 mod bash;
 mod edit;
 mod file_listing;
@@ -27,6 +30,7 @@ pub use bash::{
     create_powershell_tool_with, BackgroundNotifier, SessionEnvFn, ShellSpawnHook,
     ShellSpawnOptions, ShellTimeoutPolicy,
 };
+pub use background::{create_task_status_tool, AgentFollowUpNotifier, BackgroundTaskRegistry};
 pub use read::create_read_tool_with_limits;
 pub use file_listing::{collect_entries, collect_entries_capped, ListingEntry, DEFAULT_MAX_ENTRIES};
 pub use find::{create_find_tool, create_find_tool_with_limits};

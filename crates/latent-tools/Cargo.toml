@@ -25,3 +25,7 @@ nix = { version = "=0.31.3", features = ["signal"] }
 [features]
 default = ["process"]
 process = ["tokio/process"]
+
+# 仅测试:后台任务完成通知的投递链验收用 ScriptedProvider(可拆卸判据只约束 lib 依赖图)
+[dev-dependencies]
+latent-ai.workspace = true

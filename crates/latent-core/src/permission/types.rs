@@ -67,7 +67,9 @@ pub enum ToolRiskClass {
 /// 内置工具名 → 风险类;未知名字(MCP 扩展)一律 External。
 pub fn classify_tool(name: &str) -> ToolRiskClass {
     match name {
-        "read" | "grep" | "find" | "ls" => ToolRiskClass::ReadOnly,
+        // task_status:后台任务查询/取结果/终止 —— 只及本会话 bash 转后台的
+        // 任务(kill 经进程组信号,无文件写副作用),按只读类放行
+        "read" | "grep" | "find" | "ls" | "task_status" => ToolRiskClass::ReadOnly,
         // subagent 引擎封壳:派发本身无副作用,且子 agent 的每次工具调用仍过
         // 同一权限引擎(Plan 模式下子调用照常被只读约束),故按只读类放行 ——
         // 否则 Plan 模式会把它当 External 工具整体拒绝
@@ -256,6 +258,9 @@ pub fn mode_baseline_tools(mode: SessionMode, _sandbox_available: bool) -> Vec<S
             "find".into(),
             "ls".into(),
             platform_shell.into(),
+            // 后台任务查询/取结果/kill:bash 在 Plan 模式也会转后台,状态
+            // 工具必须可用
+            "task_status".into(),
         ],
         SessionMode::Confirm | SessionMode::FullAccess => vec![
             "read".into(),
@@ -266,6 +271,7 @@ pub fn mode_baseline_tools(mode: SessionMode, _sandbox_available: bool) -> Vec<S
             "grep".into(),
             "find".into(),
             "ls".into(),
+            "task_status".into(),
         ],
     }
 }
@@ -318,6 +324,7 @@ mod tests {
         assert_eq!(classify_tool("powershell"), ToolRiskClass::Shell);
         assert_eq!(classify_tool("subagent"), ToolRiskClass::ReadOnly);
         assert_eq!(classify_tool("load_skill"), ToolRiskClass::ReadOnly);
+        assert_eq!(classify_tool("task_status"), ToolRiskClass::ReadOnly);
         assert_eq!(classify_tool("mcp__x__y"), ToolRiskClass::External);
         assert_eq!(classify_tool("unknown"), ToolRiskClass::External);
     }
@@ -339,7 +346,10 @@ mod tests {
         // 无沙箱平台:shell 仍在基线,由三态判定兜底(降级矩阵 §7.5)
         let degraded = mode_baseline_tools(SessionMode::Plan, false);
         assert!(degraded.contains(&platform_shell.to_string()));
+        // task_status 在两档基线都在:Plan 模式 bash 也会转后台
+        assert!(plan.contains(&"task_status".to_string()));
         let confirm = mode_baseline_tools(SessionMode::Confirm, true);
+        assert!(confirm.contains(&"task_status".to_string()));
         assert!(confirm.contains(&"powershell".to_string()));
         assert!(confirm.contains(&"edit".to_string()));
     }

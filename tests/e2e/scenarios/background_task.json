@@ -1,0 +1,48 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "echo early-marker; sleep 1.5; echo late-marker"
+        }
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "name": "task_status",
+        "arguments": {
+          "action": "status",
+          "task_id": "bash-1"
+        }
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "sleep 0.8",
+          "timeout": 1
+        }
+      }
+    ]
+  },
+  {
+    "tool_calls": [
+      {
+        "name": "task_status",
+        "arguments": {
+          "action": "result",
+          "task_id": "bash-1"
+        }
+      }
+    ]
+  },
+  {
+    "text": "后台任务已确认完成。"
+  }
+]

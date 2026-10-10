@@ -572,24 +572,31 @@ impl LoopState {
         batch
     }
 
-    /// turn 边界收集注入内容:prepared + wake 载荷 + follow-up 批 + steering 批。
-    /// follow-up 消费计数在本函数递减(注入时点;requeue 路径不重复计)。
+    /// turn 边界收集注入内容:steering(用户插话,最高优先)→ follow-up(后台
+    /// 任务通知等)→ prepared(用户新请求/轮内产物)。
     async fn collect_injectables(
         &mut self,
         wake: Option<Box<Wake>>,
         prepared: Vec<AgentMessage>,
     ) -> Vec<AgentMessage> {
-        let mut injectables = prepared;
-        match wake.map(|boxed| *boxed) {
+        // 注入顺序:steering(用户插话,最高优先)→ follow-up(后台任务通知
+        // 等背景事项)→ prepared(用户新请求/轮内产物)。follow-up 消费计数
+        // 在本函数递减(注入时点;requeue 路径不重复计)
+        let mut injectables = Vec::new();
+        let follow_up_wake = match wake.map(|boxed| *boxed) {
             Some(Wake::Steering(message)) => {
                 self.receiver.dec_steering();
                 injectables.push(message);
+                None
             }
-            Some(Wake::FollowUp(message)) => {
-                self.receiver.dec_follow_up();
-                injectables.push(message);
-            }
-            Some(Wake::ExplicitContinue) | None => {}
+            Some(Wake::FollowUp(message)) => Some(message),
+            Some(Wake::ExplicitContinue) | None => None,
+        };
+        let steering = self.take_steering_batch().await;
+        injectables.extend(steering);
+        if let Some(message) = follow_up_wake {
+            self.receiver.dec_follow_up();
+            injectables.push(message);
         }
         // follow-up 批量模式:All 整批,OneAtATime 每轮一条(余量原地保留)
         match self.follow_up_mode {
@@ -607,8 +614,7 @@ impl LoopState {
                 }
             }
         }
-        let steering = self.take_steering_batch().await;
-        injectables.extend(steering);
+        injectables.extend(prepared);
         injectables
     }
 }
@@ -732,9 +738,16 @@ async fn step_awaiting_request(state: &mut LoopState, wake: Option<Box<Wake>>) -
 
     state.sink.on_event(&AgentEvent::TurnStart).await;
 
-    // 注入(初始 prompts + prepared + wake 载荷 + follow-up/steering 批)
-    let mut injectables = std::mem::take(&mut state.initial_prompts);
-    injectables.extend(state.collect_injectables(wake, prepared).await);
+    // 注入顺序:follow-up 通知(后台任务唤醒等,恒在最前)→ 初始 prompts/
+    // 轮内产物(二者不同时出现)→ steering。run 启动也拾取已入队 follow-up:
+    // 空闲唤醒(continue_run)的首轮即携带通知,消除"盲转"(先空跑一轮、
+    // 第二轮才见通知)
+    if state.follow_up_batch.is_empty() {
+        state.follow_up_batch = state.receiver.drain_follow_up();
+    }
+    let mut rest = std::mem::take(&mut state.initial_prompts);
+    rest.extend(prepared);
+    let injectables = state.collect_injectables(wake, rest).await;
     for message in injectables {
         state.inject(message).await;
     }
