@@ -84,7 +84,7 @@ impl Tool for LsTool {
     }
 
     fn prompt_snippet(&self) -> Option<String> {
-        Some("List directory contents".into())
+        Some("ls(path?, limit?): List directory contents".into())
     }
 
     async fn execute(

@@ -11,7 +11,10 @@
 //! - fetch_content:latent 不支持图片/YouTube/GitHub/PDF/本地视频,
 //!   描述如实声明为不支持,避免模型对这类 URL 试错;
 //! - web_search 的 proxy 参数:上游 "Node fetch ignores HTTP(S)_PROXY" 与
-//!   reqwest 实际行为相反,已删除。
+//!   reqwest 实际行为相反,已删除;
+//! - promptSnippet:四个工具的 snippet 统一带 `name(params?):` 工具名前缀 ——
+//!   <tools> 节按 `- {snippet}` 逐行渲染,工具名由 snippet 自带,对齐内置工具
+//!   read/bash/edit 的行格式。
 
 use crate::providers::all_providers;
 use crate::providers::provider_label;
@@ -61,7 +64,7 @@ pub fn web_search_description() -> String {
     )
 }
 
-pub const WEB_SEARCH_PROMPT_SNIPPET: &str = "Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Stop once the results answer the question. Omit provider unless explicitly overriding the configured default.";
+pub const WEB_SEARCH_PROMPT_SNIPPET: &str = "web_search(query, queries?): Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Stop once the results answer the question. Omit provider unless explicitly overriding the configured default.";
 
 pub const WEB_SEARCH_PARAM_QUERY: &str = "Single search query. For research tasks, prefer 'queries' with multiple varied angles instead.";
 
@@ -90,7 +93,7 @@ pub const WEB_SEARCH_PARAM_PROXY: &str = "http(s) or socks proxy URL (e.g. http:
 /// `source_check` 工具(index.ts:2431-2447)。
 pub const SOURCE_CHECK_DESCRIPTION: &str = "Gather web sources for a claim and return a bounded machine-readable research artifact with exact passage citations for manual review.";
 
-pub const SOURCE_CHECK_PROMPT_SNIPPET: &str = "Gather structured source evidence and passage-level citations for manual semantic review of a claim.";
+pub const SOURCE_CHECK_PROMPT_SNIPPET: &str = "source_check(claim): Gather structured source evidence and passage-level citations for manual semantic review of a claim.";
 
 pub const SOURCE_CHECK_PARAM_CLAIM: &str = "The assertion to gather web sources for.";
 
@@ -122,7 +125,7 @@ pub fn fetch_content_description() -> String {
     )
 }
 
-pub const FETCH_CONTENT_PROMPT_SNIPPET: &str = "Use to fetch URL content as markdown or raw text, or to answer a question from a page.";
+pub const FETCH_CONTENT_PROMPT_SNIPPET: &str = "fetch_content(url, urls?): Use to fetch URL content as markdown or raw text, or to answer a question from a page.";
 
 pub const FETCH_CONTENT_PARAM_URL: &str = "Single URL to fetch";
 
@@ -145,7 +148,7 @@ pub fn get_search_content_description() -> String {
 
 pub fn get_search_content_prompt_snippet() -> String {
     format!(
-        "Use after {STORED_CONTENT_SOURCES} to retrieve stored content via responseId. Use findText to locate passages without paging through the full content."
+        "get_search_content(responseId, …): Use after {STORED_CONTENT_SOURCES} to retrieve stored content via responseId. Use findText to locate passages without paging through the full content."
     )
 }
 
@@ -500,7 +503,7 @@ mod tests {
     fn verbatim_contract_strings() {
         assert_eq!(
             WEB_SEARCH_PROMPT_SNIPPET,
-            "Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Stop once the results answer the question. Omit provider unless explicitly overriding the configured default."
+            "web_search(query, queries?): Use for web research questions. Prefer {queries:[...]} with 2-4 varied angles over a single query for broader coverage. Stop once the results answer the question. Omit provider unless explicitly overriding the configured default."
         );
         assert_eq!(
             WEB_SEARCH_PARAM_QUERIES,

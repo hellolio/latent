@@ -96,7 +96,7 @@ impl Tool for FindTool {
     }
 
     fn prompt_snippet(&self) -> Option<String> {
-        Some("Find files by glob pattern (respects .gitignore)".into())
+        Some("find(pattern, path?): Find files by glob pattern (respects .gitignore)".into())
     }
 
     async fn execute(

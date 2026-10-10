@@ -17,8 +17,9 @@
 
 ## TP-003: 测试环境变量会假失败——cargo test 前剥离 LATENT_*
 
-- **坑**: 本会话自身的 shell 带有 LATENT_* 环境变量，`bash_tool_receives_pi_session_env_via_build_session` 断言"不覆盖已有变量"时会拿到会话值而失败。
-- **规避**: 统一用 `env $(env | grep -E "^LATENT_" | cut -d= -f1 | sed 's/^/-u /') cargo test …` 剥离后运行。
+- **坑**: 本会话跑在 latent 会话内，进程 env 带有宿主注入的 `LATENT_MODEL`/`LATENT_SESSION_ID` 等；`bash_tool_receives_pi_session_env_via_build_session` 验证"LATENT_* 注入不覆盖已有变量"，期望值 `test-model` 被会话真实值顶掉，必现失败（断言消息："LATENT_MODEL 应被注入: glm-5.3-flash 01a12445-…"）。用户裸 shell 环境干净，同一命令全部通过——"我这里失败、你那里通过"先查环境差异。
+- **证据**: `env | grep "^LATENT"` 与断言消息中的值逐字吻合（model + session id）；`env -u LATENT_MODEL -u LATENT_SESSION_ID … cargo test` 剥离后 modes 20/20、全量 1037/0 全绿。
+- **规避**: 统一用 `env $(env | grep -E "^LATENT_" | cut -d= -f1 | sed 's/^/-u /') cargo test …` 剥离后运行。**注意：git stash 对照对环境型假失败无效**——stash 只还原代码、环境变量原样保留，干净 HEAD 上照样失败，会误判成"存量失败"；环境疑点用 `env -u` 做对照实验，而不是代码二分。
 
 ## TP-004: 本会话长命令会被自身的旧版 latent 转后台
 

@@ -209,7 +209,7 @@ impl Tool for GrepTool {
     }
 
     fn prompt_snippet(&self) -> Option<String> {
-        Some("Search file contents for patterns (respects .gitignore)".into())
+        Some("grep(pattern, path?): Search file contents for patterns (respects .gitignore)".into())
     }
 
     async fn execute(
