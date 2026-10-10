@@ -89,13 +89,13 @@ jobs:
             platform: macos-aarch64
             binary: latent
 
-          - os: ubuntu-22.04
-            platform: linux-x86_64
-            binary: latent
+          # - os: ubuntu-22.04
+          #   platform: linux-x86_64
+          #   binary: latent
 
-          - os: windows-latest
-            platform: windows-x86_64
-            binary: latent.exe
+          # - os: windows-latest
+          #   platform: windows-x86_64
+          #   binary: latent.exe
 
     steps:
       - name: Checkout
