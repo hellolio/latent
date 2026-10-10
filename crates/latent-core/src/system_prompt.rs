@@ -61,7 +61,7 @@ const BASE_RULES: &[&str] = &[
 
 /// 当前本地时间(装配期调用;`%:z` 渲染为 `+08:00` 形式的时区偏移)。
 fn current_local_time() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string()
+    chrono::Local::now().format("%Y-%m-%d %:z").to_string()
 }
 
 /// 拆分外置 system-prompt.md 为 (身份句, <rules> 追加规则):文件里可用
