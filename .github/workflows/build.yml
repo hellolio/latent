@@ -22,9 +22,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Run tests on macOS ARM64 only
-  test:
-    name: Test  (${{ matrix.platform }})
+
+  # Build release binaries for all platforms
+  build:
+    name: Build (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -73,36 +74,6 @@ jobs:
 
       - name: E2E Tests
         run: python -m pytest tests/e2e
-
-
-  # Build release binaries for all platforms
-  build:
-    name: Build (${{ matrix.platform }})
-    needs: test
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            platform: macos-aarch64
-            binary: latent
-
-          # - os: ubuntu-22.04
-          #   platform: linux-x86_64
-          #   binary: latent
-
-          # - os: windows-latest
-          #   platform: windows-x86_64
-          #   binary: latent.exe
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Build
         run: cargo build --release --locked
