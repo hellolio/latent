@@ -121,10 +121,12 @@ fn replay_message(message: &AgentMessage, theme: &latent_tui::Theme) -> Vec<Tran
             exit_code,
             ..
         } => vec![
+            // 转录只记单 `!` 透传(`!!` 不写转录),回放恒为单感叹号前缀
             TranscriptItem::Bash {
                 command: command.clone(),
                 output: output.clone(),
                 is_error: exit_code.map(|code| code != 0).unwrap_or(false),
+                bang_bang: false,
             },
             TranscriptItem::Blank,
         ],

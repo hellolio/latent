@@ -674,7 +674,7 @@ async fn bash_passthrough_runs_and_injects_context() {
 
     state.editor.set_text("!echo passthrough-ok");
     handle_key(&ctx, &mut state, Key::Enter).await;
-    assert!(matches!(state.status, Status::Bash(_)));
+    assert!(matches!(state.status, Status::Bash { .. }));
 
     // 模拟后台任务回流
     handle_ui_event(
@@ -724,7 +724,10 @@ async fn bash_bang_bang_skips_context_injection() {
     )
     .await;
 
-    assert!(committed_text(&state).contains("secret"));
+    let rendered = committed_text(&state);
+    // `!!` 透传:上屏前缀显示两个感叹号(与单 `!` 可区分)
+    assert!(rendered.contains("!! echo secret"), "{rendered}");
+    assert!(rendered.contains("secret"));
     let messages = built.session.agent().messages();
     assert!(
         !messages

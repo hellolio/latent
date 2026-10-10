@@ -18,8 +18,11 @@ pub enum Status {
     Tool(String),
     Aborted,
     Compacting,
-    /// `!` bash 执行中(标题=命令)
-    Bash(String),
+    /// `!`/`!!` bash 执行中(bang_bang = 敲的是 `!!`,状态行前缀显示两个感叹号)
+    Bash {
+        command: String,
+        bang_bang: bool,
+    },
 }
 
 impl Status {
@@ -52,11 +55,12 @@ pub enum TranscriptItem {
         output: String,
         is_error: bool,
     },
-    /// `!` bash 透传记录
+    /// `!` bash 透传记录(bang_bang = `!!` 透传,前缀显示两个感叹号)
     Bash {
         command: String,
         output: String,
         is_error: bool,
+        bang_bang: bool,
     },
     /// 计划模式产出的 `<proposed_plan>` 块(边框卡片,13 文档 §8.3)
     Plan { markdown: String },

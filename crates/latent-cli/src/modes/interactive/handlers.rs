@@ -587,7 +587,10 @@ async fn submit_input(
             state.commit_ephemeral(warning_line_theme("usage: !<command>", &state.theme));
             return false;
         }
-        state.status = Status::Bash(command.to_string());
+        state.status = Status::Bash {
+            command: command.to_string(),
+            bang_bang,
+        };
         let ui_tx = ctx.ui_tx.clone();
         let command = command.to_string();
         tokio::spawn(async move {
@@ -1679,6 +1682,7 @@ pub async fn handle_ui_event(
                 command: command.clone(),
                 output: output.clone(),
                 is_error,
+                bang_bang: !inject,
             });
             state.commit(TranscriptItem::Blank);
             if inject {

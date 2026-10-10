@@ -176,11 +176,13 @@ pub fn tool_box_bottom(
     bg_block(lines, width, bg)
 }
 
-/// `!` bash 透传卡片:命令与输出同块,状态背景色(成功绿/失败红)。
+/// `!`/`!!` bash 透传卡片:命令与输出同块,状态背景色(成功绿/失败红)。
+/// `bang_bang` = 用户敲的是 `!!`(仅执行不注入),命令行前缀显示两个感叹号。
 /// 折叠逻辑与工具输出一致:保留前 `COLLAPSED_OUTPUT_ROWS` 行输出 +
 /// 余量提示,ctrl+o 展开全部。
 pub fn bash_box(
     command: &str,
+    bang_bang: bool,
     output: &str,
     is_error: bool,
     expanded: bool,
@@ -202,14 +204,16 @@ pub fn bash_box(
         .fg(theme.assistant_text)
         .add_modifier(Modifier::BOLD);
 
-    // 命令行:首行带 "! " 前缀,超宽折行(展开时完整可见)
-    let marked = format!("! {command}");
+    // 命令行:首行带 "!"/"!!" 前缀,超宽折行(展开时完整可见)
+    let bang_prefix = if bang_bang { "!!" } else { "!" };
+    let head = format!("{bang_prefix} ");
+    let marked = format!("{head}{command}");
     let command_rows = crate::width::wrap_to_width(&marked, width);
     let mut out: Vec<Line<'static>> = Vec::new();
     for text in &command_rows {
-        if let Some(rest) = text.strip_prefix("! ") {
+        if let Some(rest) = text.strip_prefix(head.as_str()) {
             out.push(Line::from(vec![
-                Span::styled("! ".to_string(), bang_style),
+                Span::styled(head.clone(), bang_style),
                 Span::styled(rest.to_string(), command_style),
             ]));
         } else {
@@ -388,7 +392,7 @@ mod tests {
 
     #[test]
     fn bash_box_encloses_command_and_output() {
-        let lines = bash_box("ls -la", "file1\nfile2", false, false, 40, &theme());
+        let lines = bash_box("ls -la", false, "file1\nfile2", false, false, 40, &theme());
         let texts: Vec<String> = lines.iter().map(line_text).collect();
         // 命令与输出同块,上下各一行内边距空行
         assert!(line_text(&lines[0]).trim().is_empty(), "{texts:?}");
@@ -404,12 +408,25 @@ mod tests {
     #[test]
     fn bash_box_bg_follows_status() {
         let t = Theme::dark();
-        let ok = bash_box("ls", "", false, false, 40, &t);
-        let err = bash_box("ls", "boom", true, false, 40, &t);
+        let ok = bash_box("ls", false, "", false, false, 40, &t);
+        let err = bash_box("ls", false, "boom", true, false, 40, &t);
         assert_eq!(ok[1].spans[0].style.bg, Some(t.tool_success_bg));
         assert_eq!(err[1].spans[0].style.bg, Some(t.tool_error_bg));
         // `!` 前缀保留状态色前景
         assert_eq!(err[1].spans[0].style.fg, Some(t.tool_error));
+    }
+
+    #[test]
+    fn bash_box_double_bang_prefix() {
+        let t = Theme::dark();
+        // `!!` 透传:前缀显示两个感叹号,同样保留状态色前景
+        let lines = bash_box("echo secret", true, "", false, false, 40, &t);
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(texts[1].starts_with("!! echo secret"), "{texts:?}");
+        assert_eq!(lines[1].spans[0].style.fg, Some(t.tool_success));
+        // 单 `!` 不受影响
+        let single = bash_box("echo ok", false, "", false, false, 40, &t);
+        assert!(line_text(&single[1]).starts_with("! echo ok"), "{texts:?}");
     }
 
     #[test]
@@ -418,7 +435,7 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let collapsed = bash_box("ls", &output, false, false, 40, &theme());
+        let collapsed = bash_box("ls", false, &output, false, false, 40, &theme());
         // 内边距 2 + 命令 1 + 输出 4 + 提示 1
         assert_eq!(collapsed.len(), 8, "{:?}", collapsed);
         assert!(
@@ -427,7 +444,7 @@ mod tests {
                 .any(|l| line_text(l).contains("+2 lines")),
             "{collapsed:?}"
         );
-        let expanded = bash_box("ls", &output, false, true, 40, &theme());
+        let expanded = bash_box("ls", false, &output, false, true, 40, &theme());
         assert_eq!(expanded.len(), 9); // 内边距 2 + 命令 1 + 输出 6
         assert!(expanded.iter().any(|l| line_text(l).contains("line6")));
     }

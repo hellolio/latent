@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库是 [earendil-works/pi](https://github.com/earendil-works/pi) 的 Rust 重写：一个终端 AI 编码 agent——流式驱动 LLM、并行执行工具、append-only 会话树、进程外 MCP 扩展、权限/沙箱护栏、子代理与技能系统；四种运行模式（print / interactive TUI / json / rpc）共享同一业务核 `AgentSession`。
+一个终端 AI 编码 agent——流式驱动 LLM、并行执行工具、append-only 会话树、进程外 MCP 扩展、权限/沙箱护栏、子代理与技能系统；四种运行模式（print / interactive TUI / json / rpc）共享同一业务核 `AgentSession`。
 
 ## 常用命令
 

@@ -76,8 +76,10 @@ pub fn render_item(
             command,
             output,
             is_error,
+            bang_bang,
         } => tool_card::bash_box(
             command,
+            *bang_bang,
             output,
             *is_error,
             expanded,
@@ -552,9 +554,10 @@ fn status_line(state: &InteractiveState) -> Vec<UiLine> {
             theme.spinner,
             format!("{} Compacting history", loader::frame(state.spin)),
         ),
-        Status::Bash(command) => {
+        Status::Bash { command, bang_bang } => {
+            let prefix = if *bang_bang { "!!" } else { "!" };
             return vec![Line::from(Span::styled(
-                format!("! {command}"),
+                format!("{prefix} {command}"),
                 Style::new().fg(theme.border_bash),
             ))];
         }
@@ -1206,9 +1209,19 @@ mod tests {
         assert!(texts[0].contains(loader::frame(25)), "{texts:?}");
         assert!(texts[0].contains("Working (3s"), "{texts:?}");
         assert!(texts[0].contains("esc to interrupt"), "{texts:?}");
-        state.status = Status::Bash("ls".into());
+        state.status = Status::Bash {
+            command: "ls".into(),
+            bang_bang: false,
+        };
         let frame = viewport(&state, None, 0, 6, 8);
         assert!(line_text(&frame.lines[0]).contains("! ls"));
+        // `!!` 透传:状态行前缀两个感叹号
+        state.status = Status::Bash {
+            command: "ls".into(),
+            bang_bang: true,
+        };
+        let frame = viewport(&state, None, 0, 6, 8);
+        assert!(line_text(&frame.lines[0]).contains("!! ls"));
     }
 
     #[test]
