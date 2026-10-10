@@ -1,4 +1,3 @@
-```sh
 #!/bin/sh
 set -eu
 
@@ -72,4 +71,3 @@ case ":${PATH}:" in
         echo "  source ~/.zshrc"
         ;;
 esac
-```
