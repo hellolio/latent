@@ -167,6 +167,9 @@ class LatentApp:
         self._lock = threading.Lock()
         self._eof = False
         self._closed = False
+        # 读线程停止标志。独立于 _closed:后者是 close 幂等卫兵,
+        # quit() 中途也要停线程,不能复用。
+        self._stopping = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
@@ -174,7 +177,7 @@ class LatentApp:
 
     def _read_loop(self) -> None:
         """持续读取子进程输出:喂 pyte、累积原文、实时应答 DSR 查询。"""
-        while not self._closed:
+        while not self._stopping:
             try:
                 data = self.child.read_nonblocking(size=65536, timeout=0.05)
             except pexpect.TIMEOUT:
@@ -327,10 +330,23 @@ class LatentApp:
         self.child.send("\x04")
         try:
             self.child.expect(pexpect.EOF, timeout=timeout)
-            self.child.wait()
         except pexpect.TIMEOUT:
+            self._stop_reader()
             self.child.terminate(force=True)
             raise AssertionError(f"Ctrl+D 后进程未退出(最后一屏:\n{self.visible_text()})")
+        # EOF 已到 = 进程已退出。必须先停读线程再收割:pexpect 的
+        # read_nonblocking 内部会调 isalive() → waitpid 收割僵尸,与下面的
+        # wait() 构成双重收割竞态(pexpect 非线程安全),输方拿到 ECHILD
+        # 直接炸 quit,再被 finally close() 的二次异常掩盖。join 钉死
+        # happens-before:此后只有主线程会 waitpid,竞态在结构上消除。
+        self._stop_reader()
+        self.child.wait()
+
+    def _stop_reader(self, timeout: float = 2.0) -> None:
+        """停掉后台读线程并等它退出(读取循环 50ms 一 tick,2s 绰绰有余)。"""
+        self._stopping = True
+        if self._reader.is_alive():
+            self._reader.join(timeout=timeout)
 
     @property
     def exit_status(self):
@@ -340,8 +356,13 @@ class LatentApp:
         if self._closed:
             return
         self._closed = True
-        if self.child.isalive():
-            self.child.terminate(force=True)
+        # 先停读线程:isalive()/terminate() 同样会 waitpid,不能与读线程并发
+        self._stop_reader()
+        try:
+            if self.child.isalive():
+                self.child.terminate(force=True)
+        except pexpect.ExceptionPexpect:
+            pass  # 子进程已退出且状态已被收割 —— teardown 不掩盖真实测试失败
         self.child.close()
         self.mock.stop()
         if self._owns_home:
