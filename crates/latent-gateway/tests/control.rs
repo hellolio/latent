@@ -31,7 +31,7 @@ async fn build_gateway(turns: Vec<ScriptedTurn>) -> (Arc<Gateway>, Arc<MockChann
         "messages": { "queue": { "debounceMs": 0 }, "groupChat": {
             "requireMention": true, "groupPolicy": "allowlist", "groupAllowFrom": ["mock:group1"] } }
     });
-    let config: GatewayConfig = validate(&value, false).unwrap();
+    let config: GatewayConfig = validate(&value).unwrap();
     let provider: Arc<dyn latent_ai::Provider> =
         Arc::new(ScriptedProvider::new(&test_model(), turns));
     let approval = ChatApprovalUi::new();

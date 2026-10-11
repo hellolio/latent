@@ -1045,37 +1045,35 @@ impl Gateway {
     }
 
     fn resolve_model(&self, spec: &str) -> Result<latent_runtime::facade::Model, String> {
-        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let dir = latent_runtime::bootstrap::dirs_home()
             .and_then(|home| latent_runtime::facade::latent_dir(Some(&home)));
         let resolver =
-            latent_runtime::facade::create_model_resolver_from_config(Some(&cwd), dir.as_deref());
+            latent_runtime::facade::create_model_resolver_from_config(dir.as_deref());
         resolver.resolve(spec)
     }
 
-    /// `/context` 写盘:当前工作目录的项目 models.json 优先,否则全局。
+    /// `/context` 写盘:全局数据目录 models.json。
     /// 不重建会话池、不加跨进程锁(后写覆盖,与 /model 同款)。
     fn write_context_window(
         &self,
         model: &latent_runtime::facade::Model,
         window: Option<u64>,
     ) -> Result<std::path::PathBuf, String> {
-        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let dir = latent_runtime::bootstrap::dirs_home()
             .and_then(|home| latent_runtime::facade::latent_dir(Some(&home)));
-        write_context_window_at(&cwd, dir.as_deref(), model, window)
+        write_context_window_at(dir.as_deref(), model, window)
     }
 }
 
-/// `/context` 的写盘本体(与 self 无关,cwd / latent 目录显式传入 → 可测):
-/// 项目 `cwd/.latent/models.json` 优先,否则 `latent_dir/models.json`。
+/// `/context` 的写盘本体(与 self 无关,latent 目录显式传入 → 可测):
+/// `latent_dir/models.json`。
 fn write_context_window_at(
-    cwd: &std::path::Path,
     latent_dir: Option<&std::path::Path>,
     model: &latent_runtime::facade::Model,
     window: Option<u64>,
 ) -> Result<std::path::PathBuf, String> {
-    let path = latent_runtime::facade::preferred_models_path(Some(cwd), latent_dir);
+    let path = latent_runtime::facade::preferred_models_path(latent_dir)
+        .ok_or_else(|| "无法定位 models.json(缺少用户数据目录)".to_string())?;
     latent_runtime::facade::upsert_models_json_context_window(
         &path,
         &model.provider,
@@ -1090,20 +1088,24 @@ fn write_context_window_at(
 mod tests {
     use super::*;
 
-    /// `/context` 写盘落在项目 `.latent/models.json`,`默认` 档删键回落。
+    /// `/context` 写盘落在全局 `<数据目录>/models.json`,`默认` 档删键回落。
     #[test]
-    fn context_window_writes_project_models_json() {
-        let dir = std::env::temp_dir().join(format!("latent_gw_ctx_{}", std::process::id()));
+    fn context_window_writes_global_models_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "latent_gw_ctx_{}_{}",
+            std::process::id(),
+            line!()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let model = latent_runtime::facade::Model::minimal("m", "mock", "mock");
 
-        let path = write_context_window_at(&dir, None, &model, Some(256_000)).unwrap();
-        assert_eq!(path, dir.join(".latent/models.json"));
+        let path = write_context_window_at(Some(&dir), &model, Some(256_000)).unwrap();
+        assert_eq!(path, dir.join("models.json"));
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("256000"), "写入 contextWindow: {text}");
 
-        write_context_window_at(&dir, None, &model, None).unwrap();
+        write_context_window_at(Some(&dir), &model, None).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("contextWindow"), "默认档删键: {text}");
         let _ = std::fs::remove_dir_all(&dir);

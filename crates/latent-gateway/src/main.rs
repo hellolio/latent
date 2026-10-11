@@ -7,8 +7,8 @@
 //! - `latent-gateway channels status [--probe]` 渠道连接状态
 //! - `latent-gateway status`                    运行态
 //!
-//! 配置:`.latent/gateway.json`(项目,逐字段覆盖)/ `<数据目录>/gateway.json`
-//! (全局)。非法配置/缺 token → 退出码 78。
+//! 配置:仅 `<数据目录>/gateway.json`(项目 `.latent/gateway.json` 不再读取)。
+//! 非法配置/缺 token → 退出码 78。
 
 use std::sync::Arc;
 
@@ -119,11 +119,10 @@ async fn run_status() -> Result<(), String> {
 
 async fn run_daemon() -> Result<(), String> {
     notify_legacy_data_dir();
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let data_dir = latent_runtime::facade::latent_dir(dirs_home().as_deref());
 
-    // 配置:项目逐字段覆盖全局;非法 → 退出码 78(项目级 !shell 在 load_config 强制拒绝)
-    let config = match load_config(Some(&cwd), data_dir.as_deref()) {
+    // 配置:仅全局 `<数据目录>/gateway.json`;非法 → 退出码 78
+    let config = match load_config(data_dir.as_deref()) {
         Ok(config) => config,
         Err(error) => exit_invalid_config(&error.to_string()),
     };
@@ -134,7 +133,7 @@ async fn run_daemon() -> Result<(), String> {
     if config.gateway.auth.token.trim().is_empty() {
         eprintln!(
             "latent-gateway: gateway.auth.token 未配置(退出码 {EXIT_INVALID_CONFIG})。\n\
-             在 .latent/gateway.json 或 <数据目录>/gateway.json 配置:\n\
+             在 <数据目录>/gateway.json 配置:\n\
              \x20 \"gateway\": {{ \"auth\": {{ \"mode\": \"token\", \"token\": \"$LATENT_GATEWAY_TOKEN\" }} }}"
         );
         std::process::exit(EXIT_INVALID_CONFIG);
@@ -142,7 +141,6 @@ async fn run_daemon() -> Result<(), String> {
     let auth_token = match resolve_credential_scoped(
         "gateway.auth.token",
         &config.gateway.auth.token,
-        /* allow_shell */ true,
         Some("LATENT_GATEWAY_TOKEN"),
     )
     .await
@@ -234,7 +232,7 @@ async fn run_daemon() -> Result<(), String> {
     });
 
     // 渠道启动(raw 凭据先物化:插件最终以 raw overlay 为准)
-    let mut raw_config = load_config_value(Some(&cwd), data_dir.as_deref()).0;
+    let mut raw_config = load_config_value(data_dir.as_deref());
     let channels = Arc::new(ChannelManager::new());
     let (events_tx, events_rx) =
         tokio::sync::mpsc::channel::<TaggedChannelEvent>(256);
@@ -351,7 +349,7 @@ fn print_help() {
          \x20 latent-gateway channels status [--probe]      渠道连接状态\n\
          \x20 latent-gateway status                         运行态\n\
          \n\
-         配置:.latent/gateway.json(项目,逐字段覆盖)/ <数据目录>/gateway.json(全局)。\n\
+         配置:<数据目录>/gateway.json(全局)。\n\
          gateway.auth.token 必填($ENV / !shell 来源;未配置 → 退出码 78)。\n\
          控制面:ws://127.0.0.1:18789/ws(默认;CLI 子命令经控制面,token 读 $LATENT_GATEWAY_TOKEN)。"
     );

@@ -50,7 +50,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `KNOWN_ISSUES.md` | 已确认问题的取证档案（现象/触发条件/证据/代码位置/修复方向；如 KB-001 空唤醒归因幻觉） |
 | `crates/` | 全部源码，逐 crate 索引见下 |
 | `tests/e2e/` | Python E2E 测试（真 PTY + 本地 mock LLM），逐文件索引见"测试方针" |
-| `.latent/` | 项目级配置目录（settings.json / models.json / skills / agents / system-prompt.md） |
+| `.latent/` | 项目级配置目录（仅 skills / agents / system-prompt.md；settings.json / models.json / gateway.json / web-search.json 仅全局） |
 | `target/` | 构建产物（勿改） |
 
 ### crates/latent-ai — L1 基座：LLM 接入（零内部依赖）
@@ -125,7 +125,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `src/session.rs` | 业务核 `AgentSession`：prompt/steer/follow_up、模式切换、激活工具集切换、overflow 恢复（`run_with_recovery`）与自动压缩（`maybe_auto_compact`）、`SessionSink`/`ContextCompactor` trait、事件翻译层 `SessionBridge`；EndTurn 后补追加流式切档被跳过的模式节（转录已有模式节才补） |
 | `src/system_prompt.rs` | 系统提示词命名 sections 机制（preamble/tools/rules/project_context/env/addendum）；env 节含工作目录与当前本地时间，rules 节支持 system-prompt.md `<rules>` 标记块自定义追加；提示词不持久化，恢复时按配置重组 |
 | `src/model.rs` | `ModelResolver`：`provider/model` spec 解析、内置默认模型表、/model 候选清单 |
-| `src/config.rs` | models.json/settings.json 配置体系：全局数据目录（见 `src/paths.rs`）先读、项目 `.latent` 逐字段覆盖合并；apiKey 按环境变量名解析 |
+| `src/config.rs` | models.json/settings.json 配置体系：仅全局数据目录（见 `src/paths.rs`）；apiKey 按环境变量名解析 |
 | `src/paths.rs` | 用户数据目录解析唯一权威：`LATENT_HOME` 环境变量 → 旧版 `~/.latent`（存在即沿用）→ 默认 `~/.config/latent`；入口层解析后作参数下传，纯函数面不读环境 |
 | `src/retry.rs` | provider 重试薄装配（`RetryHooks` 上报 AutoRetryStart/End 事件；quota 类不重试） |
 | `src/permission/types.rs` | `SessionMode`（Plan/Confirm/FullAccess，默认 Plan，Shift+Tab 循环）、`ToolRiskClass` 静态分类、`Verdict`（Allow/Ask/Deny）、沙箱策略映射 |
@@ -198,7 +198,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 
 | 文件 | 说明 |
 |---|---|
-| `src/assembly.rs` | **共享装配点** `build_session`（自 latent-cli 迁出，四种运行模式与聊天网关共用）：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子（仅 Plan 包装）+ LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；后台任务登记表与 `AgentFollowUpNotifier` 装配（bash 转后台 + task_status 工具，主会话与 subagent 池共享 registry，agent 弱引回填）；settings 解析（项目 `.latent/settings.json` 优先）；`switch_new_session`/`switch_resume_session` |
+| `src/assembly.rs` | **共享装配点** `build_session`（自 latent-cli 迁出，四种运行模式与聊天网关共用）：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子（仅 Plan 包装）+ LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；后台任务登记表与 `AgentFollowUpNotifier` 装配（bash 转后台 + task_status 工具，主会话与 subagent 池共享 registry，agent 弱引回填）；settings 解析（仅全局数据目录 settings.json）；`switch_new_session`/`switch_resume_session` |
 | `src/bootstrap.rs` | 入口层共享助手：`resolve_provider_and_model`（mock + models.json 体系）、`resolve_session_store`（-c/-r）、`print_session_list`、`notify_legacy_data_dir`、`maybe_dispatch_landlock_helper`（**两个 bin 的 main 开头都必须调用**，否则 Linux 沙箱静默失效） |
 | `src/events.rs` | json/rpc/聊天网关共用的事件 → JSON 映射（剥离流式 partial） |
 | `src/slash.rs` | 斜杠命令解析层（`COMMANDS`/`SlashAction`/`parse`/`help_markdown`；TUI 的 `popup_entries()` 留在 latent-cli） |
@@ -213,7 +213,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `src/chunk.rs` | 出站长文分段：`DEFAULT_CHUNK_LIMIT = 4000`；length 模式（括号外换行 → 空白 → 硬切）/ newline 模式（空行段落）；markdown 版闭合 code fence 续块重开 |
 | `src/mention_gating.rs` | @机器人判定（纯函数）：私聊恒 to_me；群聊 At == bot id ∨ reply_to_me ∨ mentionPatterns（大小写不敏感）；patterns 优先级 agent > groupChat > identity.name 派生 |
 | `src/typing.rs` | typing 指示器生命周期：keepalive 3000ms / TTL 60000ms / 连续失败 2 次停；typingMode 四档（message 默认 —— DM 与被 @ 群聊入站即发）；**无"typing 完成才发送"的门** |
-| `src/credential.rs` | 凭据三来源解析（明文/`$ENV`/`!shell`）L1 自包含副本（§8 偏离 10，语义/单测对齐 latent-web credential.rs）；`is_shell_source` 供项目级配置拒绝 `!shell` |
+| `src/credential.rs` | 凭据三来源解析（明文/`$ENV`/`!shell`）L1 自包含副本（§8 偏离 10，语义/单测对齐 latent-web credential.rs）；`is_shell_source` 供凭据来源判定 |
 | `src/error.rs` | `ChannelError`：出站分类（ChatNotFound/NotInGroup/RateLimited{retry_after_ms}/Unsupported/DeliveryFailed）+ 生命周期（Config/Startup）；`retry_after`/`is_retryable` |
 | `src/telegram/` | feature `telegram`：Bot API getUpdates 长轮询（reqwest 直连不引 SDK，`apiBase` 可指向本地假服务器）；getMe 自检 + bot 身份；sendMessage/reply_to_message_id/sendChatAction；429 → RateLimited；mention 实体 offset/length 按 **UTF-16 code units** 解析（CJK 前缀群 @ 判定；畸形实体跳过不丢消息）；reqwest 错误文本折叠 `/bot<token>/` 段防凭据进日志 |
 | `src/qq/` | feature `qq`：OneBot 11 反向 WebSocket（axum 服务端，NapCat 是客户端）；Bearer Header 常数时间校验（不走 query）+ 5 次失败 60s 冷却（**按对端 IP 计键** + 失败表有界）；echo oneshot 表关联 action 应答；meta_event 记 self_id；**user_id == self_id 自消息源头丢弃（防私聊恒 to_me 死循环）**；已发消息 id 表支撑 reply_to_me；单帧 1MiB（WS 升级前置）/并发 ≤8；`path` 配置非法 → Config 拒绝启动不 panic |
@@ -226,7 +226,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | 文件 | 说明 |
 |---|---|
 | `src/main.rs` | daemon 入口：默认前台跑 daemon；子命令 `pairing list/approve`、`channels status [--probe]`、`status`（**控制面薄客户端**，token 读 `$LATENT_GATEWAY_TOKEN`，禁止直写 state.json）；配置非法/缺 token → 退出码 78；workspace 非空则进程级切换 cwd；Ctrl-C 优雅停机（abort subagent + 渠道断开 + state 落盘） |
-| `src/config.rs` | gateway.json schema（全 deny_unknown_fields）+ 校验：未知键/坏类型/非法值 → `ConfigError` → 退出码 78；项目逐字段覆盖全局（Value 深合并）；**项目级 `!shell` 凭据来源拒绝启动**（只扫项目文件自身子树）；项目级覆盖安全敏感字段 → stderr 警告；危险配置 stderr 警告不阻断（dmPolicy open / 空 allowlist / 明文 token）；`materialize_channel_credentials`（$ENV/!shell 解析结果同时写回类型化配置与 raw Value） |
+| `src/config.rs` | gateway.json schema（全 deny_unknown_fields）+ 校验：未知键/坏类型/非法值 → `ConfigError` → 退出码 78；仅全局 `<数据目录>/gateway.json`；危险配置 stderr 警告不阻断（dmPolicy open / 空 allowlist / 明文 token）；`materialize_channel_credentials`（$ENV/!shell 解析结果同时写回类型化配置与 raw Value） |
 | `src/routing/session_key.rs` | session key 计算（对齐上游 `buildAgentPeerSessionKey`）：群 `agent:{agent}:{channel}:group:{id}`、私聊 dmScope 四档；空段 `"unknown"` 兜底；agent 默认 `main` |
 | `src/agents.rs` | `ChatSessionRegistry`（每 session key 一个 ChatSession，**惰性创建**；registry 锁只护 map 读写，构建走 per-key 锁 + 双检）+ `SessionFactory`（provider/settings/MCP specs 全局解析一次共享；run_lock 同会话串行）+ `SessionEventPump`（订阅者只推 channel；assistant MessageEnd 权威定稿、AgentSettled 只发一次；进度 30s 节流 try_send 满即丢、final 阻塞不丢） |
 | `src/auto_reply/mod.rs` | dispatch 管线：去重 claim（**先于 ACK**）→ 授权（dmPolicy/groupPolicy/requireMention；**owner 绕过 DM 门禁** —— 审批应答必须可达，GATEWAY_PLAN 偏离 14）→ 命令拦截 → 防抖（冲刷逐条 spawn，不阻塞其他会话）→ session key → 队列处置 → execute_turn（envelope → prompt → pump 收集；wait_idle 后复查滞留注入经 `continue_run` 消化）；四模式队列（steer/followup/collect/interrupt）；`inject_operator_message`（chat.send，sender 固定 operator，忙则 steer）；命令权限天花板（full-access 按 `SessionMode::parse` 语义判定恒 owner、Mode 分支二次校验；群会话修改命令仅 owner）；忙时 `/new` `/reset` `/compact` 预检拒绝 |
@@ -266,13 +266,13 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 
 **用户数据目录**：全局配置/数据的根目录，解析优先级 `LATENT_HOME` 环境变量 → 旧版 `~/.latent`（存在即沿用，启动时 stderr 提示一次）→ 默认 `~/.config/latent`；解析唯一权威在 `latent-core/src/paths.rs`，入口层解析后作参数下传。下表记作 `<数据目录>`。
 
-| 文件 | 位置（项目优先，逐字段覆盖全局） | 内容 |
+| 文件 | 位置 | 内容 |
 |---|---|---|
-| settings.json | `.latent/settings.json` / `<数据目录>/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 600）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 300）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction.reserveTokens`（≥1 绝对值，<1 窗口百分比）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
+| settings.json | `<数据目录>/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 600）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 300）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction`（`reserveTokens` = 窗口百分比小数，默认 0.05 = 5%；出界值 ≥1 告警并回退默认；`keepRecentTokens` 保留近期原文 token 数）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
 | .latentignore | 项目 `<cwd>/.latentignore` / 全局 `<数据目录>/.latentignore` | AI 检索忽略规则（gitignore 语法，格式同 .gitignore）：grep/find/ls/@文件弹窗过滤 + 系统提示词规则。全局在前、项目在后拼接，gitignore 语义 last-match-wins——项目可用 `!` 反选全局规则。文件缺失静默跳过，坏行诊断后跳过；无任何规则 = 不做额外过滤（`.git` 由工具层恒排除，遍历仍自带 .gitignore 感知）。启动时读一次，中途修改不生效；不支持子目录级 `.latentignore` |
-| models.json | `.latent/models.json` / `<数据目录>/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：LATENT_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载 |
-| web-search.json | `.latent/web-search.json` / `<数据目录>/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
-| gateway.json | `.latent/gateway.json` / `<数据目录>/gateway.json` | 聊天网关配置（GATEWAY_PLAN §4.2）：`agents.defaults`（workspace/model/typingMode）、`gateway`（port 18789/bind 127.0.0.1/auth.token **必填**，缺失 → 退出码 78）、`channels`（qq/wecom/telegram/mock 各自 enabled/凭据/textChunkLimit/dmPolicy/allowFrom；渠道扩展键已类型化：telegram `apiBase`/`pollTimeoutSecs`、qq `path`、wecom `wsEndpoint`/`heartbeatIntervalSecs`）、`session`（dmScope=per-channel-peer/groupScope=per-group/reset）、`messages`（queue: steer/500ms/cap 20/summarize + debounceMsByChannel；groupChat: requireMention/groupPolicy=allowlist/groupAllowFrom/mentionPatterns/unmentionedInbound —— **群策略唯一定义点**）、`commands.ownerAllowFrom`。全 deny_unknown_fields，未知键 → 退出码 78；**项目级配置拒绝 `!shell` 凭据来源**（只扫项目文件自身子树，全局合法 `!shell` + 项目文件存在不误拒）；项目级覆盖安全敏感字段（gateway.auth/ownerAllowFrom/groupChat/session）→ stderr 警告 |
+| models.json | `<数据目录>/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：LATENT_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载。项目 `.latent/models.json` 不再读取或写入 |
+| web-search.json | `<数据目录>/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
+| gateway.json | `<数据目录>/gateway.json` | 聊天网关配置（GATEWAY_PLAN §4.2）：`agents.defaults`（workspace/model/typingMode）、`gateway`（port 18789/bind 127.0.0.1/auth.token **必填**，缺失 → 退出码 78）、`channels`（qq/wecom/telegram/mock 各自 enabled/凭据/textChunkLimit/dmPolicy/allowFrom；渠道扩展键已类型化：telegram `apiBase`/`pollTimeoutSecs`、qq `path`、wecom `wsEndpoint`/`heartbeatIntervalSecs`）、`session`（dmScope=per-channel-peer/groupScope=per-group/reset）、`messages`（queue: steer/500ms/cap 20/summarize + debounceMsByChannel；groupChat: requireMention/groupPolicy=allowlist/groupAllowFrom/mentionPatterns/unmentionedInbound —— **群策略唯一定义点**）、`commands.ownerAllowFrom`。全 deny_unknown_fields，未知键 → 退出码 78。项目 `.latent/gateway.json` 不再读取 |
 | skills | `.latent/skills/<name>/SKILL.md` / `<数据目录>/skills/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载，或输入框 `/skill <名称>` 前缀随消息自动加载 —— 两条路径均以 developer 角色注入模型上下文 |
 | agents | `.latent/agents/<name>.md` / `<数据目录>/agents/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
 | system-prompt.md | `.latent/system-prompt.md` / `<数据目录>/system-prompt.md` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |

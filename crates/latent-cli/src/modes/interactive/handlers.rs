@@ -450,34 +450,8 @@ async fn handle_select_key(
                                 ));
                             }
                         } else if index == models.len() {
-                            // 末尾配置条目 1:交互式添加模型(第一步选写入位置)
+                            // 末尾配置条目 1:交互式添加模型(恒写入全局 models.json)
                             state.model_form = Some(super::state::ModelForm::new());
-                            let home_str = state.home.as_deref().and_then(|p| p.to_str());
-                            let project = state.cwd.join(".latent/models.json");
-                            let options = vec![
-                                format!(
-                                    "当前目录  {}(仅本项目)",
-                                    latent_tui::footer::abbreviate_home(
-                                        &project.display().to_string(),
-                                        home_str
-                                    )
-                                ),
-                                match latent_core::latent_dir(state.home.as_deref()) {
-                                    Some(dir) => format!(
-                                        "全局  {}(所有项目)",
-                                        latent_tui::footer::abbreviate_home(
-                                            &dir.join("models.json").display().to_string(),
-                                            home_str
-                                        )
-                                    ),
-                                    None => "全局(未检测到 HOME / LATENT_HOME)".to_string(),
-                                },
-                            ];
-                            state.select = Some(SelectRequest {
-                                prompt: "添加模型 · 写入哪个 models.json?".into(),
-                                list: SelectList::new(options),
-                                kind: SelectKind::ModelTargetChoice,
-                            });
                             state.status = Status::Idle;
                         } else {
                             // 末尾配置条目 2:$EDITOR 打开 models.json(事件循环代办)
@@ -491,18 +465,6 @@ async fn handle_select_key(
                         if let Some(form) = state.model_form.as_mut() {
                             form.api = apis.get(index).map(|s| (*s).to_string());
                             form.step = super::state::ModelFormStep::BaseUrl;
-                        }
-                        state.status = Status::Idle;
-                    }
-                    SelectKind::ModelTargetChoice => {
-                        // 写入位置选择列表(0=项目 1=全局);Esc 分支取消表单
-                        if let Some(form) = state.model_form.as_mut() {
-                            form.target = Some(if index == 0 {
-                                super::state::ModelFormTarget::Project
-                            } else {
-                                super::state::ModelFormTarget::Global
-                            });
-                            form.step = super::state::ModelFormStep::Provider;
                         }
                         state.status = Status::Idle;
                     }
@@ -553,8 +515,8 @@ async fn handle_select_key(
                     SelectKind::SubagentAgent { .. } | SelectKind::Session { .. } => {}
                     SelectKind::Model { .. } | SelectKind::Thinking => {}
                     SelectKind::Context => {}
-                    // Esc 在表单中途的选择列表上 = 取消整张表单
-                    SelectKind::ModelApiChoice | SelectKind::ModelTargetChoice => {
+                    // Esc 在表单中途的 api 选择列表上 = 取消整张表单
+                    SelectKind::ModelApiChoice => {
                         state.model_form = None;
                     }
                     SelectKind::Theme { .. } | SelectKind::Setting => {}
@@ -1113,7 +1075,6 @@ async fn advance_model_form(ctx: &InteractiveCtx<'_>, state: &mut InteractiveSta
         return;
     };
     match form.step {
-        ModelFormStep::Target => unreachable!("写入位置经选择列表写入,不经文本提交"),
         ModelFormStep::Provider => {
             if text.is_empty() {
                 return; // 空输入不推进,等有效 provider id
@@ -1167,18 +1128,14 @@ async fn finish_model_form(
     model_id: &str,
 ) {
     use latent_core::NewModelEntry;
-    // 写回位置按表单第一步的选择;缺省(异常路径)回退项目优先
-    let path = match form.target {
-        Some(super::state::ModelFormTarget::Project) => state.cwd.join(".latent/models.json"),
-        Some(super::state::ModelFormTarget::Global) => {
-            latent_core::latent_dir(state.home.as_deref())
-                .map(|dir| dir.join("models.json"))
-                .unwrap_or_else(|| state.cwd.join(".latent/models.json"))
-        }
-        None => {
-            let dir = latent_core::latent_dir(state.home.as_deref());
-            latent_core::preferred_models_path(Some(&state.cwd), dir.as_deref())
-        }
+    // 恒写入全局数据目录 models.json
+    let dir = latent_core::latent_dir(state.home.as_deref());
+    let Some(path) = latent_core::preferred_models_path(dir.as_deref()) else {
+        state.commit_ephemeral(view::error_line(
+            "无法定位全局 models.json(缺少 HOME / LATENT_HOME)",
+            &state.theme,
+        ));
+        return;
     };
     let entry = NewModelEntry {
         provider_id: form.provider_id.clone().unwrap_or_default(),
@@ -1222,7 +1179,7 @@ async fn finish_model_form(
 pub(crate) fn reload_model_resolver(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
     let dir = latent_core::latent_dir(state.home.as_deref());
     let reloaded =
-        latent_core::create_model_resolver_from_config(Some(&state.cwd), dir.as_deref());
+        latent_core::create_model_resolver_from_config(dir.as_deref());
     *ctx.resolver.write().unwrap() = reloaded;
 }
 
@@ -1289,8 +1246,8 @@ async fn apply_context_selection(
     apply_context_window(ctx, state, context_window_of(index)).await;
 }
 
-/// 应用 `/context` 档位:写 `preferred_models_path`(有项目目录即写项目
-/// `.latent/models.json`,否则全局数据目录)→ 热重载 resolver → 按当前模型
+/// 应用 `/context` 档位:写全局 `preferred_models_path`(数据目录 models.json)
+/// → 热重载 resolver → 按当前模型
 /// 重新解析 → 切到生效窗口的新模型。`window = None` = 默认档(删除该模型的
 /// contextWindow,回到「models.json 有记载就用记载值,否则 128k」)。
 /// 已知限制:装配期为 web 工具/subagent 建 resolver 快照不跟随(见
@@ -1306,7 +1263,13 @@ async fn apply_context_window(
         return;
     };
     let dir = latent_core::latent_dir(state.home.as_deref());
-    let path = latent_core::preferred_models_path(Some(&state.cwd), dir.as_deref());
+    let Some(path) = latent_core::preferred_models_path(dir.as_deref()) else {
+        state.commit_ephemeral(view::error_line(
+            "无法定位全局 models.json(缺少 HOME / LATENT_HOME)",
+            &state.theme,
+        ));
+        return;
+    };
     if let Err(error) = latent_core::upsert_models_json_context_window(
         &path,
         &model.provider,
@@ -1434,7 +1397,7 @@ fn apply_setting_selection(state: &mut InteractiveState, index: usize) {
 /// 设置项写回全局数据目录的 settings.json(失败仅提示,不阻断交互)。
 fn persist_setting(state: &mut InteractiveState, key: &str, value: serde_json::Value) {
     let dir = latent_core::latent_dir(state.home.as_deref());
-    if let Err(e) = latent_core::write_setting_field(None, dir.as_deref(), key, value) {
+    if let Err(e) = latent_core::write_setting_field(dir.as_deref(), key, value) {
         state.commit_ephemeral(view::error_line(
             &format!("写入 settings.json 失败: {e}"),
             &state.theme,
@@ -1649,18 +1612,18 @@ fn session_info_markdown(ctx: &InteractiveCtx<'_>, state: &InteractiveState) -> 
         "- usage: {} tok · ${:.6}\n",
         state.usage.total.total_tokens, state.usage.total.cost.total
     ));
-    // reserve 显示:< 1.0 是窗口百分比,换算成当前模型的实际 token 数一起展示
-    let reserve = &ctx.compaction_config.reserve_tokens;
-    let reserve_display = if *reserve > 0.0 && *reserve < 1.0 {
-        let resolved = latent_session::reserve_tokens_for_window(*reserve, state.context_window);
+    // reserve 显示:百分比小数 × 当前模型窗口 = 实际预留 token 数
+    let reserve = ctx.compaction_config.reserve_tokens;
+    let reserve_display = if reserve <= 0.0 {
+        "0%(不预留)".to_string()
+    } else {
+        let resolved = latent_session::reserve_tokens_for_window(reserve, state.context_window);
         format!(
             "{:.0}%({} tok of {})",
             reserve * 100.0,
             resolved,
             state.context_window
         )
-    } else {
-        format!("{} tok", reserve)
     };
     out.push_str(&format!(
         "- compact: {}(reserve {}, keep recent {} tok)\n",
@@ -1687,6 +1650,9 @@ pub fn refresh_footer(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
         .map(|level| level.as_str().to_string())
         .unwrap_or_else(|| "off".into());
     state.mode_label = ctx.session.current().mode().label().to_string();
+    // 自动压缩开关来自 settings(compaction.enabled)—— footer 的 `(auto)`
+    // 必须跟着配置走,不能恒真
+    state.auto_compact = ctx.compaction_config.enabled;
 }
 
 /// /thinking 选择器选项("off" = 关闭,其后为 ThinkingLevel::ALL 顺序)。

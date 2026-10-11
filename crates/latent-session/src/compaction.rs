@@ -17,17 +17,22 @@ use crate::projection::{build_session_projection, SessionProjection};
 #[serde(rename_all = "camelCase")]
 pub struct CompactionSettings {
     pub enabled: bool,
-    /// 预留预算:**>= 1.0 按绝对 token 数**(16384 = 16k);
-    /// **0 < v < 1.0 按 context_window 的百分比**(0.1 = 10%,随模型窗口缩放;
-    /// 100% 无法表达,也不会有意义)。分辨率在 should_compact 调用时进行
-    /// (此时 context_window 已知)。serde 用 f64 兼容整数与浮点两种写法。
+    /// 预留预算:**只按 context_window 的百分比小数**(0.05 = 5%,随模型窗口
+    /// 缩放)。不再支持绝对 token 数写法 —— 绝对值在换模型/换窗口档位时语义
+    /// 漂移(小窗口下预留量甚至超过整个窗口)。分辨率在 should_compact 调用时
+    /// 进行(此时 context_window 已知);出界值(>= 1.0 / 非有限)按默认比例
+    /// 回退(见 `reserve_tokens_for_window`)。
     pub reserve_tokens: f64,
     pub keep_recent_tokens: u64,
 }
 
+/// 预留预算默认比例(窗口的 5%):`reserve_tokens` 的唯一默认来源,
+/// 出界值与装配层校验回退都指向这里。
+pub const DEFAULT_RESERVE_RATIO: f64 = 0.05;
+
 pub const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = CompactionSettings {
     enabled: true,
-    reserve_tokens: 16_384.0,
+    reserve_tokens: DEFAULT_RESERVE_RATIO,
     keep_recent_tokens: 20_000,
 };
 
@@ -37,21 +42,23 @@ impl Default for CompactionSettings {
     }
 }
 
-/// reserve_tokens → 实际预留 token 数:`v < 1.0` 按 `context_window` 的百分比
-/// 解析(0.1 = 10%),`v >= 1.0` 按绝对 token 数;非正数归零(不预留)。
+/// reserve_tokens → 实际预留 token 数:**按 `context_window` 的百分比小数
+/// 解析**(0.05 = 5%)。非正数归零(不预留);出界值(>= 1.0、NaN、无穷)
+/// 按 `DEFAULT_RESERVE_RATIO` 回退 —— 绝不把 1.0 倍窗口当成"预留 100%"。
 pub fn reserve_tokens_for_window(reserve_tokens: f64, context_window: u64) -> u64 {
-    if reserve_tokens.is_nan() || reserve_tokens <= 0.0 {
+    if reserve_tokens <= 0.0 {
         return 0;
     }
-    if reserve_tokens < 1.0 {
-        (context_window as f64 * reserve_tokens).round() as u64
+    let ratio = if reserve_tokens.is_finite() && reserve_tokens < 1.0 {
+        reserve_tokens
     } else {
-        reserve_tokens as u64
-    }
+        DEFAULT_RESERVE_RATIO
+    };
+    (context_window as f64 * ratio).round() as u64
 }
 
 /// `contextTokens > contextWindow - reserveTokens` 时触发(06 文档 §3.1)。
-/// reserveTokens < 1.0 时按窗口百分比解析(见 `reserve_tokens_for_window`)。
+/// reserveTokens 按窗口百分比解析(见 `reserve_tokens_for_window`)。
 pub fn should_compact(
     context_tokens: u64,
     context_window: u64,

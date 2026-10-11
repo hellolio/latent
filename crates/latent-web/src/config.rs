@@ -1,6 +1,6 @@
 //! web-search.json 配置(上游 `~/.pi/agent/web-search.json` 的 latent 对应物):
-//! 用户数据目录 `web-search.json`(LATENT_HOME/`~/.config/latent`,装配层注入)
-//! + 项目 `.latent/web-search.json`(后读者逐字段覆盖)。
+//! 用户数据目录 `web-search.json`(LATENT_HOME/`~/.config/latent`,装配层注入)。
+//! 项目 `.latent/web-search.json` 不再读取。
 //!
 //! 凭据字段保留原始串(可能是 $ENV / !命令),调用时经 credential 模块解析。
 
@@ -287,27 +287,19 @@ impl WebSearchConfig {
     }
 }
 
-/// 配置文件候选路径:全局在前,项目在后(与 models.json 同序)。
+/// 配置文件候选路径:仅全局用户数据目录。
 /// `latent_dir` 为已解析的用户数据目录(装配层经 latent-core 的
 /// `latent_dir` 解析后注入;latent-web 自身不感知 HOME/环境变量)。
-pub fn config_paths(project_dir: Option<&Path>, latent_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(dir) = latent_dir {
-        paths.push(dir.join("web-search.json"));
-    }
-    if let Some(project) = project_dir {
-        paths.push(project.join(".latent/web-search.json"));
-    }
-    paths
+pub fn config_paths(latent_dir: Option<&Path>) -> Vec<PathBuf> {
+    latent_dir
+        .map(|dir| vec![dir.join("web-search.json")])
+        .unwrap_or_default()
 }
 
 /// 加载 + 合并;解析失败打 stderr 跳过对应文件(容错风格同 models.json)。
-pub fn load_web_search_config(
-    project_dir: Option<&Path>,
-    latent_dir: Option<&Path>,
-) -> WebSearchConfig {
+pub fn load_web_search_config(latent_dir: Option<&Path>) -> WebSearchConfig {
     let mut merged = WebSearchConfig::default();
-    for path in config_paths(project_dir, latent_dir) {
+    for path in config_paths(latent_dir) {
         match parse_file(&path) {
             Ok(Some(file)) => merge(&mut merged, file),
             Ok(None) => {}

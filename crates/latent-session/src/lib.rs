@@ -17,8 +17,8 @@ pub use compaction::{
     get_summarization_failure, reserve_tokens_for_window, run_compaction,
     serialize_conversation, should_compact, update_summarization_prompt, CompactionOutcome,
     CompactionSettings, ContextUsageEstimate, CutPointResult, SummarizationRequest,
-    SummarizationResponse, Summarizer, DEFAULT_COMPACTION_SETTINGS, SUMMARIZATION_PROMPT,
-    SUMMARIZATION_SYSTEM_PROMPT,
+    SummarizationResponse, Summarizer, DEFAULT_COMPACTION_SETTINGS, DEFAULT_RESERVE_RATIO,
+    SUMMARIZATION_PROMPT, SUMMARIZATION_SYSTEM_PROMPT,
 };
 pub use entry::{
     ContextReplacement, Entry, SessionHeader, SessionTreeNode, CURRENT_SESSION_VERSION,

@@ -514,10 +514,9 @@ fn stop_reason(stop: &RunStop) -> &'static str {
 
 /// SetModel 用带 models.json 配置的 resolver(与启动路径一致)。
 fn config_model_resolver() -> latent_core::ModelResolver {
-    let cwd = std::env::current_dir().ok();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let dir = latent_core::latent_dir(home.as_deref());
-    latent_core::create_model_resolver_from_config(cwd.as_deref(), dir.as_deref())
+    latent_core::create_model_resolver_from_config(dir.as_deref())
 }
 
 fn level_name(level: latent_ai::ThinkingLevel) -> &'static str {

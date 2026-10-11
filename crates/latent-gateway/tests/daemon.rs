@@ -30,7 +30,7 @@ async fn build_gateway_without_channels() -> (Arc<Gateway>, mpsc::Receiver<Tagge
         "messages": { "queue": { "debounceMs": 0 }, "groupChat": {
             "requireMention": true, "groupPolicy": "allowlist", "groupAllowFrom": ["mock:group1"] } }
     });
-    let config: GatewayConfig = validate(&value, false).unwrap();
+    let config: GatewayConfig = validate(&value).unwrap();
     let provider: Arc<dyn latent_ai::Provider> =
         Arc::new(ScriptedProvider::new(&test_model(), vec![]));
     let approval = ChatApprovalUi::new();
@@ -106,7 +106,7 @@ async fn event_loop_survives_channel_failure_event() {
         "messages": { "queue": { "debounceMs": 0 }, "groupChat": {
             "requireMention": true, "groupPolicy": "allowlist", "groupAllowFrom": ["mock:group1"] } }
     });
-    let config: GatewayConfig = validate(&value, false).unwrap();
+    let config: GatewayConfig = validate(&value).unwrap();
     let provider: Arc<dyn latent_ai::Provider> =
         Arc::new(ScriptedProvider::new(&test_model(), vec![]));
     let approval = ChatApprovalUi::new();

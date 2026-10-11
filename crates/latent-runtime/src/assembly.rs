@@ -24,14 +24,11 @@ use latent_core::{
 /// 子代理工厂的模型解析器共享句柄(装配期与 /model 同源)。
 type ModelResolverFn = Arc<dyn Fn(&str) -> Result<latent_ai::Model, String> + Send + Sync>;
 
-/// 读取扩展进程声明:项目 `.latent/settings.json` → 全局数据目录
-/// settings.json(见 `latent_dir`),mcpServers 列表拼接(07 §8.7 步骤 3)。
+/// 读取扩展进程声明:全局数据目录 settings.json(见 `latent_dir`),
+/// mcpServers 列表拼接(07 §8.7 步骤 3)。
 pub fn load_mcp_server_specs() -> Vec<McpServerSpec> {
     let mut specs = Vec::new();
     let mut paths = Vec::new();
-    if let Ok(current) = std::env::current_dir() {
-        paths.push(current.join(".latent/settings.json"));
-    }
     if let Some(dir) = latent_dir() {
         paths.push(dir.join("settings.json"));
     }
@@ -132,13 +129,10 @@ fn latent_dir() -> Option<std::path::PathBuf> {
     latent_core::latent_dir(dirs_home().as_deref())
 }
 
-/// 纯函数面(可测):按 项目 → 全局数据目录 顺序读 `.latent/settings.json`,
-/// 解析失败的文件跳过。`latent_dir` 为已解析的用户数据目录。
-fn read_settings_files(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Vec<SettingsFile> {
+/// 纯函数面(可测):读全局数据目录 settings.json,解析失败跳过。
+/// `latent_dir` 为已解析的用户数据目录。
+fn read_settings_files(latent_dir: Option<&Path>) -> Vec<SettingsFile> {
     let mut paths = Vec::new();
-    if let Some(cwd) = cwd {
-        paths.push(cwd.join(".latent/settings.json"));
-    }
     if let Some(dir) = latent_dir {
         paths.push(dir.join("settings.json"));
     }
@@ -155,27 +149,22 @@ fn read_settings_files(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Vec<Set
     settings
 }
 
-/// T10:读取 shell 命令前缀,项目 settings 优先于全局 settings。
+/// T10:读取 shell 命令前缀(全局 settings)。
 pub fn load_shell_command_prefix() -> Option<String> {
-    let cwd = std::env::current_dir().ok();
     let dir = latent_dir();
-    shell_command_prefix_from(cwd.as_deref(), dir.as_deref())
+    shell_command_prefix_from(dir.as_deref())
 }
 
 /// shell 运行时限 settings(`bashTimeoutSecs`/`backgroundAfterSecs`):
-/// 项目 settings 优先于全局,首个配置生效;未配置键 = 默认值。
+/// 全局 settings 首个配置生效;未配置键 = 默认值。
 pub fn load_shell_timeout_policy() -> latent_tools::ShellTimeoutPolicy {
-    let cwd = std::env::current_dir().ok();
     let dir = latent_dir();
-    shell_timeout_policy_from(cwd.as_deref(), dir.as_deref())
+    shell_timeout_policy_from(dir.as_deref())
 }
 
-/// 纯函数面(可测):两键独立解析,各自按 项目 → 全局 首个配置生效。
-fn shell_timeout_policy_from(
-    cwd: Option<&Path>,
-    latent_dir: Option<&Path>,
-) -> latent_tools::ShellTimeoutPolicy {
-    let files = read_settings_files(cwd, latent_dir);
+/// 纯函数面(可测):两键独立解析,各自首个配置生效。
+fn shell_timeout_policy_from(latent_dir: Option<&Path>) -> latent_tools::ShellTimeoutPolicy {
+    let files = read_settings_files(latent_dir);
     let mut policy = latent_tools::ShellTimeoutPolicy::default();
     if let Some(secs) = files.iter().find_map(|settings| settings.bash_timeout_secs) {
         policy.default_timeout_secs = secs;
@@ -189,10 +178,9 @@ fn shell_timeout_policy_from(
     policy
 }
 
-/// 纯函数面(可测):按 项目 → 全局 顺序读 `.latent/settings.json` 的 commandPrefix,
-/// 空白值跳过,首个非空生效。
-fn shell_command_prefix_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Option<String> {
-    for settings in read_settings_files(cwd, latent_dir) {
+/// 纯函数面(可测):读全局 settings 的 commandPrefix,空白值跳过。
+fn shell_command_prefix_from(latent_dir: Option<&Path>) -> Option<String> {
+    for settings in read_settings_files(latent_dir) {
         if let Some(prefix) = settings.command_prefix {
             if !prefix.trim().is_empty() {
                 return Some(prefix);
@@ -202,33 +190,31 @@ fn shell_command_prefix_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> O
     None
 }
 
-/// 上下文快照开关(`contextSnapshot`):项目 settings 优先于全局;
-/// 未配置 = false(默认关,不产生快照)。
+/// 上下文快照开关(`contextSnapshot`):全局 settings;未配置 = false
+/// (默认关,不产生快照)。
 pub fn load_context_snapshot_enabled() -> bool {
-    let cwd = std::env::current_dir().ok();
     let dir = latent_dir();
-    context_snapshot_enabled_from(cwd.as_deref(), dir.as_deref()).unwrap_or(false)
+    context_snapshot_enabled_from(dir.as_deref()).unwrap_or(false)
 }
 
 /// 纯函数面(可测):首个配置了 contextSnapshot 的 settings 生效。
-fn context_snapshot_enabled_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Option<bool> {
-    read_settings_files(cwd, latent_dir)
+fn context_snapshot_enabled_from(latent_dir: Option<&Path>) -> Option<bool> {
+    read_settings_files(latent_dir)
         .into_iter()
         .find_map(|settings| settings.context_snapshot)
 }
 
-/// 激活工具集(settings `tools`):项目 settings 优先于全局,首个配置生效;
+/// 激活工具集(settings `tools`):全局 settings,首个配置生效;
 /// 条目去首尾空白、丢空项。**键未配置 = None(全部激活);键配置了(即使清空后
 /// 为空)= Some(空)= 显式不激活任何工具**。
 pub fn load_active_tool_names() -> Option<Vec<String>> {
-    let cwd = std::env::current_dir().ok();
     let dir = latent_dir();
-    active_tool_names_from(cwd.as_deref(), dir.as_deref())
+    active_tool_names_from(dir.as_deref())
 }
 
 /// 纯函数面(可测)。
-fn active_tool_names_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Option<Vec<String>> {
-    let configured = read_settings_files(cwd, latent_dir)
+fn active_tool_names_from(latent_dir: Option<&Path>) -> Option<Vec<String>> {
+    let configured = read_settings_files(latent_dir)
         .into_iter()
         .find_map(|settings| settings.tools)?;
     Some(
@@ -633,8 +619,9 @@ pub struct SessionSettings {
 }
 
 /// 压缩设置(settings `compaction` 节;自动压缩阈值可配置)。
-/// `reserveTokens` 语义:**>= 1.0 = 绝对 token 数**;**0 < v < 1.0 = context_window
-/// 的百分比**(0.1 = 10%,随模型窗口缩放;100% 无法表达)。
+/// `reserveTokens` 语义:**context_window 的百分比小数**(0.05 = 5%,随模型窗口
+/// 缩放)。不再支持绝对 token 数写法 —— 出界值(>= 1.0 / 非有限)启动时告警
+/// 并回退默认 5%(见 `sanitize_compaction`)。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CompactionConfig {
@@ -664,6 +651,28 @@ impl From<CompactionConfig> for latent_session::CompactionSettings {
             reserve_tokens: config.reserve_tokens,
             keep_recent_tokens: config.keep_recent_tokens,
         }
+    }
+}
+
+/// settings `compaction.reserveTokens` 出界(>= 1.0 / NaN / 无穷)时告警一次
+/// 并回退默认比例(纯函数,可测):`reserveTokens` 只收窗口百分比小数
+/// (0.05 = 5%),旧的绝对值写法(如 16384)会让阈值随窗口档位漂移 ——
+/// 小窗口下预留量甚至超过整个窗口。不阻断启动(settings 文件整体是
+/// lenient 风格,坏值只诊断),但绝不能静默按错语义生效。
+fn sanitize_compaction(config: CompactionConfig) -> CompactionConfig {
+    let ratio = config.reserve_tokens;
+    if ratio <= 0.0 || (ratio.is_finite() && ratio < 1.0) {
+        return config;
+    }
+    eprintln!(
+        "[latent] settings `compaction.reserveTokens` = {ratio} 非法:该字段只接受\
+         窗口百分比小数(如 0.05 = 5%,0 或负数 = 不预留),不支持绝对 token 数;\
+         已回退默认 {}。",
+        latent_session::DEFAULT_RESERVE_RATIO
+    );
+    CompactionConfig {
+        reserve_tokens: latent_session::DEFAULT_RESERVE_RATIO,
+        ..config
     }
 }
 
@@ -749,12 +758,11 @@ fn merge_rules(user: Option<String>, extra: Option<String>) -> Option<String> {
     }
 }
 
-/// CLI 入口用:按 项目 → 全局 顺序解析 settings 的运行期开关(项目优先,
-/// 各键独立回退全局)。
+/// CLI 入口用:解析全局 settings 的运行期开关(各键独立)。
 pub fn load_session_settings() -> SessionSettings {
     let cwd = std::env::current_dir().ok();
     let dir = latent_dir();
-    let files = read_settings_files(cwd.as_deref(), dir.as_deref());
+    let files = read_settings_files(dir.as_deref());
     let tool_result_max_chars = files
         .iter()
         .find_map(|settings| settings.tool_result_max_chars);
@@ -768,6 +776,7 @@ pub fn load_session_settings() -> SessionSettings {
     let compaction = files
         .iter()
         .find_map(|settings| settings.compaction.clone())
+        .map(sanitize_compaction)
         .unwrap_or_default();
     let session_mode = files
         .iter()
@@ -1198,16 +1207,16 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
 
     // 进程内 web 扩展(latent-web,16 文档):搜索/抓取/检索/取证四工具,
     // 随会话常驻激活(tools 数组从首请求起恒定,保 prompt 缓存前缀)。
-    // 配置 <数据目录>/web-search.json + 项目 .latent/web-search.json;零配置可用
-    // (auto 链兜底 duckduckgo)。latent-core 能力经 trait 注入,保持 latent-web
-    // 不依赖 latent-core(数据目录由装配层解析后注入)
+    // 配置 <数据目录>/web-search.json;项目 .latent/web-search.json 不再读取。
+    // 零配置可用(auto 链兜底 duckduckgo)。latent-core 能力经 trait 注入,保持
+    // latent-web 不依赖 latent-core(数据目录由装配层解析后注入)
     let web_dir = latent_dir();
-    let web_config = latent_web::config::load_web_search_config(Some(&cwd), web_dir.as_deref());
+    let web_config = latent_web::config::load_web_search_config(web_dir.as_deref());
     latent_web::storage::set_fetch_cache_dir(
         latent_web::config::config_dir(web_dir.as_deref()).join("web-search-cache"),
     );
     let web_resolver =
-        latent_core::create_model_resolver_from_config(Some(&cwd), web_dir.as_deref());
+        latent_core::create_model_resolver_from_config(web_dir.as_deref());
     // 当前主模型:会话建好后回填的弱引(agent 状态快照取 model)
     let web_agent_cell: Arc<Mutex<Weak<latent_agent::Agent>>> = Arc::new(Mutex::new(Weak::new()));
     let web_agent_for_model = web_agent_cell.clone();
@@ -1257,9 +1266,9 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     // /model 同源的解析面(models.json + 内置 provider 默认表);父模型缺省
     // 继承自父会话快照,显式 `model` 参数走本解析器
     let subagent_resolver =
-        latent_core::create_model_resolver_from_config(Some(&cwd), subagent_latent_dir.as_deref());
+        latent_core::create_model_resolver_from_config(subagent_latent_dir.as_deref());
     let factory_resolver =
-        latent_core::create_model_resolver_from_config(Some(&cwd), subagent_latent_dir.as_deref());
+        latent_core::create_model_resolver_from_config(subagent_latent_dir.as_deref());
     let resolve_model: ModelResolverFn = Arc::new(move |spec: &str| subagent_resolver.resolve(spec));
     let factory_resolve_model: ModelResolverFn =
         Arc::new(move |spec: &str| factory_resolver.resolve(spec));
@@ -1842,6 +1851,55 @@ mod tests {
         }
     }
 
+    // ---- 压缩设置 ----
+
+    /// `sanitize_compaction`:只收窗口百分比小数;旧的绝对值写法与其余
+    /// 出界值(>= 1.0)回退默认比例并告警 —— 否则 16384 会按“16384 倍窗口”
+    /// 预留,而小窗口下绝对值又会把阈值压到 0(每轮都压缩)。
+    #[test]
+    fn sanitize_compaction_takes_ratio_only() {
+        let parse = |text: &str| -> CompactionConfig {
+            serde_json::from_str::<SettingsFile>(text)
+                .unwrap()
+                .compaction
+                .unwrap()
+        };
+        let default_ratio = latent_session::DEFAULT_RESERVE_RATIO;
+        // 合法:百分比小数原样保留(0 与负数 = 不预留)
+        let c = sanitize_compaction(parse(r#"{"compaction":{"enabled":true,"reserveTokens":0.16}}"#));
+        assert_eq!(c.reserve_tokens, 0.16);
+        assert!(c.enabled);
+        assert_eq!(
+            sanitize_compaction(parse(r#"{"compaction":{"reserveTokens":0}}"#)).reserve_tokens,
+            0.0
+        );
+        // 旧的绝对值写法与出界值 → 回退默认比例
+        for bad in [
+            r#"{"compaction":{"reserveTokens":16384}}"#,
+            r#"{"compaction":{"reserveTokens":163840,"enabled":false}}"#,
+            r#"{"compaction":{"reserveTokens":1}}"#,
+            r#"{"compaction":{"reserveTokens":2.5}}"#,
+        ] {
+            assert_eq!(
+                sanitize_compaction(parse(bad)).reserve_tokens,
+                default_ratio,
+                "{bad}"
+            );
+        }
+        // 回退只动 reserve_tokens:其余字段(含 enabled)保留
+        let c = sanitize_compaction(parse(r#"{"compaction":{"reserveTokens":16384,"enabled":false,"keepRecentTokens":5000}}"#));
+        assert!(!c.enabled);
+        assert_eq!(c.keep_recent_tokens, 5_000);
+        // 缺省 = 默认 5%
+        assert_eq!(CompactionConfig::default().reserve_tokens, default_ratio);
+        assert_eq!(default_ratio, 0.05);
+        // 只写 enabled 的局部配置(常见手写 settings):其余字段取默认,
+        // 不能因缺字段而变成"不预留 0"
+        let c = sanitize_compaction(parse(r#"{"compaction":{"enabled":true}}"#));
+        assert_eq!(c.reserve_tokens, default_ratio);
+        assert_eq!(c.keep_recent_tokens, 20_000);
+    }
+
     // ---- AGENTS.md 项目上下文 ----
 
     #[test]
@@ -1864,43 +1922,32 @@ mod tests {
 
     #[test]
     fn context_snapshot_unset_yields_none_and_configured_wins() {
-        let project = TempDir::new("ctx_unset");
+        let dir = TempDir::new("ctx_unset");
+        let latent_dir = dir.0.join(".latent");
         assert_eq!(
-            context_snapshot_enabled_from(Some(&project.0), None),
+            context_snapshot_enabled_from(Some(&latent_dir)),
             None,
             "未配置 = None(默认关)"
         );
-        project.write_settings(r#"{"contextSnapshot": true}"#);
-        assert_eq!(context_snapshot_enabled_from(Some(&project.0), None), Some(true));
-        project.write_settings(r#"{"contextSnapshot": false}"#);
+        dir.write_settings(r#"{"contextSnapshot": true}"#);
+        assert_eq!(context_snapshot_enabled_from(Some(&latent_dir)), Some(true));
+        dir.write_settings(r#"{"contextSnapshot": false}"#);
         assert_eq!(
-            context_snapshot_enabled_from(Some(&project.0), None),
+            context_snapshot_enabled_from(Some(&latent_dir)),
             Some(false),
             "显式 false 也生效"
         );
     }
 
     #[test]
-    fn context_snapshot_project_wins_over_global_and_bad_json_skipped() {
-        let project = TempDir::new("ctx_prio");
-        let global = TempDir::new("ctx_prio_global");
-        global.write_settings(r#"{"contextSnapshot": true}"#);
+    fn context_snapshot_bad_json_yields_none() {
+        let dir = TempDir::new("ctx_bad");
+        let latent_dir = dir.0.join(".latent");
+        dir.write_settings("{not json");
         assert_eq!(
-            context_snapshot_enabled_from(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some(true),
-            "项目未配置时回退全局"
-        );
-        project.write_settings("{not json");
-        assert_eq!(
-            context_snapshot_enabled_from(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some(true),
-            "项目坏 JSON 跳过,继续看全局"
-        );
-        project.write_settings(r#"{"contextSnapshot": false}"#);
-        assert_eq!(
-            context_snapshot_enabled_from(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some(false),
-            "项目显式 false 优先于全局 true"
+            context_snapshot_enabled_from(Some(&latent_dir)),
+            None,
+            "坏 JSON 跳过"
         );
     }
 
@@ -1942,11 +1989,11 @@ mod tests {
     }
 
     #[test]
-    fn command_prefix_from_project_settings() {
-        let project = TempDir::new("project");
-        project.write_settings(r#"{"commandPrefix": "timeout 300"}"#);
+    fn command_prefix_from_settings() {
+        let dir = TempDir::new("project");
+        dir.write_settings(r#"{"commandPrefix": "timeout 300"}"#);
         assert_eq!(
-            shell_command_prefix_from(Some(&project.0), None),
+            shell_command_prefix_from(Some(&dir.0.join(".latent"))),
             Some("timeout 300".into()),
             "T10:settings commandPrefix 应进入装配通道"
         );
@@ -1966,38 +2013,32 @@ mod tests {
     }
 
     #[test]
-    fn max_tool_calls_project_wins_over_global_and_alias_works() {
-        let project = TempDir::new("mtc_prio");
-        let global = TempDir::new("mtc_prio_global");
-        let read = |project: &TempDir, global: &TempDir| {
-            read_settings_files(Some(&project.0), Some(&global.0.join(".latent")))
+    fn max_tool_calls_reads_global_and_alias_works() {
+        let dir = TempDir::new("mtc");
+        let latent_dir = dir.0.join(".latent");
+        let read = |latent_dir: &std::path::Path| {
+            read_settings_files(Some(latent_dir))
                 .iter()
                 .find_map(|settings| settings.max_tool_calls)
         };
         assert_eq!(
-            read(&project, &global),
+            read(&latent_dir),
             None,
             "未配置 = None(装配层回退默认 30)"
         );
-        global.write_settings(r#"{"maxToolCalls": 50}"#);
-        assert_eq!(
-            read(&project, &global),
-            Some(50),
-            "项目未配置时回退全局"
-        );
-        project.write_settings(r#"{"maxToolCalls": 12}"#);
-        assert_eq!(read(&project, &global), Some(12), "项目显式配置优先");
-        project.write_settings(r#"{"max_tool_calls": 7}"#);
-        assert_eq!(read(&project, &global), Some(7), "snake_case alias 可用");
+        dir.write_settings(r#"{"maxToolCalls": 50}"#);
+        assert_eq!(read(&latent_dir), Some(50));
+        dir.write_settings(r#"{"max_tool_calls": 7}"#);
+        assert_eq!(read(&latent_dir), Some(7), "snake_case alias 可用");
     }
 
     // ---- shell 运行时限 settings(bashTimeoutSecs / backgroundAfterSecs) ----
 
     #[test]
     fn shell_timeout_policy_unset_yields_defaults() {
-        let project = TempDir::new("to_unset");
+        let dir = TempDir::new("to_unset");
         assert_eq!(
-            shell_timeout_policy_from(Some(&project.0), None),
+            shell_timeout_policy_from(Some(&dir.0.join(".latent"))),
             latent_tools::ShellTimeoutPolicy {
                 default_timeout_secs: 600,
                 background_after_secs: 300
@@ -2007,104 +2048,89 @@ mod tests {
     }
 
     #[test]
-    fn shell_timeout_policy_project_overrides_global() {
-        let project = TempDir::new("to_prio");
-        let global = TempDir::new("to_prio_global");
-        project.write_settings(r#"{"bashTimeoutSecs": 60}"#);
-        let policy = shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent")));
+    fn shell_timeout_policy_reads_global_only() {
+        let dir = TempDir::new("to_global");
+        let latent_dir = dir.0.join(".latent");
+        dir.write_settings(r#"{"bashTimeoutSecs": 60}"#);
+        let policy = shell_timeout_policy_from(Some(&latent_dir));
         assert_eq!(policy.default_timeout_secs, 60, "单键配置生效,其余保持默认");
         assert_eq!(policy.background_after_secs, 300, "未配置的键保持新默认");
-        global.write_settings(r#"{"bashTimeoutSecs": 30, "backgroundAfterSecs": 45}"#);
+        dir.write_settings(r#"{"bashTimeoutSecs": 30, "backgroundAfterSecs": 45}"#);
         assert_eq!(
-            shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent"))),
+            shell_timeout_policy_from(Some(&latent_dir)),
             latent_tools::ShellTimeoutPolicy {
-                default_timeout_secs: 60,
+                default_timeout_secs: 30,
                 background_after_secs: 45
             },
-            "首个含配置的 settings 生效:项目 bash 超时 + 全局后台阈值"
         );
-        project.write_settings(r#"{"backgroundAfterSecs": 500}"#);
-        let policy = shell_timeout_policy_from(Some(&project.0), Some(&global.0.join(".latent")));
-        assert_eq!(policy.default_timeout_secs, 30, "项目未含 bashTimeoutSecs 时回退全局");
-        assert_eq!(policy.background_after_secs, 500, "项目 backgroundAfterSecs 覆盖全局");
     }
 
     #[test]
-    fn project_settings_win_over_global_and_blank_is_skipped() {
-        let project = TempDir::new("prio");
-        let global = TempDir::new("prio_global");
-        global.write_settings(r#"{"commandPrefix": "global-prefix"}"#);
+    fn blank_command_prefix_is_skipped() {
+        let dir = TempDir::new("prefix_blank");
+        let latent_dir = dir.0.join(".latent");
+        dir.write_settings(r#"{"commandPrefix": "   "}"#);
         assert_eq!(
-            shell_command_prefix_from(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some("global-prefix".into()),
-            "项目无 settings 时回退全局"
+            shell_command_prefix_from(Some(&latent_dir)),
+            None,
+            "空白前缀跳过"
         );
-        project.write_settings(r#"{"commandPrefix": "   "}"#);
+        dir.write_settings(r#"{"commandPrefix": "global-prefix"}"#);
         assert_eq!(
-            shell_command_prefix_from(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some("global-prefix".into()),
-            "项目空白前缀跳过,继续看全局"
-        );
-        project.write_settings(r#"{"commandPrefix": "project-prefix"}"#);
-        assert_eq!(
-            shell_command_prefix_from(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some("project-prefix".into()),
-            "项目非空前缀优先于全局"
+            shell_command_prefix_from(Some(&latent_dir)),
+            Some("global-prefix".into())
         );
     }
 
     #[test]
     fn missing_settings_yields_none() {
-        let project = TempDir::new("none");
-        assert_eq!(shell_command_prefix_from(Some(&project.0), None), None);
+        let dir = TempDir::new("none");
+        assert_eq!(
+            shell_command_prefix_from(Some(&dir.0.join(".latent"))),
+            None
+        );
     }
 
     // ---- 激活工具集(settings `tools`) ----
 
     #[test]
-    fn active_tools_unset_yields_none_and_project_wins() {
-        let project = TempDir::new("tools_unset");
+    fn active_tools_unset_yields_none() {
+        let dir = TempDir::new("tools_unset");
+        let latent_dir = dir.0.join(".latent");
         assert_eq!(
-            active_tool_names_from(Some(&project.0), None),
+            active_tool_names_from(Some(&latent_dir)),
             None,
             "键未配置 = None(全部激活)"
         );
         // 配置了但清空后为空 = 显式不激活任何工具
-        project.write_settings(r#"{"tools": []}"#);
+        dir.write_settings(r#"{"tools": []}"#);
         assert_eq!(
-            active_tool_names_from(Some(&project.0), None),
+            active_tool_names_from(Some(&latent_dir)),
             Some(Vec::<String>::new()),
             "空数组 = 不激活任何工具"
         );
-        project.write_settings(r#"{"tools": ["", "  "]}"#);
+        dir.write_settings(r#"{"tools": ["", "  "]}"#);
         assert_eq!(
-            active_tool_names_from(Some(&project.0), None),
+            active_tool_names_from(Some(&latent_dir)),
             Some(Vec::<String>::new()),
             "全空白条目 = 显式不激活"
         );
-        project.write_settings(r#"{"tools": [" bash "]}"#);
+        dir.write_settings(r#"{"tools": [" bash "]}"#);
         assert_eq!(
-            active_tool_names_from(Some(&project.0), None),
+            active_tool_names_from(Some(&latent_dir)),
             Some(vec!["bash".to_string()]),
             "条目去首尾空白"
         );
     }
 
     #[test]
-    fn active_tools_project_wins_over_global() {
-        let project = TempDir::new("tools_prio");
-        let global = TempDir::new("tools_prio_global");
-        global.write_settings(r#"{"tools": ["read", "write"]}"#);
+    fn active_tools_reads_global_only() {
+        let dir = TempDir::new("tools_global");
+        let latent_dir = dir.0.join(".latent");
+        dir.write_settings(r#"{"tools": ["read", "write"]}"#);
         assert_eq!(
-            active_tool_names_from(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some(vec!["read".to_string(), "write".to_string()]),
-            "项目未配置时回退全局"
-        );
-        project.write_settings(r#"{"tools": ["bash"]}"#);
-        assert_eq!(
-            active_tool_names_from(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some(vec!["bash".to_string()]),
-            "项目配置优先于全局"
+            active_tool_names_from(Some(&latent_dir)),
+            Some(vec!["read".to_string(), "write".to_string()])
         );
     }
 
@@ -2247,18 +2273,19 @@ mod tests {
     // ---- 权限系统 settings 新键(13 文档 §12) ----
 
     #[test]
-    fn permission_settings_keys_parse_with_project_priority() {
-        let project = TempDir::new("perm_unset");
-        let files = read_settings_files(Some(&project.0), None);
+    fn permission_settings_keys_parse() {
+        let dir = TempDir::new("perm_unset");
+        let latent_dir = dir.0.join(".latent");
+        let files = read_settings_files(Some(&latent_dir));
         assert!(files.is_empty());
 
         // 新键整体反序列化
-        project.write_settings(
+        dir.write_settings(
             r#"{"sessionMode": "confirm", "headlessApproval": "auto-approve",
                 "sandbox": {"writableRoots": ["../shared"], "networkAccess": true},
                 "approval": {"allowCommands": ["make test"], "denyCommands": ["git push"]}}"#,
         );
-        let files = read_settings_files(Some(&project.0), None);
+        let files = read_settings_files(Some(&latent_dir));
         assert_eq!(files.len(), 1);
         assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Confirm);
         assert_eq!(
@@ -2273,23 +2300,13 @@ mod tests {
         assert_eq!(approval.deny_commands.unwrap(), vec!["git push".to_string()]);
 
         // 未知模式回退 Plan;未配置 headless 回退 Deny
-        project.write_settings(r#"{"sessionMode": "yolo-mode"}"#);
-        let files = read_settings_files(Some(&project.0), None);
+        dir.write_settings(r#"{"sessionMode": "yolo-mode"}"#);
+        let files = read_settings_files(Some(&latent_dir));
         assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Plan);
         assert_eq!(
             parse_headless_approval(files[0].headless_approval.as_ref()),
             HeadlessApproval::Deny
         );
-
-        // 项目优先:项目未配置时回退全局
-        let project2 = TempDir::new("perm_prio");
-        let global = TempDir::new("perm_prio_global");
-        global.write_settings(r#"{"sessionMode": "full-access"}"#);
-        let files = read_settings_files(Some(&project2.0), Some(&global.0.join(".latent")));
-        assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::FullAccess);
-        project2.write_settings(r#"{"sessionMode": "plan"}"#);
-        let files = read_settings_files(Some(&project2.0), Some(&global.0.join(".latent")));
-        assert_eq!(parse_session_mode(files[0].session_mode.as_ref()), SessionMode::Plan);
     }
 
     // ---- 检索忽略列表(.latentignore,gitignore 语法) ----

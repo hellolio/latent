@@ -131,7 +131,7 @@ async fn build_harness(
     settings: latent_runtime::assembly::SessionSettings,
 ) -> TelegramHarness {
     let config: GatewayConfig =
-        latent_gateway::config::validate(&config_value, false).expect("测试配置非法");
+        latent_gateway::config::validate(&config_value).expect("测试配置非法");
 
     let provider: Arc<dyn latent_ai::Provider> = Arc::new(ScriptedProvider::new(&test_model(), turns));
     let approval = latent_gateway::approval::ChatApprovalUi::new();
@@ -387,7 +387,7 @@ async fn start_enabled_delivers_resolved_env_credentials() {
             "apiBase": api_base, "pollTimeoutSecs": 0 } }
     });
     let config: GatewayConfig =
-        latent_gateway::config::validate(&config_value, false).expect("测试配置非法");
+        latent_gateway::config::validate(&config_value).expect("测试配置非法");
     // daemon 同序:load raw → materialize(解析结果同时写回类型化与 raw)
     let mut raw = config_value.clone();
     let config = latent_gateway::config::materialize_channel_credentials(config, &mut raw)

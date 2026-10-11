@@ -2,10 +2,9 @@
 //! provider(baseUrl/api/apiKey/headers/compat/models),provider 级字段为
 //! 默认值、model 级可覆盖;`settings.json` 提供 defaultProvider/defaultModel。
 //!
-//! 读取顺序:全局用户数据目录的 `models.json` 为主(数据目录 = `LATENT_HOME`
+//! 读取顺序:仅全局用户数据目录的 `models.json`(数据目录 = `LATENT_HOME`
 //! 环境变量,缺省 `~/.config/latent`,旧版 `~/.latent` 存在则沿用;解析见
-//! `crate::paths`),项目 `.latent/models.json` 覆盖
-//! (同名 provider 按字段合并,model 按 id 合并,项目侧字段/条目优先)——
+//! `crate::paths`)。项目 `.latent/models.json` 不再读取或写入。
 //! 覆盖内置 provider 的 baseUrl 时无需重定义其全部模型。
 //!
 //! apiKey 语义:值优先按环境变量名解析,未命中时当字面值使用(兼容 ollama
@@ -275,19 +274,16 @@ fn register_config(resolver: &mut ModelResolver, providers: BTreeMap<String, Pro
     }
 }
 
-/// 从 项目 `.latent/models.json` + 全局数据目录 `models.json` 加载配置并构建
-/// resolver(内置 provider 端点表始终可用)。文件缺失 = 空配置;解析失败 =
-/// 诊断 + 跳过。顶层 `showBuiltinModels`(项目覆盖全局)控制 `/model`
-/// 候选是否追加内置 provider 默认表。`latent_dir` 为已解析的用户数据目录
-/// (入口层经 `crate::paths::latent_dir` 解析后传入)。
-pub fn create_model_resolver_from_config(
-    project_dir: Option<&Path>,
-    latent_dir: Option<&Path>,
-) -> ModelResolver {
+/// 从全局数据目录 `models.json` 加载配置并构建 resolver(内置 provider 端点
+/// 表始终可用)。文件缺失 = 空配置;解析失败 = 诊断 + 跳过。顶层
+/// `showBuiltinModels` 控制 `/model` 候选是否追加内置 provider 默认表。
+/// `latent_dir` 为已解析的用户数据目录(入口层经 `crate::paths::latent_dir`
+/// 解析后传入)。
+pub fn create_model_resolver_from_config(latent_dir: Option<&Path>) -> ModelResolver {
     let mut resolver = create_model_resolver();
     let mut providers = BTreeMap::new();
     let mut show_builtin_models = true;
-    for path in models_config_paths(project_dir, latent_dir) {
+    for path in models_config_paths(latent_dir) {
         match parse_models_file(&path) {
             Ok(file) => {
                 if let Some(flag) = file.show_builtin_models {
@@ -310,19 +306,11 @@ pub fn create_model_resolver_from_config(
     resolver
 }
 
-/// models.json 候选路径:全局在前,项目在后(后读者覆盖先读者)。
-fn models_config_paths(
-    project_dir: Option<&Path>,
-    latent_dir: Option<&Path>,
-) -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(dir) = latent_dir {
-        paths.push(dir.join("models.json"));
-    }
-    if let Some(project) = project_dir {
-        paths.push(project.join(".latent/models.json"));
-    }
-    paths
+/// models.json 候选路径:仅全局数据目录。
+fn models_config_paths(latent_dir: Option<&Path>) -> Vec<std::path::PathBuf> {
+    latent_dir
+        .map(|dir| vec![dir.join("models.json")])
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -547,22 +535,10 @@ fn default_models_template() -> ModelsFile {
     file
 }
 
-/// `/model` 配置入口的写回目标:项目 `.latent/models.json` 存在则写它,
-/// 否则全局数据目录 `models.json`;两者都缺 = 项目路径(由调用方创建)。
-pub fn preferred_models_path(
-    project_dir: Option<&Path>,
-    latent_dir: Option<&Path>,
-) -> std::path::PathBuf {
-    if let Some(project) = project_dir {
-        let path = project.join(".latent/models.json");
-        if path.exists() {
-            return path;
-        }
-        return path;
-    }
-    latent_dir
-        .map(|dir| dir.join("models.json"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".latent/models.json"))
+/// `/model` 配置入口的写回目标:全局数据目录 `models.json`;数据目录缺失
+/// = `None`(调用方提示无法定位)。
+pub fn preferred_models_path(latent_dir: Option<&Path>) -> Option<std::path::PathBuf> {
+    latent_dir.map(|dir| dir.join("models.json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -592,128 +568,72 @@ struct SettingsDefaults {
     copy_on_select: Option<bool>,
 }
 
-/// 默认模型选择:项目 `.latent/settings.json` 优先于全局数据目录,首个非空
+/// 默认模型选择:全局数据目录 `.latent/settings.json` 的首个非空
 /// defaultProvider/defaultModel 生效。返回 (provider, model),provider 可能
 /// 缺失(此时 defaultModel 应为 `provider/model` 或已注册模型 id)。
-pub fn load_default_model_selection(
-    project_dir: Option<&Path>,
-    latent_dir: Option<&Path>,
-) -> (Option<String>, Option<String>) {
-    let mut paths = Vec::new();
-    if let Some(project) = project_dir {
-        paths.push(project.join(".latent/settings.json"));
-    }
-    if let Some(dir) = latent_dir {
-        paths.push(dir.join("settings.json"));
-    }
-    let mut default_provider = None;
-    let mut default_model = None;
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(settings) = serde_json::from_str::<SettingsDefaults>(&text) else {
-            continue;
-        };
-        if default_provider.is_none() {
-            default_provider = settings.default_provider.filter(|v| !v.trim().is_empty());
-        }
-        if default_model.is_none() {
-            default_model = settings.default_model.filter(|v| !v.trim().is_empty());
-        }
-    }
-    (default_provider, default_model)
-}
-
-/// TUI 主题名:项目 `.latent/settings.json` 优先于全局数据目录,首个非空
-/// `theme` 生效。只返回原始字符串;解析/降级由 latent-tui 的 `Theme::resolve` 负责。
-pub fn load_theme_setting(project_dir: Option<&Path>, latent_dir: Option<&Path>) -> Option<String> {
-    let mut paths = Vec::new();
-    if let Some(project) = project_dir {
-        paths.push(project.join(".latent/settings.json"));
-    }
-    if let Some(dir) = latent_dir {
-        paths.push(dir.join("settings.json"));
-    }
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(settings) = serde_json::from_str::<SettingsDefaults>(&text) else {
-            continue;
-        };
-        if let Some(theme) = settings.theme.filter(|v| !v.trim().is_empty()) {
-            return Some(theme);
-        }
-    }
-    None
-}
-
-/// TUI 渲染模式:项目 `.latent/settings.json` 优先于全局,首个非空 `tuiMode`
-/// 生效。只返回原始字符串(`fullscreen` | `regular`);解析与缺省值
-/// (fullscreen)由 interactive 装配负责。
-pub fn load_tui_mode_setting(project_dir: Option<&Path>, latent_dir: Option<&Path>) -> Option<String> {
-    load_setting_by(
-        project_dir,
-        latent_dir,
-        |settings| settings.tui_mode.filter(|v| !v.trim().is_empty()),
+pub fn load_default_model_selection(latent_dir: Option<&Path>) -> (Option<String>, Option<String>) {
+    let Some(path) = latent_dir.map(|dir| dir.join("settings.json")) else {
+        return (None, None);
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (None, None);
+    };
+    let Ok(settings) = serde_json::from_str::<SettingsDefaults>(&text) else {
+        return (None, None);
+    };
+    (
+        settings.default_provider.filter(|v| !v.trim().is_empty()),
+        settings.default_model.filter(|v| !v.trim().is_empty()),
     )
 }
 
+/// TUI 主题名:全局数据目录 `.latent/settings.json` 的首个非空 `theme` 生效。
+/// 只返回原始字符串;解析/降级由 latent-tui 的 `Theme::resolve` 负责。
+pub fn load_theme_setting(latent_dir: Option<&Path>) -> Option<String> {
+    load_setting_by(latent_dir, |settings| {
+        settings.theme.filter(|v| !v.trim().is_empty())
+    })
+}
+
+/// TUI 渲染模式:全局 `settings.json` 的首个非空 `tuiMode` 生效。只返回原始
+/// 字符串(`fullscreen` | `regular`);解析与缺省值(fullscreen)由 interactive
+/// 装配负责。
+pub fn load_tui_mode_setting(latent_dir: Option<&Path>) -> Option<String> {
+    load_setting_by(latent_dir, |settings| {
+        settings.tui_mode.filter(|v| !v.trim().is_empty())
+    })
+}
+
 /// Ctrl+X 复制选区开关(`ctrlXCopy`)。
-pub fn load_ctrl_x_copy_setting(project_dir: Option<&Path>, latent_dir: Option<&Path>) -> Option<bool> {
-    load_setting_by(project_dir, latent_dir, |settings| settings.ctrl_x_copy)
+pub fn load_ctrl_x_copy_setting(latent_dir: Option<&Path>) -> Option<bool> {
+    load_setting_by(latent_dir, |settings| settings.ctrl_x_copy)
 }
 
 /// 选中后自动复制开关(`copyOnSelect`)。
-pub fn load_copy_on_select_setting(
-    project_dir: Option<&Path>,
-    latent_dir: Option<&Path>,
-) -> Option<bool> {
-    load_setting_by(project_dir, latent_dir, |settings| settings.copy_on_select)
+pub fn load_copy_on_select_setting(latent_dir: Option<&Path>) -> Option<bool> {
+    load_setting_by(latent_dir, |settings| settings.copy_on_select)
 }
 
 fn load_setting_by<T>(
-    project_dir: Option<&Path>,
     latent_dir: Option<&Path>,
     pick: impl Fn(SettingsDefaults) -> Option<T>,
 ) -> Option<T> {
-    let mut paths = Vec::new();
-    if let Some(project) = project_dir {
-        paths.push(project.join(".latent/settings.json"));
-    }
-    if let Some(dir) = latent_dir {
-        paths.push(dir.join("settings.json"));
-    }
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(settings) = serde_json::from_str::<SettingsDefaults>(&text) else {
-            continue;
-        };
-        if let Some(value) = pick(settings) {
-            return Some(value);
-        }
-    }
-    None
+    let path = latent_dir?.join("settings.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let settings = serde_json::from_str::<SettingsDefaults>(&text).ok()?;
+    pick(settings)
 }
 
-/// 把单个设置字段写入项目 `.latent/settings.json`(无项目目录时写全局数据
-/// 目录;文件不存在则创建,已有字段与其他键保留)。`/setting` 的各项开关
-/// 切换即写回,默认落项目级。
+/// 把单个设置字段写入全局数据目录 `settings.json`(文件不存在则创建,已有
+/// 字段与其他键保留)。`/setting` 的各项开关切换即写回。
 pub fn write_setting_field(
-    project_dir: Option<&Path>,
     latent_dir: Option<&Path>,
     key: &str,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    let path = match project_dir {
-        Some(dir) => dir.join(".latent/settings.json"),
-        None => latent_dir
-            .map(|dir| dir.join("settings.json"))
-            .ok_or_else(|| "无法定位 settings.json(缺少项目目录与用户数据目录)".to_string())?,
-    };
+    let path = latent_dir
+        .map(|dir| dir.join("settings.json"))
+        .ok_or_else(|| "无法定位 settings.json(缺少用户数据目录)".to_string())?;
     let mut root = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
             .unwrap_or_else(|_| serde_json::json!({})),
@@ -782,7 +702,7 @@ mod tests {
         );
         // env 未设置 → apiKey 字面值兜底
         std::env::remove_var("LOCAL_API_KEY");
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         let model = resolver.resolve("local/my-model").unwrap();
         assert_eq!(model.base_url, "http://localhost:8080/v1");
         assert_eq!(model.api, "openai-completions");
@@ -803,7 +723,7 @@ mod tests {
             ".latent/models.json",
             r#"{ "providers": { "openai": { "baseUrl": "https://my-proxy.example.com/v1" } } }"#,
         );
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         // 不要求重定义全部 openai 模型:默认模型仍可解析,仅 URL 被覆盖
         let model = resolver.resolve("openai/gpt-4.1-mini").unwrap();
         assert_eq!(model.base_url, "https://my-proxy.example.com/v1");
@@ -811,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn project_overrides_global_per_field() {
+    fn models_json_loads_global_only() {
         let global = TempDir::new("global");
         let project = TempDir::new("project");
         global.write(
@@ -821,18 +741,17 @@ mod tests {
                     "models": [{ "id": "m1", "contextWindow": 1000 }, { "id": "m2" }] }
             } }"#,
         );
+        // 项目级 models.json 不再读取
         project.write(
             ".latent/models.json",
             r#"{ "providers": { "proxy": { "baseUrl": "http://project:2/v1",
                 "models": [{ "id": "m1", "contextWindow": 2000 }] } } }"#,
         );
-        let resolver = create_model_resolver_from_config(Some(&project.0), Some(&global.0.join(".latent")));
-        // 项目覆盖 baseUrl,m2(仅全局定义)保留
+        let resolver = create_model_resolver_from_config(Some(&global.0.join(".latent")));
         let model = resolver.resolve("proxy/m2").unwrap();
-        assert_eq!(model.base_url, "http://project:2/v1");
-        // model 按 id 合并:项目侧字段覆盖,未覆盖字段继承全局
+        assert_eq!(model.base_url, "http://global:1/v1");
         let model = resolver.resolve("proxy/m1").unwrap();
-        assert_eq!(model.context_window, 2000);
+        assert_eq!(model.context_window, 1000);
     }
 
     #[test]
@@ -849,7 +768,7 @@ mod tests {
                     ] }
             } }"#,
         );
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         let a = resolver.resolve("foo/a").unwrap();
         assert_eq!(a.base_url, "http://foo:1/v1");
         assert_eq!(a.api, "openai-completions");
@@ -869,95 +788,77 @@ mod tests {
                 "apiKey": "LATENT_CONFIG_TEST_KEY", "models": [{ "id": "m" }] } } }"#,
         );
         std::env::set_var("LATENT_CONFIG_TEST_KEY", "env-value");
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         let model = resolver.resolve("p1/m").unwrap();
         assert_eq!(model.api_key.as_deref(), Some("env-value"));
         std::env::remove_var("LATENT_CONFIG_TEST_KEY");
     }
 
     #[test]
-    fn settings_default_model_selection() {
+    fn settings_default_model_selection_reads_global_only() {
         let global = TempDir::new("sg");
-        let project = TempDir::new("sp");
         global.write(".latent/settings.json", r#"{ "defaultProvider": "openai" }"#);
-        let (provider, model) = load_default_model_selection(Some(&project.0), Some(&global.0.join(".latent")));
+        let (provider, model) =
+            load_default_model_selection(Some(&global.0.join(".latent")));
         assert_eq!(provider.as_deref(), Some("openai"));
         assert_eq!(model, None);
-        project.write(
+        global.write(
             ".latent/settings.json",
             r#"{ "defaultProvider": "local", "defaultModel": "my-model" }"#,
         );
-        let (provider, model) = load_default_model_selection(Some(&project.0), Some(&global.0.join(".latent")));
+        let (provider, model) =
+            load_default_model_selection(Some(&global.0.join(".latent")));
         assert_eq!(provider.as_deref(), Some("local"));
         assert_eq!(model.as_deref(), Some("my-model"));
+        // 数据目录缺失 → (None, None)
+        assert_eq!(load_default_model_selection(None), (None, None));
     }
 
     #[test]
-    fn mouse_and_shortcut_settings_project_overrides_global() {
+    fn mouse_and_shortcut_settings_read_global() {
         let global = TempDir::new("cs_global");
-        let project = TempDir::new("cs_project");
-        assert_eq!(load_copy_on_select_setting(Some(&project.0), Some(&global.0.join(".latent"))), None);
-        assert_eq!(load_ctrl_x_copy_setting(Some(&project.0), Some(&global.0.join(".latent"))), None);
+        let latent_dir = global.0.join(".latent");
+        assert_eq!(load_copy_on_select_setting(Some(&latent_dir)), None);
+        assert_eq!(load_ctrl_x_copy_setting(Some(&latent_dir)), None);
         global.write(
             ".latent/settings.json",
             r#"{ "copyOnSelect": true, "ctrlXCopy": false }"#,
         );
-        assert_eq!(
-            load_copy_on_select_setting(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some(true)
-        );
-        assert_eq!(
-            load_ctrl_x_copy_setting(Some(&project.0), Some(&global.0.join(".latent"))),
-            Some(false)
-        );
+        assert_eq!(load_copy_on_select_setting(Some(&latent_dir)), Some(true));
+        assert_eq!(load_ctrl_x_copy_setting(Some(&latent_dir)), Some(false));
     }
 
     #[test]
     fn write_setting_field_merges_and_persists() {
         let home = TempDir::new("wf");
         let latent_dir = home.0.join(".latent");
-        // 写入新键:文件自动创建(无项目目录 → 全局数据目录 settings.json,
-        // /setting 的默认写回路径)
-        write_setting_field(None, Some(&latent_dir), "tuiMode", serde_json::json!("regular")).unwrap();
+        // 写入新键:文件自动创建(全局数据目录 settings.json,/setting 的写回路径)
+        write_setting_field(Some(&latent_dir), "tuiMode", serde_json::json!("regular")).unwrap();
         // 再写另一个键:已有键保留
-        write_setting_field(None, Some(&latent_dir), "copyOnSelect", serde_json::json!(true)).unwrap();
+        write_setting_field(Some(&latent_dir), "copyOnSelect", serde_json::json!(true)).unwrap();
         let text = std::fs::read_to_string(latent_dir.join("settings.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["tuiMode"], "regular");
         assert_eq!(value["copyOnSelect"], true);
         // 读回一致
         assert_eq!(
-            load_tui_mode_setting(None, Some(&latent_dir)).as_deref(),
+            load_tui_mode_setting(Some(&latent_dir)).as_deref(),
             Some("regular")
         );
-        assert_eq!(load_copy_on_select_setting(None, Some(&latent_dir)), Some(true));
+        assert_eq!(load_copy_on_select_setting(Some(&latent_dir)), Some(true));
     }
 
     #[test]
-    fn theme_setting_project_overrides_global() {
+    fn theme_setting_reads_global() {
         let global = TempDir::new("tg");
-        let project = TempDir::new("tp");
+        let latent_dir = global.0.join(".latent");
         // 无配置 → None
-        assert_eq!(load_theme_setting(Some(&project.0), Some(&global.0.join(".latent"))), None);
+        assert_eq!(load_theme_setting(Some(&latent_dir)), None);
         global.write(".latent/settings.json", r#"{ "theme": "nord" }"#);
-        assert_eq!(
-            load_theme_setting(Some(&project.0), Some(&global.0.join(".latent"))).as_deref(),
-            Some("nord")
-        );
-        // 项目覆盖全局;空字符串视为未配置
-        project.write(
-            ".latent/settings.json",
-            r#"{ "theme": "tokyo-night", "defaultModel": "m" }"#,
-        );
-        assert_eq!(
-            load_theme_setting(Some(&project.0), Some(&global.0.join(".latent"))).as_deref(),
-            Some("tokyo-night")
-        );
-        project.write(".latent/settings.json", r#"{ "theme": "  " }"#);
-        assert_eq!(
-            load_theme_setting(Some(&project.0), Some(&global.0.join(".latent"))).as_deref(),
-            Some("nord")
-        );
+        assert_eq!(load_theme_setting(Some(&latent_dir)).as_deref(), Some("nord"));
+        // 空字符串视为未配置
+        global.write(".latent/settings.json", r#"{ "theme": "  " }"#);
+        assert_eq!(load_theme_setting(Some(&latent_dir)), None);
     }
 
     #[test]
@@ -970,7 +871,7 @@ mod tests {
                     "models": [{ "id": "m1" }] }
             } }"#,
         );
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         let specs: Vec<String> = resolver
             .available_models()
             .iter()
@@ -980,21 +881,13 @@ mod tests {
         // resolve 不受开关影响(内置默认模型仍可显式解析)
         assert!(resolver.resolve("anthropic/claude-sonnet-4-5").is_ok());
 
-        // 缺省字段 = true;项目覆盖全局
-        let global = TempDir::new("showflag_g");
-        let project = TempDir::new("showflag_p");
-        global.write(
-            ".latent/models.json",
-            r#"{ "showBuiltinModels": false, "providers": {} }"#,
-        );
-        project.write(
-            ".latent/models.json",
-            r#"{ "showBuiltinModels": true, "providers": {} }"#,
-        );
-        let resolver = create_model_resolver_from_config(Some(&project.0), Some(&global.0.join(".latent")));
+        // 缺省字段 = true(仅全局文件)
+        let dir2 = TempDir::new("showflag_default");
+        dir2.write(".latent/models.json", r#"{ "providers": {} }"#);
+        let resolver = create_model_resolver_from_config(Some(&dir2.0.join(".latent")));
         assert!(
             !resolver.available_models().is_empty(),
-            "项目 true 覆盖全局 false"
+            "缺省显示内置默认表"
         );
     }
 
@@ -1094,7 +987,7 @@ mod tests {
             },
         )
         .unwrap();
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         let m2 = resolver.resolve("p1/m2").unwrap();
         assert_eq!(m2.api, "openai-completions", "已有 provider 沿用原 api");
         assert_eq!(m2.base_url, "http://p1/v1");
@@ -1134,7 +1027,7 @@ mod tests {
         // 写入:覆盖已有 contextWindow,其它字段(含未知字段)不动
         upsert_models_json_context_window(&path, "p1", "m1", "openai-completions", Some(256_000))
             .unwrap();
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         assert_eq!(resolver.resolve("p1/m1").unwrap().context_window, 256_000);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("customField"), "未知字段保留: {text}");
@@ -1142,14 +1035,14 @@ mod tests {
         // 未记载的模型:新建条目(api 取传入值,baseUrl/apiKey 留空 → 沿用内置端点)
         upsert_models_json_context_window(&path, "p1", "m2", "openai-completions", Some(1_000_000))
             .unwrap();
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         let m2 = resolver.resolve("p1/m2").unwrap();
         assert_eq!(m2.context_window, 1_000_000);
         assert_eq!(m2.base_url, "http://p1/v1", "沿用 provider 级 baseUrl");
 
         // 清除(None):删除 contextWindow 键,模型回落到默认 128k
         upsert_models_json_context_window(&path, "p1", "m1", "openai-completions", None).unwrap();
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         assert_eq!(
             resolver.resolve("p1/m1").unwrap().context_window,
             128_000,
@@ -1167,7 +1060,7 @@ mod tests {
         let path = dir.0.join(".latent/models.json");
         upsert_models_json_context_window(&path, "anthropic", "claude-x", "anthropic-messages", Some(256_000))
             .unwrap();
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         assert_eq!(resolver.resolve("anthropic/claude-x").unwrap().context_window, 256_000);
 
         upsert_models_json_context_window(&path, "anthropic", "claude-x", "anthropic-messages", None)
@@ -1178,7 +1071,7 @@ mod tests {
             "空条目与空 provider 应被收回: {file:?}"
         );
         // 收回后内置端点仍可解析(未被空 provider 污染)
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         assert_eq!(
             resolver.resolve("anthropic/claude-x").unwrap().context_window,
             128_000
@@ -1207,30 +1100,20 @@ mod tests {
         save_models_file(&path, &default_models_template()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         serde_json::from_str::<serde_json::Value>(&text).unwrap();
-        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let resolver = create_model_resolver_from_config(Some(&dir.0.join(".latent")));
         let model = resolver.resolve("example/example-model").unwrap();
         assert_eq!(model.api, "openai-completions");
         assert!(resolver.available_models().len() > 1, "缺省显示内置默认表");
     }
 
     #[test]
-    fn preferred_models_path_prefers_project_dir() {
+    fn preferred_models_path_is_global() {
         let global = TempDir::new("pref_g");
-        let project = TempDir::new("pref_p");
-        // 提供项目目录 → 恒写项目路径(存在与否一致,避免歧义)
         assert_eq!(
-            preferred_models_path(Some(&project.0), Some(&global.0.join(".latent"))),
-            project.0.join(".latent/models.json")
+            preferred_models_path(Some(&global.0.join(".latent"))),
+            Some(global.0.join(".latent/models.json"))
         );
-        project.write(".latent/models.json", r#"{ "providers": {} }"#);
-        assert_eq!(
-            preferred_models_path(Some(&project.0), Some(&global.0.join(".latent"))),
-            project.0.join(".latent/models.json")
-        );
-        // 无项目目录 → 全局
-        assert_eq!(
-            preferred_models_path(None, Some(&global.0.join(".latent"))),
-            global.0.join(".latent/models.json")
-        );
+        // 数据目录缺失 → None
+        assert_eq!(preferred_models_path(None), None);
     }
 }

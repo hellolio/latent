@@ -1,11 +1,10 @@
 //! gateway.json 配置体系(对齐 OpenClaw `docs/gateway/configuration.md`):
-//! 位置 = 项目 `.latent/gateway.json` / 全局 `<数据目录>/gateway.json`,
-//! **项目逐字段覆盖全局**(对象递归合并,标量/数组整体替换)。校验规则:
-//! 未知键/坏类型/非法值 → [`ConfigError`] → daemon 进程退出码 78。
+//! 位置 = 仅全局 `<数据目录>/gateway.json`(项目 `.latent/gateway.json`
+//! 不再读取)。校验规则:未知键/坏类型/非法值 → [`ConfigError`] →
+//! daemon 进程退出码 78。
 //!
-//! 凭据三来源(明文/`$ENV`/`!shell`)解析统一走 `latent-channel::credential`;
-//! **`!shell` 来源仅全局配置接受** —— 项目级出现 `!shell` → 拒绝启动
-//! (恶意 repo 可借 gateway 启动执行任意命令)。危险配置打 stderr 警告
+//! 凭据三来源(明文/`$ENV`/`!shell`)解析统一走 `latent-channel::credential`;`!shell`
+//! 来源合法(仅全局配置,恶意 repo 无法借项目配置注入)。危险配置打 stderr 警告
 //! (不阻断):`dmPolicy: open`、群 allowlist 为空、token 明文等。
 
 use std::path::Path;
@@ -400,71 +399,29 @@ pub struct CommandsConfig {
 // 加载与合并
 // ---------------------------------------------------------------------------
 
-/// 读取 gateway.json:项目 `.latent/gateway.json` 逐字段覆盖全局
-/// `<数据目录>/gateway.json`(对象递归合并,标量/数组整体替换)。
-/// 返回 (合并后 Value, 项目级配置是否存在)。
-pub fn load_config_value(cwd: Option<&Path>, data_dir: Option<&Path>) -> (serde_json::Value, bool) {
+/// 读取 gateway.json:仅全局 `<数据目录>/gateway.json`(返回合并后 Value;
+/// 项目 `.latent/gateway.json` 不再读取)。
+pub fn load_config_value(data_dir: Option<&Path>) -> serde_json::Value {
     let mut paths = Vec::new();
     if let Some(dir) = data_dir {
-        paths.push((dir.join("gateway.json"), false));
-    }
-    if let Some(cwd) = cwd {
-        paths.push((cwd.join(".latent/gateway.json"), true));
+        paths.push(dir.join("gateway.json"));
     }
     let mut merged = serde_json::Value::Null;
-    let mut has_project = false;
-    for (path, is_project) in paths {
+    for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
         match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(value) => {
-                if is_project {
-                    has_project = true;
-                    // P2-1:!shell 门只扫**项目文件自身的 Value 子树** ——
-                    // 扫合并后值会把"全局合法 !shell + 项目文件存在(哪怕
-                    // {})"误判成项目覆盖而拒绝启动
-                    if let Err(error) = reject_project_shell_sources(&value) {
-                        return (serde_json::json!({ "__invalid": error.to_string() }), true);
-                    }
-                    // P1-4(拍板项,显式警告不阻断):项目级 gateway.json 可
-                    // 覆盖安全敏感字段(auth token / owner 名单 / 群策略 /
-                    // 会话 scope),威胁面与被禁的 !shell 同级 —— 覆盖发生时
-                    // 列出字段,提示把敏感配置放进全局数据目录
-                    warn_project_sensitive_overrides(&value);
-                }
-                merged = merge_values(merged, value);
-            }
-            Err(error) => return (serde_json::json!({ "__invalid": error.to_string() }), has_project),
+            Ok(value) => merged = merge_values(merged, value),
+            Err(error) => return serde_json::json!({ "__invalid": error.to_string() }),
         }
     }
-    (merged, has_project)
-}
-
-/// P1-4:项目级覆盖安全敏感字段的显式警告。
-fn warn_project_sensitive_overrides(project: &serde_json::Value) {
-    const SENSITIVE: [&str; 4] = [
-        "/gateway/auth",
-        "/commands/ownerAllowFrom",
-        "/messages/groupChat",
-        "/session",
-    ];
-    let overridden: Vec<&str> = SENSITIVE
-        .into_iter()
-        .filter(|path| project.pointer(path).map(|node| !node.is_null()).unwrap_or(false))
-        .collect();
-    if !overridden.is_empty() {
-        eprintln!(
-            "[latent-gateway][warn] 项目级 .latent/gateway.json 覆盖了安全敏感配置: {}。\
-             恶意仓库可借 gateway 启动篡改这些字段,请确认来源可信或移入全局数据目录",
-            overridden.join(", ")
-        );
-    }
+    merged
 }
 
 /// 解析 + 校验(入口:daemon 启动)。
-pub fn load_config(cwd: Option<&Path>, data_dir: Option<&Path>) -> Result<GatewayConfig, ConfigError> {
-    let (value, has_project) = load_config_value(cwd, data_dir);
+pub fn load_config(data_dir: Option<&Path>) -> Result<GatewayConfig, ConfigError> {
+    let value = load_config_value(data_dir);
     if value.get("__invalid").is_some() {
         return Err(ConfigError::Parse(
             value["__invalid"].as_str().unwrap_or_default().to_string(),
@@ -472,43 +429,13 @@ pub fn load_config(cwd: Option<&Path>, data_dir: Option<&Path>) -> Result<Gatewa
     }
     if value.is_null() {
         // 无任何配置文件 = 默认配置(但 auth.token 必填会让空配置拒绝启动)
-        return validate(&serde_json::to_value(GatewayConfig::default()).unwrap(), has_project);
+        return validate(&serde_json::to_value(GatewayConfig::default()).unwrap());
     }
-    validate(&value, has_project)
-}
-
-/// 项目级 `!shell` 凭据来源门:仅全局配置接受(§4.2)。
-fn reject_project_shell_sources(value: &serde_json::Value) -> Result<(), ConfigError> {
-    // 扫描所有可能是凭据的键
-    let mut violations: Vec<String> = Vec::new();
-    let sources = [
-        ("channels.qq.accessToken", value.pointer("/channels/qq/accessToken")),
-        ("channels.wecom.secret", value.pointer("/channels/wecom/secret")),
-        ("channels.telegram.botToken", value.pointer("/channels/telegram/botToken")),
-        ("gateway.auth.token", value.pointer("/gateway/auth/token")),
-    ];
-    for (label, node) in sources {
-        if let Some(text) = node.and_then(|v| v.as_str()) {
-            if latent_channel::credential::is_shell_source(Some(text)) {
-                violations.push(label.to_string());
-            }
-        }
-    }
-    if violations.is_empty() {
-        Ok(())
-    } else {
-        Err(ConfigError::Validation(format!(
-            "项目级 .latent/gateway.json 不允许 `!shell` 凭据来源(涉及: {});恶意仓库可借 gateway 启动执行任意命令。请改用 $ENV 或把该配置移入全局数据目录",
-            violations.join(", ")
-        )))
-    }
+    validate(&value)
 }
 
 /// 类型化解析 + 值校验 + 危险配置警告。
-pub fn validate(value: &serde_json::Value, has_project: bool) -> Result<GatewayConfig, ConfigError> {
-    // P2-1:项目级 !shell 门已移至 load_config_value(只扫项目文件自身);
-    // validate 收到的是合并后值,无法区分来源
-    let _ = has_project;
+pub fn validate(value: &serde_json::Value) -> Result<GatewayConfig, ConfigError> {
     let config: GatewayConfig = serde_json::from_value(value.clone())
         .map_err(|error| ConfigError::Parse(normalize_serde_error(&error.to_string())))?;
 
@@ -690,7 +617,7 @@ pub async fn materialize_channel_credentials(
                 );
                 qq.enabled = false;
             } else {
-                match resolve_credential_scoped("channels.qq.accessToken", &qq.access_token, true, None).await {
+                match resolve_credential_scoped("channels.qq.accessToken", &qq.access_token, None).await {
                     Ok(token) => {
                         write_back(raw_channels, "qq", "accessToken", &token);
                         qq.access_token = token;
@@ -705,7 +632,7 @@ pub async fn materialize_channel_credentials(
     }
     if let Some(wecom) = &mut config.channels.wecom {
         if wecom.enabled {
-            match resolve_credential_scoped("channels.wecom.secret", &wecom.secret, true, None).await {
+            match resolve_credential_scoped("channels.wecom.secret", &wecom.secret, None).await {
                 Ok(secret) => {
                     write_back(raw_channels, "wecom", "secret", &secret);
                     wecom.secret = secret;
@@ -722,7 +649,6 @@ pub async fn materialize_channel_credentials(
             match resolve_credential_scoped(
                 "channels.telegram.botToken",
                 &telegram.bot_token,
-                true,
                 None,
             )
             .await
@@ -741,19 +667,13 @@ pub async fn materialize_channel_credentials(
     Ok(config)
 }
 
-/// 凭据解析(带层级门):`allow_shell=false` 时拒绝 `!shell` 来源
-/// (项目级配置;全局配置 true)。统一走 latent-channel::credential。
+/// 凭据解析:统一走 latent-channel::credential(`!shell` 来源恒合法 ——
+/// 配置仅全局,无项目覆盖层)。
 pub async fn resolve_credential_scoped(
     label: &str,
     source: &str,
-    allow_shell: bool,
     env_fallback: Option<&str>,
 ) -> Result<String, ConfigError> {
-    if latent_channel::credential::is_shell_source(Some(source)) && !allow_shell {
-        return Err(ConfigError::Credential(format!(
-            "{label}: 项目级配置不允许 !shell 来源"
-        )));
-    }
     let resolved = latent_channel::credential::resolve_credential(label, Some(source), env_fallback)
         .await
         .map_err(ConfigError::Credential)?;
@@ -785,21 +705,17 @@ mod tests {
     }
 
     #[test]
-    fn project_shell_sources_are_rejected() {
-        // P2-1 后:门只扫项目文件自身的 Value(调用点在 load_config_value)
+    fn global_shell_credentials_are_allowed() {
+        // 全局配置允许 !shell(解析期不做凭据求值);项目级 gateway.json 不再读取
         let value = json!({
             "channels": { "qq": { "accessToken": "!cat /etc/passwd" } }
         });
-        let error = reject_project_shell_sources(&value).unwrap_err();
-        assert!(error.to_string().contains("!shell"), "{error}");
-        // 全局配置允许 !shell(解析期不做凭据求值)
-        assert!(validate(&value, false).is_ok());
+        assert!(validate(&value).is_ok());
     }
 
-    /// P2-1 回归:全局合法 `!shell` + 项目文件存在(哪怕 {})不再误拒;
-    /// 项目文件自身带 `!shell` 仍拒绝启动。
+    /// 项目 `.latent/gateway.json` 不再读取:即使其含 `!shell` 也不影响启动。
     #[test]
-    fn project_shell_gate_scans_project_file_only() {
+    fn project_gateway_json_is_ignored() {
         let dir = std::env::temp_dir().join(format!(
             "latent-gw-cfg-{}-{}",
             std::process::id(),
@@ -812,25 +728,18 @@ mod tests {
         std::fs::create_dir_all(dir.join("project/.latent")).unwrap();
         std::fs::write(
             dir.join("global/gateway.json"),
-            r#"{"gateway":{"auth":{"mode":"token","token":"!cat /etc/passwd"}}}"#,
+            r#"{"gateway":{"auth":{"mode":"token","token":"tok"}}}"#,
         )
         .unwrap();
-
-        // 项目文件存在但不含敏感键 → 不误拒(P2-1)
-        std::fs::write(dir.join("project/.latent/gateway.json"), "{}").unwrap();
-        assert!(
-            load_config(Some(&dir.join("project")), Some(&dir.join("global"))).is_ok(),
-            "全局 !shell + 项目 {{}} 不应被拒"
-        );
-
-        // 项目文件自身带 !shell → 拒绝启动
         std::fs::write(
             dir.join("project/.latent/gateway.json"),
             r#"{"channels":{"telegram":{"botToken":"!evil"}}}"#,
         )
         .unwrap();
-        let error = load_config(Some(&dir.join("project")), Some(&dir.join("global"))).unwrap_err();
-        assert!(error.to_string().contains("!shell"), "{error}");
+        assert!(
+            load_config(Some(&dir.join("global"))).is_ok(),
+            "项目级 gateway.json 应被忽略"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -842,7 +751,7 @@ mod tests {
         // GatewayConfig 的 mode 是 String,校验在 validate()
         config.gateway.auth.token = "t".into();
         let value = serde_json::to_value(&config).unwrap();
-        let error = validate(&value, false).unwrap_err();
+        let error = validate(&value).unwrap_err();
         assert!(error.to_string().contains("queue mode"), "{error}");
     }
 
@@ -901,6 +810,6 @@ mod tests {
             "channels": { "telegram": { "dmPolicy": "open" } },
             "messages": { "groupChat": { "groupPolicy": "allowlist", "groupAllowFrom": [] } }
         });
-        assert!(validate(&value, false).is_ok());
+        assert!(validate(&value).is_ok());
     }
 }

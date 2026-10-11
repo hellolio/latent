@@ -8,7 +8,7 @@ use latent_session::{
     create_session_in_dir, create_session_with, estimate_context_tokens, estimate_tokens,
     find_cut_point, run_compaction, serialize_conversation, should_compact, CompactionOutcome,
     CompactionSettings, ContextReplacement, Entry, SummarizationResponse, Summarizer,
-    DEFAULT_COMPACTION_SETTINGS,
+    DEFAULT_COMPACTION_SETTINGS, DEFAULT_RESERVE_RATIO,
 };
 
 fn assistant(text: &str, total_tokens: u64, stop: StopReason) -> AgentMessage {
@@ -361,8 +361,12 @@ fn cut_point_reports_split_turn_and_merges_metadata() {
 #[test]
 fn should_compact_boundary() {
     let settings = &DEFAULT_COMPACTION_SETTINGS;
+    assert_eq!(settings.reserve_tokens, DEFAULT_RESERVE_RATIO);
+    // 默认 5%:200k 窗口 → 预留 10k,阈值 190k
     assert!(!should_compact(1000, 200_000, settings));
-    assert!(should_compact(200_000 - 16_384 + 1, 200_000, settings));
+    assert_eq!(DEFAULT_RESERVE_RATIO, 0.05);
+    assert!(!should_compact(200_000 - 10_000, 200_000, settings));
+    assert!(should_compact(200_000 - 10_000 + 1, 200_000, settings));
     assert!(!should_compact(
         u64::MAX,
         u64::MAX,
@@ -377,14 +381,21 @@ fn should_compact_boundary() {
 fn reserve_tokens_percent_of_window() {
     use latent_session::reserve_tokens_for_window;
 
-    // 绝对值语义不受影响(>= 1.0)
-    assert_eq!(reserve_tokens_for_window(16_384.0, 32_000), 16_384);
-    // 百分比:0.1 × 32000 = 3200(四舍五入)
+    // 只按窗口百分比解析:默认 5% × 32000 = 1600(四舍五入)
+    assert_eq!(reserve_tokens_for_window(DEFAULT_RESERVE_RATIO, 32_000), 1_600);
     assert_eq!(reserve_tokens_for_window(0.1, 32_000), 3_200);
     assert_eq!(reserve_tokens_for_window(0.125, 131_072), 16_384);
-    // 非正数归零
+    // 非正数归零(不预留)
     assert_eq!(reserve_tokens_for_window(0.0, 32_000), 0);
     assert_eq!(reserve_tokens_for_window(-0.5, 32_000), 0);
+    // 旧的绝对值写法与其余出界值 → 回退默认比例,绝不按“1.0 倍窗口”预留
+    for invalid in [16_384.0, 1.0, 1.5, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            reserve_tokens_for_window(invalid, 32_000),
+            1_600,
+            "{invalid}"
+        );
+    }
 
     // 触发边界:32k 窗口、10% 预留 → 已用 > 28800 触发
     let settings = CompactionSettings {
@@ -395,11 +406,11 @@ fn reserve_tokens_percent_of_window() {
     assert!(!should_compact(28_800, 32_000, &settings));
     assert!(should_compact(28_801, 32_000, &settings));
 
-    // serde 兼容:整数写法(16384)与浮点写法(0.1)都能反序列化
+    // serde:小数写法照收(语义即分数,装配层负责对出界值告警并回退)
     let parsed: CompactionSettings =
-        serde_json::from_str(r#"{"enabled":true,"reserveTokens":16384,"keepRecentTokens":20000}"#)
+        serde_json::from_str(r#"{"enabled":true,"reserveTokens":0.05,"keepRecentTokens":20000}"#)
             .unwrap();
-    assert_eq!(parsed.reserve_tokens, 16_384.0);
+    assert_eq!(parsed.reserve_tokens, 0.05);
     let parsed: CompactionSettings =
         serde_json::from_str(r#"{"enabled":true,"reserveTokens":0.1,"keepRecentTokens":20000}"#)
             .unwrap();

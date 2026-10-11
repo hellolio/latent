@@ -126,15 +126,11 @@ pub enum SelectKind {
     /// /model「添加模型」表单中途的 api 协议选择(选择列表覆盖在表单上,
     /// Enter 后写回 `state.model_form`)
     ModelApiChoice,
-    /// /model「添加模型」表单第一步的写入位置选择(项目/全局)
-    ModelTargetChoice,
 }
 
 /// /model「添加模型」表单当前步骤。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelFormStep {
-    /// 第一步:写入项目还是全局 models.json(选择列表)
-    Target,
     Provider,
     /// 仅新 provider:api 协议(选择列表)
     Api,
@@ -145,18 +141,10 @@ pub enum ModelFormStep {
     ModelId,
 }
 
-/// 配置写回目标(项目 `.latent/models.json` 或全局数据目录 `models.json`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelFormTarget {
-    Project,
-    Global,
-}
-
 /// /model「添加模型」交互式表单:主编辑器作输入,Enter 提交当前步骤,
 /// Esc 取消整张表单。provider 已存在(builtin 或 models.json 已声明)时
-/// 跳过 api/baseUrl/apiKey 步骤。
+/// 跳过 api/baseUrl/apiKey 步骤。写入位置恒为全局数据目录 models.json。
 pub struct ModelForm {
-    pub target: Option<ModelFormTarget>,
     pub provider_id: Option<String>,
     pub api: Option<String>,
     pub base_url: Option<String>,
@@ -169,21 +157,19 @@ pub struct ModelForm {
 impl ModelForm {
     pub fn new() -> Self {
         ModelForm {
-            target: None,
             provider_id: None,
             api: None,
             base_url: None,
             api_key_env: None,
             model_id: None,
             known_provider: false,
-            step: ModelFormStep::Target,
+            step: ModelFormStep::Provider,
         }
     }
 
     /// 当前步骤的提问文本(view 渲染)。
     pub fn question(&self) -> String {
         match self.step {
-            ModelFormStep::Target => "添加模型 · 写入位置(项目/全局)".into(),
             ModelFormStep::Provider => {
                 "添加模型 · provider id(内置名或自定义名,Esc 取消)".into()
             }
@@ -570,7 +556,7 @@ impl InteractiveState {
             needs_full_redraw: false,
             transcript: Vec::new(),
             pending: Vec::new(),
-            auto_compact: true, // 自动压缩已在 session 层接线(阈值触发)
+            auto_compact: false, // refresh_footer 按 settings compaction.enabled 回填
             cwd_display: String::new(),
             git_branch: None,
             pending_tools: Vec::new(),

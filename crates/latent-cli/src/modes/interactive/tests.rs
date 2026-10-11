@@ -22,6 +22,41 @@ fn test_state() -> InteractiveState {
     InteractiveState::new(latent_tui::Theme::dark_ansi(), 80)
 }
 
+/// 写全局 models.json/settings.json 的单测用:把 `LATENT_HOME` 临时指向
+/// 隔离目录,Drop 时移除并清理(避免污染真实用户数据目录)。环境变量是进程级
+/// 全局,并发写全局文件的单测会互相覆盖,故持全局互斥串行。
+struct LatentHome {
+    dir: std::path::PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+static LATENT_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+impl LatentHome {
+    fn new(tag: &str) -> Self {
+        let lock = LATENT_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "latent_test_home_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("LATENT_HOME", &dir);
+        LatentHome {
+            dir,
+            _lock: lock,
+        }
+    }
+}
+impl Drop for LatentHome {
+    fn drop(&mut self) {
+        std::env::remove_var("LATENT_HOME");
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 async fn built_session_with_store(
     session_store: crate::assembly::SessionStore,
 ) -> crate::assembly::BuiltSession {
@@ -99,27 +134,25 @@ fn committed_text(state: &InteractiveState) -> String {
 
 // ---- 输入提交与未知命令 ----
 
-/// `/context` 命令:写项目 models.json 的 `contextWindow` 并即时刷新 footer 窗口;
+/// `/context` 命令:写全局 models.json 的 `contextWindow` 并即时刷新 footer 窗口;
 /// 「默认」档删除该键回落 128k;预设之外的档位本地报错。
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // LatentHome 守卫串行隔离 LATENT_HOME
 async fn context_command_writes_models_json_and_updates_window() {
     let built = built_memory_session().await;
     let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
-    // 隔离写盘位置:项目根 = 临时目录(preferred_models_path 恒写项目路径)
-    let dir = std::env::temp_dir().join(format!("latent_ctx_cmd_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    state.cwd = dir.clone();
+    // 隔离写盘位置:全局数据目录 = 临时 LATENT_HOME
+    let home = LatentHome::new("ctx_cmd");
     super::handlers::refresh_footer(&ctx, &mut state);
     assert_eq!(state.context_window, 128_000, "Model::minimal 默认窗口 128k");
 
     state.editor.set_text("/context 256k");
     handle_key(&ctx, &mut state, Key::Enter).await;
     assert_eq!(state.context_window, 256_000, "footer 窗口即时刷新");
-    let path = dir.join(".latent/models.json");
+    let path = home.dir.join("models.json");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("256000"), "写入 models.json: {text}");
 
@@ -137,7 +170,6 @@ async fn context_command_writes_models_json_and_updates_window() {
     let ephemeral: String = state.pending.iter().map(line_text).collect::<Vec<_>>().join("\n");
     assert!(ephemeral.contains("未知上下文档位"), "{ephemeral}");
     assert_eq!(state.context_window, 128_000, "非法档位不改变窗口");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 裸 `/context`:打开四档选择器并标出当前档。
@@ -161,6 +193,41 @@ async fn bare_context_opens_selector_on_current_preset() {
     assert_eq!(select.list.options.len(), 4, "四档:默认/128k/256k/1m");
     assert_eq!(select.list.selected, 1, "当前窗口 128k → 选中第二档(128k)");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `/session info` 的压缩节按百分比展示,footer 的 `(auto)` 跟随 settings
+/// 的 `compaction.enabled`(不再恒真)。
+#[tokio::test]
+async fn session_info_and_footer_follow_compaction_settings() {
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let mut state = test_state();
+    let ctx = ctx_of(&built, &resolver, &router);
+    super::handlers::refresh_footer(&ctx, &mut state);
+    // 缺省 CompactionConfig:enabled = true,reserve 5%
+    assert!(state.auto_compact, "footer (auto) 应跟随配置");
+
+    state.editor.set_text("/session info");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    let info = committed_text(&state);
+    assert!(
+        info.contains("compact: auto(reserve 5%("),
+        "压缩节应为百分比形式: {info}"
+    );
+    assert!(info.contains("tok of 128000"), "换算成当前窗口: {info}");
+
+    // 配置关闭: footer 的 (auto) 跟着消失
+    let disabled = crate::assembly::CompactionConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    let ctx = InteractiveCtx {
+        compaction_config: &disabled,
+        ..ctx_of(&built, &resolver, &router)
+    };
+    super::handlers::refresh_footer(&ctx, &mut state);
+    assert!(!state.auto_compact, "enabled = false 时不应显示 (auto)");
 }
 
 #[tokio::test]
@@ -1250,17 +1317,10 @@ async fn model_form_known_provider_skips_provider_steps() {
     let mut state = test_state();
     enter_model_config_entry(&ctx, &mut state, false).await;
     assert!(state.model_form.is_some(), "回车配置条目应打开表单");
-    assert!(
-        matches!(
-            state.select.as_ref().unwrap().kind,
-            SelectKind::ModelTargetChoice
-        ),
-        "第一步应弹出写入位置选择"
-    );
-    handle_key(&ctx, &mut state, Key::Enter).await; // 选中「当前目录」
     assert_eq!(
-        state.model_form.as_ref().unwrap().target,
-        Some(super::state::ModelFormTarget::Project)
+        state.model_form.as_ref().unwrap().step,
+        super::state::ModelFormStep::Provider,
+        "第一步为 provider id(无写入位置选择)"
     );
 
     // 已知 provider(zai 内置)→ 跳过 api/baseUrl/apiKey,直达模型 id
@@ -1276,25 +1336,17 @@ async fn model_form_known_provider_skips_provider_steps() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // LatentHome 守卫串行隔离 LATENT_HOME
 async fn model_form_adds_new_provider_and_switches() {
-    let dir = std::env::temp_dir().join(format!(
-        "latent_model_form_{}_{}",
-        std::process::id(),
-        line!()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let home = LatentHome::new("model_form");
 
     let built = built_memory_session().await;
     let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
     let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
     let ctx = ctx_of(&built, &resolver, &router);
     let mut state = test_state();
-    state.cwd = dir.clone();
-    state.home = None;
 
     enter_model_config_entry(&ctx, &mut state, false).await;
-    handle_key(&ctx, &mut state, Key::Enter).await; // 写入位置:当前目录
     assert_eq!(
         state.model_form.as_ref().unwrap().step,
         super::state::ModelFormStep::Provider
@@ -1332,7 +1384,7 @@ async fn model_form_adds_new_provider_and_switches() {
     // 落盘 + 热重载 + 自动切换
     assert!(state.model_form.is_none());
     assert_eq!(state.model_label, "tprov/test-model");
-    let file = dir.join(".latent/models.json");
+    let file = home.dir.join("models.json");
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(
         text.contains("tprov") && text.contains("test-model"),
@@ -1346,8 +1398,6 @@ async fn model_form_adds_new_provider_and_switches() {
     assert_eq!(model.api, "openai-completions");
     // env 未设置 → apiKey 字面值兜底(与配置体系语义一致)
     assert_eq!(model.api_key.as_deref(), Some("TPROV_API_KEY"));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

@@ -1085,7 +1085,7 @@ mod tests {
         assert!(texts[0].starts_with('╭'), "{texts:?}");
         assert!(texts.iter().any(|t| t.starts_with("│ 模型信息")), "{texts:?}");
         assert!(
-            texts.iter().any(|t| t.starts_with("│ 添加模型 · 写入位置")),
+            texts.iter().any(|t| t.starts_with("│ 添加模型 · provider id")),
             "{texts:?}"
         );
         assert!(

@@ -62,7 +62,7 @@ latent
 latent --continue
 ```
 
-也可以在项目根目录的 `.latent/settings.json` 里配置默认 provider/model，之后无需每次传参：
+也可以在全局数据目录的 `settings.json` 里配置默认 provider/model，之后无需每次传参：
 
 ```json
 {
@@ -138,17 +138,17 @@ latent --continue
 
 ## 配置
 
-配置目录按「项目 `.latent/` 优先，逐字段覆盖全局数据目录」合并。全局数据目录默认 `~/.config/latent`，可用环境变量 `LATENT_HOME` 指定（旧版 `~/.latent` 存在时自动沿用并提示）：
+settings.json / models.json / gateway.json / web-search.json 仅读全局数据目录；skills / agents / system-prompt.md 仍支持项目 `.latent/` 优先逐字段覆盖。全局数据目录默认 `~/.config/latent`，可用环境变量 `LATENT_HOME` 指定（旧版 `~/.latent` 存在时自动沿用并提示）：
 
 | 文件 | 作用 |
 |---|---|
-| `.latent/settings.json` | 默认模型、权限模式、bash 超时、工具调用上限（`maxToolCalls`，默认 30，0 = 不限制）、MCP 扩展声明（`mcpServers`）、主题等 |
-| `.latent/models.json` | 自定义 provider / model（baseUrl、定价、兼容开关） |
+| `settings.json`（全局） | 默认模型、权限模式、bash 超时、工具调用上限（`maxToolCalls`，默认 30，0 = 不限制）、MCP 扩展声明（`mcpServers`）、主题等 |
+| `models.json`（全局） | 自定义 provider / model（baseUrl、定价、兼容开关） |
 | `.latent/skills/<name>/SKILL.md` | 技能定义，AI 通过 `load_skill` 工具按需加载 |
 | `.latent/agents/<name>.md` | 子代理定义（frontmatter 声明 name/model/tools，正文即系统提示词） |
 | `.latent/system-prompt.md` | 自定义系统提示词 |
 
-MCP 扩展示例（`.latent/settings.json`）：
+MCP 扩展示例（`settings.json`）：
 
 ```json
 {
@@ -236,7 +236,8 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [x] 左下角显示当前轮次token消耗情况的地方，加一个显示次轮总耗时
  - [x] 模型默认上下文上限调整为默认128k，且可通过命令/context来切换大小（128k/256k/1m）
  - [ ] 上下文超过指定值也没有触发压缩
- - [ ] models.json只看个人根目录，不需要看项目根目录
+ - [x] models.json只看个人根目录，不需要看项目根目录（已推广到 settings.json / gateway.json / web-search.json，项目级不再读取）
+ - [ ] /compact命令可以设置压缩方式（auto，super？）
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 

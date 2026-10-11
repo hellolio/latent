@@ -46,10 +46,9 @@ fn resolve_theme(explicit: Option<&str>) -> (Theme, Option<String>) {
             return resolved;
         }
     }
-    let cwd = std::env::current_dir().ok();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let dir = latent_core::latent_dir(home.as_deref());
-    if let Some(name) = latent_core::load_theme_setting(cwd.as_deref(), dir.as_deref()) {
+    if let Some(name) = latent_core::load_theme_setting(dir.as_deref()) {
         if let Some(resolved) = named(&name, "settings.json") {
             return resolved;
         }
@@ -77,10 +76,9 @@ fn resolve_tui_mode(explicit: Option<&str>) -> bool {
             return resolved;
         }
     }
-    let cwd = std::env::current_dir().ok();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let dir = latent_core::latent_dir(home.as_deref());
-    if let Some(name) = latent_core::load_tui_mode_setting(cwd.as_deref(), dir.as_deref()) {
+    if let Some(name) = latent_core::load_tui_mode_setting(dir.as_deref()) {
         if let Some(resolved) = parse(&name, "settings.json") {
             return resolved;
         }
@@ -115,9 +113,9 @@ pub async fn run_interactive_mode(
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let dir = latent_core::latent_dir(home.as_deref());
     let copy_on_select =
-        latent_core::load_copy_on_select_setting(Some(&cwd), dir.as_deref()).unwrap_or(false);
+        latent_core::load_copy_on_select_setting(dir.as_deref()).unwrap_or(false);
     let ctrl_x_copy =
-        latent_core::load_ctrl_x_copy_setting(Some(&cwd), dir.as_deref()).unwrap_or(true);
+        latent_core::load_ctrl_x_copy_setting(dir.as_deref()).unwrap_or(true);
 
     // 键盘线程暂停开关:TUI 挂起跑外部编辑器($EDITOR)期间置位,线程
     // 停止读取 crossterm 事件,把终端输入让给子进程。
@@ -165,7 +163,6 @@ pub async fn run_interactive_mode(
     // /model 解析与主流程同源:models.json + 内置 provider 默认表。
     // RwLock:/model 配置入口(编辑 models.json/表单)运行期热重载
     let resolver = std::sync::RwLock::new(latent_core::create_model_resolver_from_config(
-        Some(&cwd),
         latent_core::latent_dir(home.as_deref()).as_deref(),
     ));
     // 打字门控:编辑器非空 = 用户正在输入,supervisor 的后台 subagent 结算
@@ -383,7 +380,13 @@ fn run_models_editor(
     keys_paused: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     let dir = latent_core::latent_dir(state.home.as_deref());
-    let path = latent_core::preferred_models_path(Some(&state.cwd), dir.as_deref());
+    let Some(path) = latent_core::preferred_models_path(dir.as_deref()) else {
+        state.commit_ephemeral(view::error_line(
+            "无法定位全局 models.json(缺少 HOME / LATENT_HOME)",
+            &state.theme,
+        ));
+        return Ok(());
+    };
     if let Err(error) = latent_core::write_models_template_if_absent(&path) {
         state.commit_ephemeral(view::error_line(
             &format!("无法创建 {}: {error}", path.display()),

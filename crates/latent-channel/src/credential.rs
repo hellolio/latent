@@ -4,9 +4,8 @@
 //! 共享依赖)。转义(`$$`/`$!`)、5s 超时、环境变量白名单、16KB 输出上限,
 //! 错误消息 redact key。
 //!
-//! `!shell` 来源仅全局配置接受:项目级 `.latent/gateway.json` 出现 `!shell`
-//! → 调用方(实用 `resolve_for_config`)拒绝 —— 恶意 repo 可借 gateway
-//! 启动执行任意命令。本项目统一走 `credential_source_allowed` 做前置门。
+//! `!shell` 来源合法:gateway 配置仅全局 `<数据目录>/gateway.json`(项目级
+//! `.latent/gateway.json` 不再读取),恶意 repo 无法借项目配置注入命令。
 
 use std::collections::HashMap;
 use std::process::Stdio;

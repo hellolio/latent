@@ -17,7 +17,7 @@ impl latent_agent::ToolUpdater for NoopUpdater {
 
 fn context() -> Arc<WebContext> {
     Arc::new(WebContext {
-        config: latent_web::config::load_web_search_config(None, None),
+        config: latent_web::config::load_web_search_config(None),
         cache_limits: Default::default(),
         llm: LlmDeps {
             provider: latent_ai::create_mock_provider("unused"),

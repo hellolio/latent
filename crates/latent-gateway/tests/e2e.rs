@@ -66,7 +66,7 @@ async fn build_harness_full(
         value["gateway"]["auth"]["token"] = "test-token".into();
     }
     let config: GatewayConfig =
-        latent_gateway::config::validate(&value, false).expect("测试配置非法");
+        latent_gateway::config::validate(&value).expect("测试配置非法");
 
     let provider: Arc<dyn latent_ai::Provider> =
         Arc::new(ScriptedProvider::new(&test_model(), turns));

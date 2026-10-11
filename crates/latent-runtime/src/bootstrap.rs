@@ -115,18 +115,17 @@ pub fn resolve_provider_and_model(
             model,
         ));
     }
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let dir = latent_core::latent_dir(dirs_home().as_deref());
-    let resolver = latent_core::create_model_resolver_from_config(Some(&cwd), dir.as_deref());
+    let resolver = latent_core::create_model_resolver_from_config(dir.as_deref());
     // 未指定 provider/model 时回退 settings.json 的 defaultProvider/defaultModel
     let (provider, model) = match (&provider, &model) {
         (Some(_), _) | (_, Some(_)) => (provider, model),
         (None, None) => {
             let (default_provider, default_model) =
-                latent_core::load_default_model_selection(Some(&cwd), dir.as_deref());
+                latent_core::load_default_model_selection(dir.as_deref());
             if default_provider.is_none() && default_model.is_none() {
                 return Err(
-                    "缺少 --provider(或 --mock);也可在 .latent/settings.json 配置 defaultProvider/defaultModel"
+                    "缺少 --provider(或 --mock);也可在全局 settings.json 配置 defaultProvider/defaultModel"
                         .into(),
                 );
             }
