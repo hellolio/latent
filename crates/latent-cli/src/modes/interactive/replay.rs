@@ -132,25 +132,25 @@ fn replay_message(message: &AgentMessage, theme: &latent_tui::Theme) -> Vec<Tran
         ],
         AgentMessage::CompactionSummary { summary, .. } => vec![TranscriptItem::Line(
             ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!("── 压缩摘要: {}", first_line(summary)),
+                format!("── Compaction Summary: {}", first_line(summary)),
                 ratatui::style::Style::new().fg(theme.dim),
             )),
         )],
         AgentMessage::BranchSummary { summary, .. } => vec![TranscriptItem::Line(
             ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!("── 分支摘要: {}", first_line(summary)),
+                format!("── Branch Summary: {}", first_line(summary)),
                 ratatui::style::Style::new().fg(theme.dim),
             )),
         )],
         AgentMessage::ModeSection { content, .. } => vec![TranscriptItem::Line(
             ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!("── 模式切换: {}", first_line(content)),
+                format!("── Mode Switch: {}", first_line(content)),
                 ratatui::style::Style::new().fg(theme.dim),
             )),
         )],
         AgentMessage::ProjectContext { content, .. } => vec![TranscriptItem::Line(
             ratatui::text::Line::from(ratatui::text::Span::styled(
-                format!("── 项目上下文: {}", first_line(content)),
+                format!("── Project Context: {}", first_line(content)),
                 ratatui::style::Style::new().fg(theme.dim),
             )),
         )],

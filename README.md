@@ -238,9 +238,13 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [ ] 上下文超过指定值也没有触发压缩
  - [x] models.json只看个人根目录，不需要看项目根目录（已推广到 settings.json / gateway.json / web-search.json，项目级不再读取）
  - [ ] /compact命令可以设置压缩方式（auto，super？）
- - [ ] /model切换模型后，settings.json没有更新
- - [ ] 左下角显示的运行时间没有头比如：runtime 5s,且应该显示在最左边，而不是第三的位置（⌛️ 5.5s | TPS 65.5 tok/s · TTFT 4.1s │ ↑ 4.1k │ ↓ 94 │ reasoning 44）
- - [ ] 左下角的waiting xxx是彩色的，改成黑白
+ - [x] /model切换模型后，settings.json没有更新
+ - [x] 左下角显示的运行时间没有头比如：runtime 5s,且应该显示在最左边，而不是第三的位置（⌛️ 5.5s | TPS 65.5 tok/s · TTFT 4.1s │ ↑ 4.1k │ ↓ 94 │ reasoning 44）
+ - [x] 左下角的waiting xxx是彩色的，改成黑白
+ - [ ] 模型输出的正文信息做md格式显示时，如果是表格的话，好像很多文字没显示出来
+ - [ ] 加载AGENTS.md时使用developer，而不是system
+ - [ ] 压缩提示词可独立，可用户自定义
+ - [ ] ⌛ 耗时，这个只在回答用户的一轮中显示，我希望只要显示左下角的token信息时就一起显示
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 

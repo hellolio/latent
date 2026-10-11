@@ -50,13 +50,10 @@ pub type SystemPromptSections = BTreeMap<String, String>;
 
 const BASE_RULES: &[&str] = &[
     "Be concise; avoid unnecessary explanations.",
-    "After initial exploration, summarize findings and uncertainties, then communicate the next step. Do not silently continue lengthy exploration.",
+    "Do not silently continue lengthy exploration.",
     "Do not decide on non-trivial design choices on the user's behalf; present the options and wait for confirmation.",
     "Understand the request and formulate a plan before acting.",
-    "Do not modify files before the user approves the plan.",
-    "Inspect the relevant code before making changes.",
-    "Preserve existing behavior and follow established project conventions.",
-    "Do not fix unrelated issues. Make the smallest change necessary to fulfill the request."
+    "Do not modify files before the user approves the plan."
 ];
 
 /// 当前本地时间(装配期调用;`%:z` 渲染为 `+08:00` 形式的时区偏移)。
