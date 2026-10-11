@@ -100,6 +100,10 @@ fn agent_event_to_json(event: &AgentEvent) -> Option<Value> {
             "output": output,
             "isError": is_error,
         })),
+        AgentEvent::ToolBudgetPaused { max_tool_calls } => Some(json!({
+            "type": "tool_budget_paused",
+            "maxToolCalls": max_tool_calls,
+        })),
         AgentEvent::AgentEnd { messages } => {
             Some(json!({ "type": "agent_end", "messages": messages }))
         }

@@ -57,3 +57,9 @@
 - **坑**: handlers 走 `latent_dir(state.home)` → 先读进程级 `LATENT_HOME`。cargo test 并行下，两个各自 set/remove `LATENT_HOME` 的 RAII 测试互相覆盖：A set 后 B set，A Drop 又 remove——B 在中途拿到 `None`，`preferred_models_path` 返回 `None`，测试随机报「无法定位全局 models.json」。仅靠每个测试自建自删的守卫**不够**，这是典型低概率竞态（见 TEST-006）。
 - **证据**: `context_command_writes_models_json_and_updates_window` 与 `model_form_adds_new_provider_and_switches` 同时写全局 models.json。
 - **规避**: `tests.rs` 的 `LatentHome` 守卫内部持 `static LATENT_HOME_LOCK: Mutex<()>`，整个测试期间持锁串行；守卫跨 `.await` 持锁需 `#[allow(clippy::await_holding_lock)]`（`#[tokio::test]` 默认 current_thread runtime，无 Send 约束，合法）；断言写盘路径用 `home.dir.join("models.json")`。
+
+## TEST-011: E2E 请求体断言 user 消息要兼容字符串与 blocks 两种 wire 形态
+
+- **坑**: 断言恢复请求的末条 user 消息时假设 `content == "继续"`（纯文本消息经 anthropic 适配器序列化为字符串），但 TUI 交互路径的用户输入走 `UserContent::Blocks` → content 是块数组，且末块带 `cache_control`（缓存断点附加在最后一条 user/system 消息上）。同一份请求体里两种形态并存，单一形态断言随机性失败。
+- **证据**: `test_tool_budget_pause.py` 首版失败：`{'content': [{'cache_control': {'type': 'ephemeral'}, 'text': '继续', 'type': 'text'}], 'role': 'user'} != '继续'`；同请求前一条 tool_result 消息恒为 blocks（`tool_result` 只能进块数组）。
+- **规避**: 断言消息文本先归一化——content 为字符串直接用，为数组则拼接各块的 `text`（工具内 `_msg_text` helper）；结构性断言（role、块类型）与文本断言分离。tool_result 消息可直接遍历 `block["type"] == "tool_result"`。

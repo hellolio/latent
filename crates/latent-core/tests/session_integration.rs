@@ -880,7 +880,7 @@ async fn auto_compact_fires_mid_run_at_tool_boundary() {
 // ---- 工具调用护栏仅 Plan 模式生效(SessionCompactionHooks 门控) ----
 
 /// 带 PermissionEngine 的护栏测试会话:12 轮工具调用 + 1 轮文本作答,
-/// max_tool_calls = 2(硬停阈值 = 2 + GRACE 10 = 12)。
+/// max_tool_calls = 2(暂停阈值 = > 2,即第 3 轮执行完后停)。
 async fn build_guard_session(mode: SessionMode) -> (latent_core::AgentSession, Arc<TestTool>) {
     let m = model();
     let turns: Vec<ScriptedTurn> = (0..12)
@@ -932,22 +932,30 @@ async fn tool_call_guard_hard_stops_in_plan_mode() {
     assert_eq!(
         outcome.stop(),
         RunStop::BudgetExhausted(BudgetKind::MaxToolCalls),
-        "Plan 模式下达 12 次工具调用(2 + GRACE 10)应硬停"
+        "Plan 模式下达 3 轮工具调用(> 2)应暂停"
     );
-    assert_eq!(tool.calls.load(Ordering::SeqCst), 12);
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 3);
 
-    // 收敛提示恰好一条(初始 prompt + 提示),终止通知为最后一条消息
+    // 收敛提示恰好一条(初始 prompt + 提示);暂停不合成终止通知,
+    // held 工具结果为最后一条消息(下一条用户消息自然紧随其后)
     let messages = session.agent().messages();
     let user_count = messages
         .iter()
         .filter(|m| matches!(m, AgentMessage::User { .. }))
         .count();
     assert_eq!(user_count, 2, "初始 prompt + 恰好一条收敛提示");
-    let last = messages.last().unwrap().as_assistant().unwrap();
     assert!(
-        last.text_content()
-            .contains("maximum number of consecutive tool calls"),
-        "终止通知应说明护栏触发"
+        !messages.iter().any(|m| m
+            .as_assistant()
+            .map(|a| a
+                .text_content()
+                .contains("maximum number of consecutive tool calls"))
+            .unwrap_or(false)),
+        "不应合成模型可见的终止通知"
+    );
+    assert!(
+        matches!(messages.last().unwrap(), AgentMessage::ToolResult { .. }),
+        "暂停时最后一条消息应为 held 工具结果"
     );
 }
 

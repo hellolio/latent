@@ -1,0 +1,30 @@
+[
+  {
+    "tool_calls": [
+      { "name": "bash", "arguments": { "command": "echo round-1" } }
+    ]
+  },
+  {
+    "tool_calls": [
+      { "name": "bash", "arguments": { "command": "echo round-2" } }
+    ]
+  },
+  {
+    "tool_calls": [
+      { "name": "bash", "arguments": { "command": "echo round-3" } }
+    ]
+  },
+  {
+    "tool_calls": [
+      { "name": "bash", "arguments": { "command": "echo round-4" } }
+    ]
+  },
+  {
+    "tool_calls": [
+      { "name": "bash", "arguments": { "command": "echo round-5" } }
+    ]
+  },
+  {
+    "text": "已恢复,汇报结论。"
+  }
+]

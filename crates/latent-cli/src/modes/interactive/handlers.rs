@@ -2039,6 +2039,18 @@ async fn handle_session_event(
                 }
             }
         }
+        AgentSessionEvent::Agent(latent_agent::AgentEvent::ToolBudgetPaused {
+            max_tool_calls,
+        }) => {
+            // 预算暂停提示(仅 UI,模型不可见不进转录):run 已停,held 工具
+            // 结果留在转录;用户下一条消息开启新 run 时自然紧随其后进请求
+            state.commit_line(plain_dim(
+                &format!(
+                    "工具调用已经超过最大次数({max_tool_calls} 轮),是否继续?回复任意消息将继续。"
+                ),
+                &state.theme,
+            ));
+        }
         AgentSessionEvent::AgentSettled => {
             // 兜底:工具结果未到达时,标题仍要落盘(状态用终态色)
             let leftover = std::mem::take(&mut state.pending_tools);

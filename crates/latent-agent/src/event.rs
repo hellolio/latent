@@ -88,6 +88,10 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
+    /// 工具调用预算暂停(Plan 护栏):连续工具轮数超过上限,本批工具执行
+    /// 完后 run 以 `BudgetExhausted(MaxToolCalls)` 暂停,等用户确认继续;
+    /// 仅供 UI/渠道展示(不进转录,模型不可见)。
+    ToolBudgetPaused { max_tool_calls: u32 },
     /// run 结束(最后事件);messages = 本次 run 新增的全部消息
     AgentEnd { messages: Vec<AgentMessage> },
 }

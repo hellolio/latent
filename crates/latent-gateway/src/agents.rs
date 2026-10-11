@@ -310,6 +310,13 @@ impl SessionSubscriber for SessionEventPump {
                 AgentEvent::ToolExecutionStart { tool_name, .. } => {
                     self.try_progress_throttled(&format!("仍在工作…(工具:{tool_name})"));
                 }
+                // 预算暂停:渠道用户必须可见(否则边界处静默),不经 30s 节流;
+                // 用户回复任意消息即恢复(held 工具结果随消息一起进请求)
+                AgentEvent::ToolBudgetPaused { max_tool_calls } => {
+                    self.dispatcher.try_progress(format!(
+                        "工具调用已经超过最大次数({max_tool_calls} 轮),是否继续?回复任意消息将继续。"
+                    ));
+                }
                 _ => {}
             },
             AgentSessionEvent::AutoRetryStart {

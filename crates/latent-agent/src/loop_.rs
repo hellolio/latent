@@ -14,10 +14,10 @@
 //! 返回 —— 长度恒等于 toolCall 数,"每个 toolCall 恰好一个 toolResult" 是类型
 //! 不变量(03 文档 §10.4,修复 pi 串行 abort 缺口的类型化方案)。护栏
 //! `TurnLimits` 超限以 `RunStop::BudgetExhausted` 可区分终止;工具调用上限
-//! 分两段 —— 达标后在工具结果后注入一条 user 收敛提示(每次 run 一次),
-//! 再超 `TOOL_CALL_LIMIT_GRACE` 次仍不停则硬停并合成终止通知进转录(用户
-//! 在所有运行模式下都拿得到可读结果)。低层无内建
-//! provider 重试(不变量 I2)—— 重试经装饰 `Provider` 在上层注入。
+//! 分两段 —— 达到 3/4 上限后在工具结果后注入一条 user 收敛提示(每次 run
+//! 一次),超过上限仍不停则本批工具执行完后暂停:发 `ToolBudgetPaused`
+//! 事件交 UI/渠道展示(模型不可见、不进转录),等用户下一条消息继续。
+//! 低层无内建 provider 重试(不变量 I2)—— 重试经装饰 `Provider` 在上层注入。
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -225,9 +225,9 @@ pub struct AgentContext {
 #[derive(Debug, Clone, Copy)]
 pub struct TurnLimits {
     pub max_turns: Option<u32>,
-    /// 工具调用连续次数上限:达标后循环注入一条 user 收敛提示(每次 run
-    /// 一次),再超 `TOOL_CALL_LIMIT_GRACE` 次仍不停则以
-    /// `BudgetExhausted(MaxToolCalls)` 硬停。软/硬两段均受
+    /// 工具调用连续轮数上限(一批并行调用算一轮):达到 3/4 上限后循环
+    /// 注入一条 user 收敛提示(每次 run 一次),超过上限仍不停则以
+    /// `BudgetExhausted(MaxToolCalls)` 暂停等待用户确认。软/硬两段均受
     /// `LoopHooks::tool_call_guard_enabled` 门控(业务层按会话模式决定)。
     pub max_tool_calls: Option<u32>,
     pub max_total_tokens: Option<u64>,
@@ -286,10 +286,14 @@ impl LoopConfig {
 /// 各自的行/字节截断,此上限兜底任意工具/扩展的超长输出)。
 pub const DEFAULT_TOOL_RESULT_MAX_CHARS: usize = 20_000;
 
-/// 工具调用软上限的宽限次数:`max_tool_calls` 达标后循环注入一条 user
-/// 收敛提示(每次 run 一次),再超此次数仍不停则以
-/// `BudgetExhausted(MaxToolCalls)` 硬停并合成终止通知。
-pub const TOOL_CALL_LIMIT_GRACE: u32 = 10;
+/// 工具调用软上限 = 上限的 3/4 向上取整(`max - max/4`),夹在
+/// `[1, max-1]` —— 收敛提示先于暂停触发(小上限时退化为 max-1)。
+pub fn tool_call_warn_threshold(max_calls: u32) -> u32 {
+    if max_calls <= 1 {
+        return 1;
+    }
+    (max_calls - max_calls / 4).clamp(1, max_calls - 1)
+}
 
 /// 工具自我约束输出时预留的余量:工具在内容之后还要附续读指引等文本,
 /// 预留后"内容 + 指引"恒不触发上面的头尾裁剪(避免转录中间出现挖洞)。
@@ -491,15 +495,13 @@ impl LoopState {
         {
             return Some(RunStop::BudgetExhausted(BudgetKind::MaxTurns));
         }
-        // 工具调用硬上限受 hooks 接缝门控(业务层按会话模式决定是否生效;
+        // 工具调用暂停点受 hooks 接缝门控(业务层按会话模式决定是否生效;
         // 关闭时软/硬护栏均不应用,其余预算护栏不受影响)
         if self.hooks.tool_call_guard_enabled()
             && self
                 .limits
                 .max_tool_calls
-                .is_some_and(|max| {
-                    self.tool_call_count >= max.saturating_add(TOOL_CALL_LIMIT_GRACE)
-                })
+                .is_some_and(|max| self.tool_call_count > max)
         {
             return Some(RunStop::BudgetExhausted(BudgetKind::MaxToolCalls));
         }
@@ -523,20 +525,21 @@ impl LoopState {
         None
     }
 
-    /// 工具调用软上限的收敛提示:首次 `tool_call_count >= max_tool_calls`
-    /// 时返回一条 user 消息并置位(每次 run 只提示一次);未配置上限、尚未
-    /// 达标或护栏被 hooks 门控关闭时返回 None。
+    /// 工具调用软上限的收敛提示:首次达到 3/4 上限(`tool_call_count >=`
+    /// `tool_call_warn_threshold`)时返回一条 user 消息并置位(每次 run 只
+    /// 提示一次);未配置上限、尚未达标或护栏被 hooks 门控关闭时返回 None。
     fn take_tool_limit_warning(&mut self) -> Option<AgentMessage> {
         let max_calls = self.limits.max_tool_calls?;
         if !self.hooks.tool_call_guard_enabled()
             || self.tool_limit_warned
-            || self.tool_call_count < max_calls
+            || self.tool_call_count < tool_call_warn_threshold(max_calls)
         {
             return None;
         }
         self.tool_limit_warned = true;
         Some(AgentMessage::user(format!(
-            "You have made {max_calls} consecutive tool calls. It may be helpful to converge on the findings and respond to the user soon."
+            "You have made {} consecutive tool rounds (a parallel batch of tool calls counts as one round). It may be helpful to converge on the findings and respond to the user soon.",
+            self.tool_call_count
         )))
     }
 
@@ -871,7 +874,8 @@ async fn step_executing_tools(state: &mut LoopState) -> Phase {
             terminate: true,
         }
     } else {
-        state.tool_call_count += calls.len() as u32;
+        // 一批并行调用算一轮:护栏计数的是模型与工具的连续对话轮数
+        state.tool_call_count += 1;
         if message.stop_reason == StopReason::Length {
             // 截断防御:全部拒执行,terminate=false 让模型重发(不变量 I5)
             fail_tool_calls_from_truncated(
@@ -912,19 +916,6 @@ async fn step_executing_tools(state: &mut LoopState) -> Phase {
     Phase::Settling
 }
 
-/// 工具调用硬上限的终止通知:合成的 assistant 文本消息(stop_reason=Stop,
-/// usage 零值)作为本次 run 的最后一条消息进转录 —— gateway 回复/TUI/print
-/// 的最终结果送达路径都能把它交给用户。非模型产出,属护栏行为。
-fn tool_limit_stop_notice(model: &Model, max_calls: u32) -> AgentMessage {
-    let mut message = AssistantMessage::pending(model);
-    message.content = vec![ContentBlock::text(format!(
-        "The maximum number of consecutive tool calls has been reached ({} calls). No further tool calls can be made, so execution is aborted here. The tool outputs above are the results that have been completed; please respond to the user immediately.",
-        max_calls.saturating_add(TOOL_CALL_LIMIT_GRACE)
-    ))];
-    message.stop_reason = StopReason::Stop;
-    AgentMessage::Assistant(Box::new(message))
-}
-
 /// Settling:finishTurn → turn_end → 预算/决策 → 下一个 Phase(wake 显式化)。
 async fn step_settling(state: &mut LoopState) -> Phase {
     let message = state
@@ -955,14 +946,16 @@ async fn step_settling(state: &mut LoopState) -> Phase {
         .await;
 
     if let Some(budget) = state.budget_stop() {
-        // 工具调用硬上限(软上限 + GRACE):终止通知作为最后一条消息进转录
-        // 后终止,用户在所有运行模式下都能拿到可读的最终结果
+        // 工具调用预算暂停(超过上限):held 工具结果已在转录,不再让模型
+        // 继续本 run —— 发 UI/渠道展示事件(模型不可见、不进转录)后终止,
+        // 用户下一条消息开启新 run 时结果自然紧随其后进请求
         if budget == RunStop::BudgetExhausted(BudgetKind::MaxToolCalls) {
-            let notice = tool_limit_stop_notice(
-                &state.model,
-                state.limits.max_tool_calls.unwrap_or_default(),
-            );
-            state.inject(notice).await;
+            state
+                .sink
+                .on_event(&AgentEvent::ToolBudgetPaused {
+                    max_tool_calls: state.limits.max_tool_calls.unwrap_or_default(),
+                })
+                .await;
         }
         return Phase::Done(budget);
     }

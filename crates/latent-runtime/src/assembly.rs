@@ -709,8 +709,8 @@ fn parse_headless_approval(name: Option<&String>) -> HeadlessApproval {
     }
 }
 
-/// `maxToolCalls` 默认软上限(工具调用连续次数;达标注入收敛提示,再超
-/// `latent_agent::TOOL_CALL_LIMIT_GRACE` 次硬停)。
+/// `maxToolCalls` 默认上限(连续工具对话轮数,一批并行调用算一轮;达到
+/// 3/4 注入收敛提示,超过则暂停等用户确认)。
 const DEFAULT_MAX_TOOL_CALLS: u32 = 30;
 
 /// settings `maxToolCalls` → 循环层上限(纯函数,可测):未配置 = 默认 30;
@@ -1793,6 +1793,12 @@ impl SessionSubscriber for PrintSubscriber {
                 }
                 AgentEvent::ToolExecutionStart { tool_name, .. } => {
                     println!("[tool] {tool_name} …");
+                }
+                // 预算暂停(print 模式无法交互等待,提示后退出;用户重跑/回复即继续)
+                AgentEvent::ToolBudgetPaused { max_tool_calls } => {
+                    eprintln!(
+                        "[tool budget] 工具调用已经超过最大次数({max_tool_calls} 轮),是否继续?回复任意消息将继续。"
+                    );
                 }
                 _ => {}
             },

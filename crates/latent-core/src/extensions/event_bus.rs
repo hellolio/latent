@@ -677,6 +677,8 @@ impl Subscriber for ExtensionEventBus {
             AgentEvent::AgentEnd { messages } => {
                 (ExtensionEvent::AgentEnd, json!({ "messages": messages }))
             }
+            // 预算暂停是 UI/渠道提示事件(模型不可见):扩展事件面不扩展,跳过
+            AgentEvent::ToolBudgetPaused { .. } => return,
         };
         // 热路径守卫:无订阅者不构造/不发送载荷(07 §8.3)
         if !self.has_subscriber(event) {

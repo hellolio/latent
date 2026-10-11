@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
@@ -18,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use crate::event::{AgentEvent, SharedPartial, SharedSubscriber, Subscriber};
 use crate::hooks::LoopHooks;
 use crate::loop_::{
-    create_injection_endpoints, run_agent_loop, AgentContext, InjectionReceiver, InjectionSender,
-    LoopConfig, RunStop, TurnLimits, DEFAULT_TOOL_RESULT_MAX_CHARS,
+    create_injection_endpoints, run_agent_loop, AgentContext, BudgetKind, InjectionReceiver,
+    InjectionSender, LoopConfig, RunStop, TurnLimits, DEFAULT_TOOL_RESULT_MAX_CHARS,
 };
 use crate::message::AgentMessage;
 use crate::tool::Tool;
@@ -57,6 +58,8 @@ pub enum AgentError {
     NoModel,
     #[error("nothing to continue: queue is empty and last message is not user/toolResult")]
     NothingToContinue,
+    #[error("run paused: tool call budget exhausted, waiting for user confirmation")]
+    BudgetPaused,
     #[error("run panicked")]
     Panicked,
     #[error("{0}")]
@@ -167,6 +170,11 @@ pub struct Agent {
     streaming: Mutex<watch::Sender<bool>>,
     streaming_rx: watch::Receiver<bool>,
     cancel: Mutex<CancellationToken>,
+    /// 工具调用预算暂停闩锁:run 以 `BudgetExhausted(MaxToolCalls)` 结束时
+    /// 置位,`prompt_messages`(用户新请求)清除;置位期间 `continue_run`
+    /// 拒绝启动(后台任务通知/subagent supervisor 等自动唤醒路径被门控,
+    /// 通知留队随下一次用户发起的 run 注入)。
+    budget_paused: AtomicBool,
     self_weak: Weak<Agent>,
 }
 
@@ -201,6 +209,7 @@ impl Agent {
             streaming: Mutex::new(streaming),
             streaming_rx,
             cancel: Mutex::new(CancellationToken::new()),
+            budget_paused: AtomicBool::new(false),
             self_weak,
         }
     }
@@ -360,6 +369,8 @@ impl Agent {
         if messages.is_empty() {
             return Err(AgentError::NothingToContinue);
         }
+        // 用户发起的新请求解除预算暂停闩锁:计数随新 run 归零,预算重置
+        self.budget_paused.store(false, Ordering::SeqCst);
         self.run_with_lifecycle(messages).await
     }
 
@@ -367,6 +378,12 @@ impl Agent {
     /// (steering/follow-up 由循环在边界/停止点整流);否则纯续跑
     /// (最后一条 user/toolResult = 重试)。
     pub async fn continue_run(&self) -> Result<RunStop, AgentError> {
+        // 预算暂停闩锁:工具轮数超限暂停后,自动唤醒路径(后台任务通知/
+        // subagent supervisor)不得在无用户消息的情况下继续 run —— 通知
+        // 留在队列,随下一次用户发起的 run 启动时注入
+        if self.budget_paused.load(Ordering::SeqCst) {
+            return Err(AgentError::BudgetPaused);
+        }
         let last_is_assistant = self
             .state
             .lock()
@@ -393,6 +410,7 @@ impl Agent {
         state.error_message = None;
         drop(state);
         self.clear_all_queues();
+        self.budget_paused.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -515,6 +533,12 @@ impl Agent {
                 if let RunStop::Error(message) = &output.stop {
                     self.state.lock().unwrap().error_message = Some(message.clone());
                 }
+                // 工具调用预算暂停:置位闩锁门控 continue_run(自动唤醒
+                // 路径),用户下一条 prompt 清除
+                self.budget_paused.store(
+                    output.stop == RunStop::BudgetExhausted(BudgetKind::MaxToolCalls),
+                    Ordering::SeqCst,
+                );
                 Ok(output.stop)
             }
             Err(panic) => {

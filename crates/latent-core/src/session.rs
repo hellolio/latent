@@ -635,6 +635,8 @@ impl AgentSession {
             Ok(stop) => Ok(Some(stop)),
             Err(CoreError::Agent(AgentError::NothingToContinue)) => Ok(None),
             Err(CoreError::Agent(AgentError::AlreadyRunning)) => Ok(None),
+            // 工具轮数超限暂停:滞留通知留队,由下一次用户消息的 run 消化
+            Err(CoreError::Agent(AgentError::BudgetPaused)) => Ok(None),
             Err(error) => Err(error),
         }
     }

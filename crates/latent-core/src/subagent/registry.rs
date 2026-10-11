@@ -414,7 +414,11 @@ async fn deliver_batch(
     // 已有活动 run(用户恰在交互)时失败:通知已在 follow_up 队列,
     // 下一停止点由循环整流消费
     match agent.continue_run().await {
-        Ok(_) | Err(AgentError::AlreadyRunning) | Err(AgentError::NothingToContinue) => {}
+        // BudgetPaused:工具轮数超限暂停,通知留队随下一次用户发起的 run 注入
+        Ok(_)
+        | Err(AgentError::AlreadyRunning)
+        | Err(AgentError::NothingToContinue)
+        | Err(AgentError::BudgetPaused) => {}
         Err(error) => eprintln!("[latent][subagent] wake continue failed: {error}"),
     }
     pending.fetch_sub(batch_len, Ordering::SeqCst);

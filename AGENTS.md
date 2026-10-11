@@ -77,11 +77,11 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 
 | 文件 | 说明 |
 |---|---|
-| `src/loop_.rs` | 核心循环（1800+ 行）：显式 `Phase` 状态机（AwaitingRequest/Streaming/ExecutingTools/Settling/Done）；mpsc steering/follow-up 注入通道；run 启动即拾取已排队的 follow_up（空闲唤醒首轮不盲转）；注入顺序 steering（用户插话）→ follow-up（通知）→ prepared/新请求；`TurnLimits` 五项护栏（max_turns/max_tool_calls/max_total_tokens/deadline/max_truncation_retries）超限 → 可区分的 `RunStop::BudgetExhausted`；并行工具批执行（事件入队主任务串行派发）；jsonschema 参数校验；超长 tool result 头 60%/尾 40% 裁剪 |
-| `src/agent.rs` | `Agent` 有状态薄壳：`run_with_lifecycle`（watch streaming 标志、panic 捕获合成 error 消息）、`steer`/`follow_up`/`wait_idle`（零轮询）、overflow 恢复用的 `trim_oldest_messages` |
+| `src/loop_.rs` | 核心循环（1800+ 行）：显式 `Phase` 状态机（AwaitingRequest/Streaming/ExecutingTools/Settling/Done）；mpsc steering/follow-up 注入通道；run 启动即拾取已排队的 follow_up（空闲唤醒首轮不盲转）；注入顺序 steering（用户插话）→ follow-up（通知）→ prepared/新请求；`TurnLimits` 五项护栏（max_turns/max_tool_calls/max_total_tokens/deadline/max_truncation_retries）超限 → 可区分的 `RunStop::BudgetExhausted`；max_tool_calls 按轮计（一批并行调用算一轮）：达到 3/4 上限在工具结果后注入 user 收敛提示（每次 run 一次），超过上限则暂停 run（held 工具结果留转录、不发模型可见通知，等用户下一条消息开新 run）；并行工具批执行（事件入队主任务串行派发）；jsonschema 参数校验；超长 tool result 头 60%/尾 40% 裁剪 |
+| `src/agent.rs` | `Agent` 有状态薄壳：`run_with_lifecycle`（watch streaming 标志、panic 捕获合成 error 消息）、`steer`/`follow_up`/`wait_idle`（零轮询）、overflow 恢复用的 `trim_oldest_messages`；预算暂停闩锁（超限置位 → `continue_run` 拒绝 `AgentError::BudgetPaused`，自动唤醒路径统一门控、通知留队；`prompt`/`reset` 解除） |
 | `src/tool.rs` | 接缝 #3：`trait Tool`（name/schema/execution_mode/prompt_snippet/execute）；错误走 `Err(ToolError)` 不编码进 content；`ToolOutput.terminate` 提前结束 |
 | `src/hooks.rs` | 接缝 #2：`trait LoopHooks`（唯一必填 `convert_to_llm`，不得 panic）；`ToolBlock`（block 拦截 / args 改参两用）；`PassthroughHooks` 把 BashExecution/BranchSummary/CompactionSummary 包成 XML user 消息 |
-| `src/event.rs` | `AgentEvent` 10 种 + `MessageDeltaPayload` 类型化增量 + `SharedPartial` 流式快照读口；`trait Subscriber` 串行 await 按订阅序保序 |
+| `src/event.rs` | `AgentEvent` 11 种（含预算暂停 `tool_budget_paused`）+ `MessageDeltaPayload` 类型化增量 + `SharedPartial` 流式快照读口；`trait Subscriber` 串行 await 按订阅序保序 |
 | `src/message.rs` | `AgentMessage`：user/assistant/toolResult + 五个自定义变体（BashExecution/BranchSummary/CompactionSummary/ModeSection/Custom 逃生口） |
 | `tests/loop_integration.rs` | 循环集成测试（1500+ 行）：工具配对不变量（每 toolCall 恰一 toolResult，abort/panic/截断路径无缺口）、I3 硬退出 requeue、I4 并行双保序、I5 截断防振荡、护栏各项、转录纯净性 |
 | `tests/loop_properties.rs` | proptest property test：随机 turn 序列下配对/双保序/abort 配对/截断防振荡不变量 |
@@ -103,7 +103,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | 文件 | 说明 |
 |---|---|
 | `src/lib.rs` | `ToolRegistry`（装配期注册、重名 panic、运行期只读）+ 工具集工厂：默认集 read/bash/edit/write、只读集 read/grep/find/ls、全量 8 工具；装配层武装后台化时随 bash 追加注册 task_status |
-| `src/background.rs` | 后台任务登记表 `BackgroundTaskRegistry`（task id `bash-{n}` 单调分配，主会话与 subagent 池共享实例）+ `task_status` 工具三动作：`status`（查询是否完成）/`result`（取已完成任务的结果，**取到即消费完成通知**；未完成返回仍在执行中）/`kill`（终止模型自己转后台的任务，等待退出≤2s）+ `AgentFollowUpNotifier`（完成通知投递器：入队时消费检查 → follow_up → 仅空闲时 continue_run，忙时留队由下一轮边界拾取；通知为纯指引——只含状态与 task_status 取结果指令，不含输出；agent 弱引由装配层回填） |
+| `src/background.rs` | 后台任务登记表 `BackgroundTaskRegistry`（task id `bash-{n}` 单调分配，主会话与 subagent 池共享实例）+ `task_status` 工具三动作：`status`（查询是否完成）/`result`（取已完成任务的结果，**取到即消费完成通知**；未完成返回仍在执行中）/`kill`（终止模型自己转后台的任务，等待退出≤2s）+ `AgentFollowUpNotifier`（完成通知投递器：入队时消费检查 → follow_up → 仅空闲时 continue_run（预算暂停闩锁置位时被拒，通知留队随下一次用户发起的 run 注入），忙时留队由下一轮边界拾取；通知为纯指引——只含状态与 task_status 取结果指令，不含输出；agent 弱引由装配层回填） |
 | `src/read.rs` | read 工具：1 起始 offset/limit 切片、截断附续读提示、图片/二进制拒绝 |
 | `src/bash.rs` | bash/powershell 共用工厂：流式输出、超时/中止杀进程树（Unix `process_group(0)` + kill(-pgid)，含孙进程）、默认超时（600s，`ShellTimeoutPolicy`）与自动转后台（生效超时**严格大于**阈值 300s 才武装；显式 timeout ≤ 阈值恒按超时杀灭；转后台时结算 tool result「Task started / Task ID」、watcher 托管进程、登记进 `BackgroundTaskRegistry`、完成经 `BackgroundNotifier` 投递；watcher 收割带 500ms `try_wait` 兜底轮询防 SIGCHLD 唤醒丢失）、LATENT_* 环境注入（不覆盖已有变量）、commandPrefix 前置、`ShellSpawnHook` 改写/拒绝、沙箱拒绝事后提示；**工具结果字节级保真不净化** |
 | `src/edit.rs` | 多点精确替换（每个 oldText 在原文件中唯一、互不重叠），BOM/行尾保持 |
@@ -268,7 +268,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 
 | 文件 | 位置 | 内容 |
 |---|---|---|
-| settings.json | `<数据目录>/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 600）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 300）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`compaction`（`reserveTokens` = 窗口百分比小数，默认 0.05 = 5%；出界值 ≥1 告警并回退默认；`keepRecentTokens` 保留近期原文 token 数）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
+| settings.json | `<数据目录>/settings.json` | `mcpServers`（MCP 扩展声明）、`commandPrefix`、`bashTimeoutSecs`（bash 默认超时，默认 600）、`backgroundAfterSecs`（bash 自动转后台阈值，默认 300）、`tools`（空数组 = 不激活任何工具）、`toolResultMaxChars`（默认 20000）、`maxToolCalls`（Plan 模式工具轮预算，默认 30，0 = 关闭；达到 3/4 注入收敛提示，超过暂停等用户确认）、`compaction`（`reserveTokens` = 窗口百分比小数，默认 0.05 = 5%；出界值 ≥1 告警并回退默认；`keepRecentTokens` 保留近期原文 token 数）、`sessionMode`、`headlessApproval`/`subagentAsyncApproval`（默认 deny，fail-closed）、`sandbox`、`approval`、`theme`、`tuiMode`（fullscreen = 默认 alternate screen 输入区钉底；regular = 终端 scrollback；`--tui-mode` 参数优先）、`ctrlXCopy`（Ctrl+X 复制开关,默认 true）、`copyOnSelect`（选中后自动复制,默认 false;选择/高亮/Ctrl+X 复制互不影响） |
 | .latentignore | 项目 `<cwd>/.latentignore` / 全局 `<数据目录>/.latentignore` | AI 检索忽略规则（gitignore 语法，格式同 .gitignore）：grep/find/ls/@文件弹窗过滤 + 系统提示词规则。全局在前、项目在后拼接，gitignore 语义 last-match-wins——项目可用 `!` 反选全局规则。文件缺失静默跳过，坏行诊断后跳过；无任何规则 = 不做额外过滤（`.git` 由工具层恒排除，遍历仍自带 .gitignore 感知）。启动时读一次，中途修改不生效；不支持子目录级 `.latentignore` |
 | models.json | `<数据目录>/models.json` | 自定义 provider/model 覆盖（baseUrl、定价、compat）；apiKey 值优先按环境变量名解析；顶层 `showBuiltinModels: false` 时 /model 候选不追加内置 provider 默认表（缺省 true）；/model 选择器末尾内置「添加模型」表单与「编辑 models.json」（$EDITOR：LATENT_EDITOR > VISUAL > EDITOR > vi）两个配置入口，写回后热重载。项目 `.latent/models.json` 不再读取或写入 |
 | web-search.json | `<数据目录>/web-search.json` | 各搜索 provider key（支持 `$ENV`/`!shell` 来源）、searchRouting fallback、maxInlineContentChars、proxy、cache |
