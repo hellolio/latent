@@ -238,6 +238,9 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [ ] 上下文超过指定值也没有触发压缩
  - [x] models.json只看个人根目录，不需要看项目根目录（已推广到 settings.json / gateway.json / web-search.json，项目级不再读取）
  - [ ] /compact命令可以设置压缩方式（auto，super？）
+ - [ ] /model切换模型后，settings.json没有更新
+ - [ ] 左下角显示的运行时间没有头比如：runtime 5s,且应该显示在最左边，而不是第三的位置（⌛️ 5.5s | TPS 65.5 tok/s · TTFT 4.1s │ ↑ 4.1k │ ↓ 94 │ reasoning 44）
+ - [ ] 左下角的waiting xxx是彩色的，改成黑白
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 

@@ -32,8 +32,9 @@ impl UsageTracker {
 
 /// 单回合用量行(定稿后随转录落盘,裸行无外框):样式与 footer 右侧
 /// token 段一致(同图标同配色,见 latent_tui::footer::turn_usage_line)。
-/// `speed` = 本回合 (输出速度 tok/s, 首 token 延迟 s),置於行首;
-/// `total` = 整个 run 的总耗时秒数(仅末条用量行传 Some,见 handlers)。
+/// `total` = 整个 run 的总耗时秒数(仅末条用量行传 Some,见 handlers),
+/// Some 时置於行首(`⌛ 13.5s`);`speed` = 本回合 (输出速度 tok/s,
+/// 首 token 延迟 s),紧随其后。
 pub fn usage_line(
     usage: &latent_ai::Usage,
     cache_reported: bool,
@@ -177,15 +178,15 @@ mod tests {
     #[test]
     fn usage_line_speed_prefix() {
         let theme = latent_tui::Theme::dark_ansi();
-        // 有计时数据:行首为速度段,与后续 token 段以 │ 分隔
+        // 有计时数据(中间轮次,无总耗时):行首为速度段,与后续 token 段以 │ 分隔
         let line = usage_line(&usage(), false, Some((12.84, 6.03)), None, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s"), "{text}");
+        assert!(text.starts_with("TPS 12.8 tok/s · TTFT 6.0s"), "{text}");
         assert!(text.contains(" │ ↑ 115"), "{text}");
         // 速度段双色:TPS 与 ↓ 段同色(usage_output),TTFT 与 ↑ 段同色
         // (usage_input),不再是全灰
         let tps = line.spans.first().unwrap();
-        assert_eq!(tps.content, "> TPS 12.8 tok/s");
+        assert_eq!(tps.content, "TPS 12.8 tok/s");
         assert_eq!(tps.style.fg, Some(theme.usage_output));
         let ttft = line.spans.get(1).unwrap();
         assert_eq!(ttft.content, " · TTFT 6.0s");
@@ -193,13 +194,14 @@ mod tests {
     }
 
     #[test]
-    fn usage_line_total_duration_suffix() {
+    fn usage_line_total_duration_prefix() {
         let theme = latent_tui::Theme::dark_ansi();
-        // 末条用量行带整个 run 的总耗时:紧随速度段,dim 弱化
+        // 末条用量行带整个 run 的总耗时:提到行首(裸沙漏 + 时长,dim 弱化),
+        // 与速度段、token 段以 │ 分隔
         let line = usage_line(&usage(), false, Some((12.84, 6.03)), Some(13.5), &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s · 13.5s │ ↑ 115"),
+            text.starts_with("⌛ 13.5s │ TPS 12.8 tok/s · TTFT 6.0s │ ↑ 115"),
             "{text}"
         );
         let total = line
@@ -208,10 +210,14 @@ mod tests {
             .find(|s| s.content.contains("13.5s"))
             .unwrap();
         assert_eq!(total.style.fg, Some(theme.dim));
-        // 中间轮次(total=None):与现状一致,无耗时
+        // 中间轮次(total=None):无耗时段,行首直接是速度段
         let line = usage_line(&usage(), false, Some((12.84, 6.03)), None, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s │ ↑ 115"), "{text}");
+        assert!(text.starts_with("TPS 12.8 tok/s · TTFT 6.0s │ ↑ 115"), "{text}");
+        // 无速度段时总耗时仍单独显示,不吞掉
+        let line = usage_line(&usage(), false, None, Some(2.0), &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("⌛ 2.0s │ ↑ 115"), "{text}");
     }
 
     #[test]

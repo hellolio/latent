@@ -443,6 +443,7 @@ async fn handle_select_key(
                             if let Some(model) = models.get(index) {
                                 ctx.session.current().set_model(model.clone()).await;
                                 refresh_footer(ctx, state);
+                                persist_default_model(state, model);
                                 state.status = Status::Idle;
                                 state.commit_ephemeral(warning_line_theme(
                                     &format!("model → {}", state.model_label),
@@ -951,6 +952,7 @@ pub async fn execute_command(
                 let resolved = ctx.resolver.read().unwrap().resolve(&spec);
                 match resolved {
                     Ok(model) => {
+                        persist_default_model(state, &model);
                         ctx.session.current().set_model(model).await;
                         refresh_footer(ctx, state);
                         state.status = Status::Idle;
@@ -1290,6 +1292,7 @@ async fn apply_context_window(
     match resolved {
         Ok(new_model) => {
             let effective = new_model.context_window;
+            persist_default_model(state, &new_model);
             ctx.session.current().set_model(new_model).await;
             refresh_footer(ctx, state);
             state.status = Status::Idle;
@@ -1398,6 +1401,23 @@ fn apply_setting_selection(state: &mut InteractiveState, index: usize) {
 fn persist_setting(state: &mut InteractiveState, key: &str, value: serde_json::Value) {
     let dir = latent_core::latent_dir(state.home.as_deref());
     if let Err(e) = latent_core::write_setting_field(dir.as_deref(), key, value) {
+        state.commit_ephemeral(view::error_line(
+            &format!("写入 settings.json 失败: {e}"),
+            &state.theme,
+        ));
+    }
+}
+
+/// 模型切换落盘:全局 settings.json 的 defaultProvider/defaultModel 同步
+/// 更新(下次启动即默认新模型;子 agent 会话与主会话一视同仁)。失败仅
+/// 提示,不阻断切换。
+fn persist_default_model(state: &mut InteractiveState, model: &latent_ai::Model) {
+    let dir = latent_core::latent_dir(state.home.as_deref());
+    let provider = serde_json::Value::from(model.provider.as_str());
+    let model_id = serde_json::Value::from(model.id.as_str());
+    if let Err(e) = latent_core::write_setting_field(dir.as_deref(), "defaultProvider", provider)
+        .and_then(|()| latent_core::write_setting_field(dir.as_deref(), "defaultModel", model_id))
+    {
         state.commit_ephemeral(view::error_line(
             &format!("写入 settings.json 失败: {e}"),
             &state.theme,

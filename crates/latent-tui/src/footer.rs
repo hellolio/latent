@@ -211,10 +211,10 @@ fn usage_segments(data: &FooterData, theme: &Theme) -> Vec<Span<'static>> {
 
 /// 单回合用量行参数(转录定稿后落盘;末条额外带整个 run 的总耗时):图标与
 /// 配色与 footer 右侧 token 段一致,额外带 reasoning 段(footer 不显示);
-/// `speed` 为本回合的输出速度与首 token 延迟(Some 时置於行首,
-/// `> TPS 12.8 tok/s · TTFT 6.0s`,TPS 与 ↓ 同色、TTFT 与 ↑ 同色);
-/// `total` 为**整个 run 的总耗时秒数**(Some 时紧随速度段,` · 12.3s`;
-/// 仅末条用量行携带,见 handlers)。
+/// `total` 为**整个 run 的总耗时秒数**(Some 时置於行首,`⌛ 12.3s`,无色
+/// dim 弱化;仅末条用量行携带,见 handlers);
+/// `speed` 为本回合的输出速度与首 token 延迟(Some 时紧随其后,
+/// `TPS 12.8 tok/s · TTFT 6.0s`,TPS 与 ↓ 同色、TTFT 与 ↑ 同色)。
 pub struct TurnUsageLine<'a> {
     pub input: u64,
     pub output: u64,
@@ -255,27 +255,28 @@ pub fn turn_usage_line(params: TurnUsageLine<'_>) -> Line<'static> {
         ..FooterData::default()
     };
     let mut spans: Vec<Span<'static>> = Vec::new();
+    // 整个 run 的总耗时(仅末条用量行携带)提到行首:裸沙漏 + 时长,dim
+    // 弱化(不带色)。速度段缺失(无流式计时)时仍单独显示,不吞掉耗时。
+    if let Some(seconds) = total {
+        spans.push(Span::styled(
+            format!("⌛ {}", format_duration(seconds)),
+            dim,
+        ));
+    }
     if let Some((tps, ttft)) = speed {
         // 速度段双色且与 token 段语义成对:TPS(输出速度)与 ↓ 同色,
         // TTFT(prefill 延迟)与 ↑ 同色
+        if !spans.is_empty() {
+            spans.push(Span::styled(" │ ".to_string(), dim));
+        }
         spans.push(Span::styled(
-            format!("> TPS {tps:.1} tok/s"),
+            format!("TPS {tps:.1} tok/s"),
             Style::new().fg(theme.usage_output),
         ));
         spans.push(Span::styled(
             format!(" · TTFT {ttft:.1}s"),
             Style::new().fg(theme.usage_input),
         ));
-    }
-    // 整个 run 的总耗时(仅末条用量行携带):dim 弱化。速度段缺失(无
-    // 流式计时)时仍单独显示,不吞掉耗时。
-    if let Some(seconds) = total {
-        let text = if spans.is_empty() {
-            format_duration(seconds)
-        } else {
-            format!(" · {}", format_duration(seconds))
-        };
-        spans.push(Span::styled(text, dim));
     }
     let segments = usage_segments(&data, theme);
     if !spans.is_empty() && !segments.is_empty() {
@@ -670,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_usage_line_appends_total_duration_after_ttft() {
+    fn turn_usage_line_prefers_total_duration_at_line_start() {
         let theme = theme();
         let line = turn_usage_line(TurnUsageLine {
             input: 115,
@@ -685,14 +686,18 @@ mod tests {
             theme: &theme,
         });
         let text = line_text(&line);
-        assert!(text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s · 42.5s"), "{text}");
+        assert!(
+            text.starts_with("⌛ 42.5s │ TPS 12.8 tok/s · TTFT 6.0s"),
+            "{text}"
+        );
         let total_span = line
             .spans
             .iter()
             .find(|s| s.content.contains("42.5s"))
             .unwrap_or_else(|| panic!("总耗时段应独立成 span"));
         assert_eq!(total_span.style.fg, Some(theme.dim), "总耗时用 dim 弱化");
-        // 无总耗时(中间轮次):速度段与 token 段直接以 │ 分隔,不出现耗时
+        // 无总耗时(中间轮次):行首直接是速度段(无 `>` 前缀),与 token 段
+        // 以 │ 分隔,不出现耗时
         let line = turn_usage_line(TurnUsageLine {
             input: 115,
             output: 20,
@@ -706,7 +711,7 @@ mod tests {
             theme: &theme,
         });
         let text = line_text(&line);
-        assert!(text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s │ ↑ 115"), "{text}");
+        assert!(text.starts_with("TPS 12.8 tok/s · TTFT 6.0s │ ↑ 115"), "{text}");
         // 速度段缺失(无流式计时)时耗时不吞:单独出现在行首
         let line = turn_usage_line(TurnUsageLine {
             input: 115,
@@ -721,7 +726,7 @@ mod tests {
             theme: &theme,
         });
         let text = line_text(&line);
-        assert!(text.starts_with("2.5s │ ↑ 115"), "{text}");
+        assert!(text.starts_with("⌛ 2.5s │ ↑ 115"), "{text}");
     }
 
     #[test]

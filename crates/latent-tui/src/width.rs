@@ -10,8 +10,13 @@ pub fn char_width(c: char) -> usize {
     if (0x0300..=0x036F).contains(&cp) || (0x200B..=0x200F).contains(&cp) || cp == 0x00AD {
         return 0;
     }
+    // 变体选择符 VS16(U+FE0F):促成前字符的 emoji 呈现,自身不占列
+    if cp == 0xFE0F {
+        return 0;
+    }
     // 全角/CJK 常用区间(GBK 兼容区、CJK 统一表意、扩展 A、兼容表意、全角形式)
     if (0x1100..=0x115F).contains(&cp) // Hangul Jamo
+        || (0x231A..=0x231B).contains(&cp) // 手表/沙漏(emoji 呈现宽 2)
         || (0x2E80..=0x303E).contains(&cp) // CJK 部首/符号
         || (0x3041..=0x33FF).contains(&cp) // 假名/注音/兼容
         || (0x3400..=0x4DBF).contains(&cp) // CJK 扩展 A
@@ -147,6 +152,13 @@ mod tests {
     fn combining_marks_are_zero_width() {
         assert_eq!(char_width('\u{0301}'), 0);
         assert_eq!(display_width("e\u{0301}"), 1);
+    }
+
+    #[test]
+    fn hourglass_is_wide_and_vs16_zero() {
+        // 用量行行首沙漏:U+231B emoji 呈现宽 2,变体选择符 VS16 不占列
+        assert_eq!(char_width('⌛'), 2);
+        assert_eq!(display_width("⌛\u{FE0F} 13.5s"), 8);
     }
 
     #[test]

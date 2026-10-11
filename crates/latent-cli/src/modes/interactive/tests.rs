@@ -1196,6 +1196,50 @@ async fn execute_model_with_arg_updates_footer() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // LatentHome 守卫串行隔离 LATENT_HOME
+async fn model_switch_persists_defaults_to_settings_json() {
+    let home = LatentHome::new("model_persist");
+
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+
+    // /model <spec> 直切:settings.json 同步写入 defaultProvider/defaultModel
+    super::handlers::execute_command(
+        &ctx,
+        &mut state,
+        slash::SlashAction::Model {
+            arg: Some("deepseek/deepseek-chat".into()),
+        },
+    )
+    .await;
+    let text = std::fs::read_to_string(home.dir.join("settings.json")).unwrap();
+    assert!(text.contains("\"defaultProvider\": \"deepseek\""), "{text}");
+    assert!(text.contains("\"defaultModel\": \"deepseek-chat\""), "{text}");
+
+    // 选择器切换:走真实按键路径,settings.json 跟随新模型
+    super::handlers::execute_command(&ctx, &mut state, slash::SlashAction::Model { arg: None })
+        .await;
+    {
+        let select = state.select.as_mut().expect("应打开模型选择器");
+        select.list.selected = if select.list.selected == 0 { 1 } else { 0 };
+    }
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    let (provider, id) = state.model_label.split_once('/').unwrap();
+    let text = std::fs::read_to_string(home.dir.join("settings.json")).unwrap();
+    assert!(
+        text.contains(&format!("\"defaultProvider\": \"{provider}\"")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("\"defaultModel\": \"{id}\"")),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn execute_model_without_arg_opens_selector_at_current_model() {
     let built = built_memory_session().await;
     let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());

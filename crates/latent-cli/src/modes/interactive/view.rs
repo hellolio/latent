@@ -527,33 +527,26 @@ pub fn viewport(
     }
 }
 
-/// 状态行(Codex 风格:busy 时一行带彩色渐变与 `esc to interrupt` 提示,
-/// 紧贴最近的模型/工具输出下方;idle 不占行——输出→输入框的间隔恒为
-/// 两行空行)。等待态文字逐字符在彩色光谱上取色,色相随位置渐变、
-/// 随 spinner 拍数向右扫动。
+/// 状态行(Codex 风格:busy 时一行带 `esc to interrupt` 提示,紧贴最近的
+/// 模型/工具输出下方;idle 不占行——输出→输入框的间隔恒为两行空行)。
+/// 等待态文字底色黄,一道白色光柱随 spinner 拍数自左向右扫过,窗口内
+/// 字符变白、扫过即恢复黄色。
 fn status_line(state: &InteractiveState) -> Vec<UiLine> {
     let theme = &state.theme;
     let secs = state.spin * super::SPINNER_INTERVAL.as_millis() as usize / 1000;
-    let (color, text) = match &state.status {
+    let text = match &state.status {
         Status::Idle => return Vec::new(),
-        Status::Thinking => (
-            theme.spinner,
-            format!(
-                "{} Working ({secs}s · esc to interrupt)",
-                loader::frame(state.spin)
-            ),
+        Status::Thinking => format!(
+            "{} Working ({secs}s · esc to interrupt)",
+            loader::frame(state.spin)
         ),
-        Status::Tool(name) => (
-            theme.tool_pending,
-            format!(
-                "{} Running {name} ({secs}s · esc to interrupt)",
-                loader::frame(state.spin)
-            ),
+        Status::Tool(name) => format!(
+            "{} Running {name} ({secs}s · esc to interrupt)",
+            loader::frame(state.spin)
         ),
-        Status::Compacting => (
-            theme.spinner,
-            format!("{} Compacting history", loader::frame(state.spin)),
-        ),
+        Status::Compacting => {
+            format!("{} Compacting history", loader::frame(state.spin))
+        }
         Status::Bash { command, bang_bang } => {
             let prefix = if *bang_bang { "!!" } else { "!" };
             return vec![Line::from(Span::styled(
@@ -574,25 +567,42 @@ fn status_line(state: &InteractiveState) -> Vec<UiLine> {
     } else {
         format!("{text} · writing…")
     };
-    // codex 式渐变:整行文字在彩色光谱上取色,色相随位置渐变、波峰随
-    // spinner 拍数向右扫动(真彩色主题;ANSI 兜底退化为状态色单色)
-    let anchors = theme.gradient_anchors();
+    // 黄底白光柱:整行文字底色黄,白色光柱随拍数从左到右扫过
     let chars: Vec<char> = text.chars().collect();
-    let n = chars.len().max(1) as f32;
-    let phase = (state.spin % 24) as f32 / 24.0;
+    let beam = beam_position(state.spin, chars.len() as f32);
     let spans: Vec<Span<'static>> = chars
         .into_iter()
         .enumerate()
         .map(|(i, c)| {
-            let color = latent_tui::theme::gradient_at(
-                &anchors,
-                i as f32 / n + phase,
+            Span::styled(
+                c.to_string(),
+                Style::new().fg(beam_color(theme.warning, beam, i as f32)),
             )
-            .unwrap_or(color);
-            Span::styled(c.to_string(), Style::new().fg(color))
         })
         .collect();
     vec![Line::from(spans)]
+}
+
+/// 光柱半宽(字符数):距中心 ≤ 半宽的字符呈白色。
+const BEAM_HALF_WIDTH: f32 = 3.0;
+/// 光柱扫过一轮的 spinner 拍数(120ms/拍 ≈ 2.2s 一轮)。
+const BEAM_CYCLE_TICKS: usize = 18;
+
+/// 光柱中心在字符坐标上的位置:随拍数自左向右线性推进,一个周期从屏外
+/// 左侧走到屏外右侧(两端各留半宽 + 1 的出屏余量,避免首尾字符常亮)。
+fn beam_position(spin: usize, len: f32) -> f32 {
+    let phase = (spin % BEAM_CYCLE_TICKS) as f32 / BEAM_CYCLE_TICKS as f32;
+    let travel = len + 2.0 * (BEAM_HALF_WIDTH + 1.0);
+    -(BEAM_HALF_WIDTH + 1.0) + phase * travel
+}
+
+/// 光柱配色:距光柱中心 ≤ 半宽的字符白色,其余黄色(扫过即恢复)。
+fn beam_color(base: ratatui::style::Color, beam: f32, pos: f32) -> ratatui::style::Color {
+    if (pos - beam).abs() <= BEAM_HALF_WIDTH {
+        ratatui::style::Color::White
+    } else {
+        base
+    }
 }
 
 fn truncate_plain(text: &str, width: usize) -> String {
@@ -1193,6 +1203,55 @@ mod tests {
         assert!(texts.iter().any(|t| t.contains("line2")));
         assert!(texts.iter().any(|t| t.contains("line3")));
         assert!(!texts.iter().any(|t| t.contains("line1")), "{texts:?}");
+    }
+
+    #[test]
+    fn status_line_beam_is_yellow_with_white_window() {
+        let mut state = state();
+        state.status = Status::Thinking;
+        // 首拍:光柱在屏外左侧,全行黄色(无白色)
+        state.spin = 0;
+        let spans = &status_line(&state)[0].spans;
+        assert!(
+            spans
+                .iter()
+                .all(|s| s.style.fg == Some(state.theme.warning)),
+            "首拍应全黄"
+        );
+        // 中段拍数:光柱在行内,存在白色窗口,窗口外仍是黄色
+        state.spin = 9;
+        let spans = &status_line(&state)[0].spans;
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.style.fg == Some(ratatui::style::Color::White)),
+            "中段应出现白色光柱"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.style.fg == Some(state.theme.warning)),
+            "窗口外应保持黄色"
+        );
+    }
+
+    #[test]
+    fn beam_color_window_is_white_and_reverts() {
+        let base = ratatui::style::Color::Yellow;
+        assert_eq!(beam_color(base, 10.0, 8.0), ratatui::style::Color::White);
+        // 窗口边界(距中心恰好半宽)内为白,超出即恢复黄
+        assert_eq!(beam_color(base, 10.0, 13.0), ratatui::style::Color::White);
+        assert_eq!(beam_color(base, 10.0, 14.0), base);
+    }
+
+    #[test]
+    fn beam_sweeps_offscreen_without_end_char_stuck() {
+        let len = 20.0;
+        // 首拍:光柱中心在屏外左侧,首字符仍是黄色
+        assert!((0.0f32 - beam_position(0, len)).abs() > BEAM_HALF_WIDTH);
+        // 末拍:光柱已越过行尾,末字符恢复黄色
+        let end = beam_position(BEAM_CYCLE_TICKS - 1, len);
+        assert!((len - 1.0 - end).abs() > BEAM_HALF_WIDTH);
     }
 
     #[test]
