@@ -74,6 +74,16 @@ pub enum ToolStatus {
     Error,
 }
 
+/// 暂存的末轮用量行参数:整个 run 的总耗时只在 AgentSettled 可知,故无工具
+/// 结果的末轮把用量行暂存到 settle 再提交(见 handlers::flush_pending_usage)。
+pub struct PendingUsage {
+    pub usage: latent_ai::Usage,
+    /// 本回合 (输出速度 tok/s, 首 token 延迟 s);None = 不显示速度段
+    pub speed: Option<(f64, f64)>,
+    /// 紧随用量行之后的提示(截断告警);None = 无
+    pub trailing: Option<String>,
+}
+
 impl From<ToolStatus> for latent_tui::tool_card::ToolStatus {
     fn from(status: ToolStatus) -> Self {
         match status {
@@ -99,6 +109,8 @@ pub enum SelectKind {
     },
     /// 内部选择器(/thinking)
     Thinking,
+    /// 内部选择器(/context):四档上下文窗口(默认 / 128k / 256k / 1m)
+    Context,
     /// 内部选择器(/theme):携带候选主题枚举
     Theme { names: Vec<latent_tui::ThemeName> },
     /// 内部选择器(/setting):全屏模式 / 复制快捷键 / 鼠标选中复制
@@ -434,6 +446,12 @@ pub struct InteractiveState {
     /// 最近一回合输出速度(tok/s)与首 token 延迟(秒),用量行展示
     pub last_tps: Option<f64>,
     pub last_ttft: Option<f64>,
+    /// 本 run 首个请求发出时刻(整个用户回合总耗时的起点):首个 assistant
+    /// MessageStart 的 started_at_ms 回推;AgentSettled 结算后清空。
+    pub run_started: Option<Instant>,
+    /// 暂存的末轮用量行:整个 run 的总耗时只在 AgentSettled 可知,故末轮
+    /// (无工具结果)的用量行延后到 settle 提交并带上耗时;中间轮次立即提交。
+    pub pending_usage: Option<PendingUsage>,
     /// 活动选择列表;None = 无交互请求
     pub select: Option<SelectRequest>,
     /// 并发 UI 请求排队(先到先渲染)
@@ -538,6 +556,8 @@ impl InteractiveState {
             first_delta_at: None,
             last_tps: None,
             last_ttft: None,
+            run_started: None,
+            pending_usage: None,
             select: None,
             select_queue: VecDeque::new(),
             model_label: "—".into(),
@@ -637,6 +657,8 @@ impl InteractiveState {
         self.first_delta_at = None;
         self.last_tps = None;
         self.last_ttft = None;
+        self.run_started = None;
+        self.pending_usage = None;
         self.context_tokens = 0;
         self.status = Status::Idle;
         self.needs_full_redraw = true;

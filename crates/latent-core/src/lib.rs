@@ -19,8 +19,8 @@ pub mod system_prompt;
 pub use config::{
     create_model_resolver_from_config, load_ctrl_x_copy_setting, load_default_model_selection,
     load_copy_on_select_setting, load_theme_setting, load_tui_mode_setting,
-    preferred_models_path, upsert_models_json_entry, write_models_template_if_absent,
-    write_setting_field, NewModelEntry,
+    preferred_models_path, upsert_models_json_context_window, upsert_models_json_entry,
+    write_models_template_if_absent, write_setting_field, NewModelEntry,
 };
 pub use extensions::{
     bridge_elicitation, connect_stdio, create_diagnostics_sink, create_extension_event_bus,

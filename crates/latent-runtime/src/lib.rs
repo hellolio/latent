@@ -21,6 +21,7 @@ pub mod facade {
         ApprovalDecision, ApprovalReason, ApprovalRequest, ApprovalUi, AgentSession,
         AgentSessionEvent, McpServerSpec, NoopUi, SessionMode, SessionSharedSubscriber,
         SessionSubscriber, ToolRiskClass, create_model_resolver_from_config, latent_dir,
+        preferred_models_path, upsert_models_json_context_window,
     };
     pub use latent_session::Entry;
 }

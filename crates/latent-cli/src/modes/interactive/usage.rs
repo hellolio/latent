@@ -32,11 +32,13 @@ impl UsageTracker {
 
 /// 单回合用量行(定稿后随转录落盘,裸行无外框):样式与 footer 右侧
 /// token 段一致(同图标同配色,见 latent_tui::footer::turn_usage_line)。
-/// `speed` = 本回合 (输出速度 tok/s, 首 token 延迟 s),置於行首。
+/// `speed` = 本回合 (输出速度 tok/s, 首 token 延迟 s),置於行首;
+/// `total` = 整个 run 的总耗时秒数(仅末条用量行传 Some,见 handlers)。
 pub fn usage_line(
     usage: &latent_ai::Usage,
     cache_reported: bool,
     speed: Option<(f64, f64)>,
+    total: Option<f64>,
     theme: &latent_tui::Theme,
 ) -> Line<'static> {
     latent_tui::footer::turn_usage_line(latent_tui::footer::TurnUsageLine {
@@ -48,6 +50,7 @@ pub fn usage_line(
         cost_total: usage.cost.total,
         cache_reported,
         speed,
+        total,
         theme,
     })
 }
@@ -147,10 +150,10 @@ mod tests {
             ..Default::default()
         };
         let theme = latent_tui::Theme::dark_ansi();
-        let line = usage_line(&zero_cache, true, None, &theme);
+        let line = usage_line(&zero_cache, true, None, None, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("↑ 115 (U 115 / R 0 · 0%)"), "{text}");
-        let line = usage_line(&zero_cache, false, None, &theme);
+        let line = usage_line(&zero_cache, false, None, None, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("↑ 115"), "{text}");
         assert!(!text.contains("R 0"), "{text}");
@@ -159,7 +162,7 @@ mod tests {
     #[test]
     fn usage_line_contains_fields() {
         let theme = latent_tui::Theme::dark_ansi();
-        let line = usage_line(&usage(), false, None, &theme);
+        let line = usage_line(&usage(), false, None, None, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         // 与 footer token 段同格式:↑ 完整 prompt + 缓存明细 U/R 与命中率 +
         // $cost + reasoning
@@ -175,7 +178,7 @@ mod tests {
     fn usage_line_speed_prefix() {
         let theme = latent_tui::Theme::dark_ansi();
         // 有计时数据:行首为速度段,与后续 token 段以 │ 分隔
-        let line = usage_line(&usage(), false, Some((12.84, 6.03)), &theme);
+        let line = usage_line(&usage(), false, Some((12.84, 6.03)), None, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s"), "{text}");
         assert!(text.contains(" │ ↑ 115"), "{text}");
@@ -190,9 +193,31 @@ mod tests {
     }
 
     #[test]
+    fn usage_line_total_duration_suffix() {
+        let theme = latent_tui::Theme::dark_ansi();
+        // 末条用量行带整个 run 的总耗时:紧随速度段,dim 弱化
+        let line = usage_line(&usage(), false, Some((12.84, 6.03)), Some(13.5), &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s · 13.5s │ ↑ 115"),
+            "{text}"
+        );
+        let total = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("13.5s"))
+            .unwrap();
+        assert_eq!(total.style.fg, Some(theme.dim));
+        // 中间轮次(total=None):与现状一致,无耗时
+        let line = usage_line(&usage(), false, Some((12.84, 6.03)), None, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("> TPS 12.8 tok/s · TTFT 6.0s │ ↑ 115"), "{text}");
+    }
+
+    #[test]
     fn usage_line_spans_share_footer_colors() {
         let theme = latent_tui::Theme::dark_ansi();
-        let line = usage_line(&usage(), false, None, &theme);
+        let line = usage_line(&usage(), false, None, None, &theme);
         let input = line
             .spans
             .iter()

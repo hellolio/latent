@@ -116,6 +116,7 @@ latent --continue
 | `/help` | 查看帮助 |
 | `/model` | 切换模型 / 添加自定义模型 |
 | `/thinking [level]` | 调整思考级别 |
+| `/context [默认\|128k\|256k\|1m]` | 查看 / 切换当前模型的上下文窗口（写回 models.json 的 `contextWindow`；裸命令开四档选择器） |
 | `/compact` | 手动压缩上下文 |
 | `/session` | 查看 / 切换会话 |
 | `/fullscreen [on\|off]` | 切换全屏渲染模式 |
@@ -232,8 +233,10 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [x] 模型右下角显示的128k应该是1M
  - [x] 当全屏模式下，滚动屏幕不是最底部时，就加一个回到最底部的按钮（类似pi）
  - [x] 测试大量失败需要解决
- - [ ] 左下角显示当前轮次token消耗情况的地方，加一个显示次轮总耗时
- - [ ] 模型默认上下文上限调整为默认128k，且可通过命令/context来切换大小（128k/256k/1m）
+ - [x] 左下角显示当前轮次token消耗情况的地方，加一个显示次轮总耗时
+ - [x] 模型默认上下文上限调整为默认128k，且可通过命令/context来切换大小（128k/256k/1m）
+ - [ ] 上下文超过指定值也没有触发压缩
+ - [ ] models.json只看个人根目录，不需要看项目根目录
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 

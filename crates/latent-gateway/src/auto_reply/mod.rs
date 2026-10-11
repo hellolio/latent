@@ -28,7 +28,7 @@ use latent_channel::plugin::ChannelHandle;
 use latent_channel::types::{ChatType, InboundMessage, OutboundMessage};
 use latent_runtime::facade::SessionMode;
 use latent_runtime::assembly::switch_new_session;
-
+use latent_runtime::slash;
 use crate::agents::{make_reply_target, ChatSession, ChatSessionRegistry, SessionFactory};
 use crate::approval::ChatApprovalUi;
 use crate::config::{DropPolicy, GatewayConfig, QueueMode};
@@ -814,6 +814,46 @@ impl Gateway {
                     Err(error) => Some(format!("模型切换失败: {error}")),
                 },
             },
+            ChatCommand::Context { arg } => {
+                // 与 /mode 同级:群聊由 owner_only_in_group 权限门拦,私聊不限
+                let Some(model) = agent_session.agent().state_snapshot().model else {
+                    return Some("当前模型未知,无法设置上下文窗口".into());
+                };
+                let Some(arg) = arg else {
+                    return Some(format!(
+                        "当前上下文窗口: {} tokens({}/{};可用: {})",
+                        model.context_window,
+                        model.provider,
+                        model.id,
+                        slash::context_presets_hint()
+                    ));
+                };
+                let Some(window) = slash::parse_context_window(&arg) else {
+                    return Some(format!(
+                        "未知上下文档位: {arg}(可用: {})",
+                        slash::context_presets_hint()
+                    ));
+                };
+                match self.write_context_window(&model, window) {
+                    Ok(path) => {
+                        // 写盘后重建 resolver 再解析:与 /context 在 TUI 的
+                        // 语义一致(写盘即生效),但只切当前会话活模型
+                        let spec = format!("{}/{}", model.provider, model.id);
+                        match self.resolve_model(&spec) {
+                            Ok(new_model) => {
+                                let effective = new_model.context_window;
+                                agent_session.set_model(new_model).await;
+                                Some(format!(
+                                    "上下文窗口已设置: {effective} tokens(models.json:{})",
+                                    path.display()
+                                ))
+                            }
+                            Err(error) => Some(format!("{spec} 写入成功但解析失败: {error}")),
+                        }
+                    }
+                    Err(error) => Some(format!("上下文窗口设置失败: {error}")),
+                }
+            }
             ChatCommand::Thinking { arg } => match arg {
                 None => {
                     let snapshot = agent_session.agent().state_snapshot();
@@ -1011,5 +1051,61 @@ impl Gateway {
         let resolver =
             latent_runtime::facade::create_model_resolver_from_config(Some(&cwd), dir.as_deref());
         resolver.resolve(spec)
+    }
+
+    /// `/context` 写盘:当前工作目录的项目 models.json 优先,否则全局。
+    /// 不重建会话池、不加跨进程锁(后写覆盖,与 /model 同款)。
+    fn write_context_window(
+        &self,
+        model: &latent_runtime::facade::Model,
+        window: Option<u64>,
+    ) -> Result<std::path::PathBuf, String> {
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let dir = latent_runtime::bootstrap::dirs_home()
+            .and_then(|home| latent_runtime::facade::latent_dir(Some(&home)));
+        write_context_window_at(&cwd, dir.as_deref(), model, window)
+    }
+}
+
+/// `/context` 的写盘本体(与 self 无关,cwd / latent 目录显式传入 → 可测):
+/// 项目 `cwd/.latent/models.json` 优先,否则 `latent_dir/models.json`。
+fn write_context_window_at(
+    cwd: &std::path::Path,
+    latent_dir: Option<&std::path::Path>,
+    model: &latent_runtime::facade::Model,
+    window: Option<u64>,
+) -> Result<std::path::PathBuf, String> {
+    let path = latent_runtime::facade::preferred_models_path(Some(cwd), latent_dir);
+    latent_runtime::facade::upsert_models_json_context_window(
+        &path,
+        &model.provider,
+        &model.id,
+        &model.api,
+        window,
+    )?;
+    Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `/context` 写盘落在项目 `.latent/models.json`,`默认` 档删键回落。
+    #[test]
+    fn context_window_writes_project_models_json() {
+        let dir = std::env::temp_dir().join(format!("latent_gw_ctx_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = latent_runtime::facade::Model::minimal("m", "mock", "mock");
+
+        let path = write_context_window_at(&dir, None, &model, Some(256_000)).unwrap();
+        assert_eq!(path, dir.join(".latent/models.json"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("256000"), "写入 contextWindow: {text}");
+
+        write_context_window_at(&dir, None, &model, None).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("contextWindow"), "默认档删键: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

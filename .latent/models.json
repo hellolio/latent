@@ -1,0 +1,22 @@
+{
+  "providers": {
+    "ark": {
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash",
+          "contextWindow": 1000000
+        }
+      ]
+    },
+    "ark_a": {
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "deepseek-v4.1-flash",
+          "contextWindow": 256000
+        }
+      ]
+    }
+  }
+}

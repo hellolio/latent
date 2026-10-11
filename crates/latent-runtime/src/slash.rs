@@ -65,6 +65,11 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "打开设置(全屏模式 / 复制快捷键 / 鼠标选中复制;写入 settings.json)",
     },
     SlashCommand {
+        name: "context",
+        args: "[默认|128k|256k|1m]",
+        description: "查看/切换当前模型的上下文窗口(写入 models.json 的 contextWindow)",
+    },
+    SlashCommand {
         name: "quit",
         args: "",
         description: "退出 latent",
@@ -84,6 +89,7 @@ pub enum SlashAction {
     Subagent { arg: Option<String> },
     Session { arg: Option<String> },
     Setting,
+    Context { arg: Option<String> },
     Quit,
 }
 
@@ -99,6 +105,41 @@ pub const SESSION_VARIANTS: &[(&str, &str)] = &[
     ("list", "切换历史会话(列表选择)"),
     ("info", "显示当前会话信息与统计"),
 ];
+
+/// `/context` 档位表(声明序即选择器展示序):档位名 → `contextWindow` 值;
+/// `None` = 默认档(从 models.json 删除该键,回到「有记载就用记载值,
+/// 否则 128k」)。**档位只有这一处定义**,解析/选择器/提示都从这里派生。
+/// 注:不接补全弹窗的 variants 机制(那会把裸命令替掉,回车必落第一个
+/// 变体即「默认」档);裸 `/context` 开的是标出当前档的选择器。
+pub const CONTEXT_PRESETS: &[(&str, Option<u64>)] = &[
+    ("默认", None),
+    ("128k", Some(128_000)),
+    ("256k", Some(256_000)),
+    ("1m", Some(1_000_000)),
+];
+
+/// `/context` 可用档位清单(错误提示复用;由 CONTEXT_PRESETS 派生)。
+pub fn context_presets_hint() -> String {
+    CONTEXT_PRESETS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// `/context` 参数 → 目标 `contextWindow`:`Some(None)` = 默认档(删键),
+/// `Some(Some(n))` = 写入 n;`None` = 未知档位。档位名大小写不敏感,
+/// 默认档另接受 `default`;预设之外一律拒绝(不解析任意数值)。
+pub fn parse_context_window(arg: &str) -> Option<Option<u64>> {
+    let arg = arg.trim().to_ascii_lowercase();
+    if arg == "default" {
+        return Some(None);
+    }
+    CONTEXT_PRESETS
+        .iter()
+        .find(|(name, _)| *name == arg)
+        .map(|(_, window)| *window)
+}
 
 /// 一行输入的解析结果。
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +185,9 @@ pub fn parse(input: &str) -> SlashInput {
         }),
         "new" => SlashInput::Command(SlashAction::New),
         "setting" => SlashInput::Command(SlashAction::Setting),
+        "context" => SlashInput::Command(SlashAction::Context {
+            arg: arg.map(str::to_string),
+        }),
         "subagent" => SlashInput::Command(SlashAction::Subagent {
             arg: arg.map(str::to_string),
         }),
@@ -228,6 +272,36 @@ mod tests {
             parse("/theme"),
             SlashInput::Command(SlashAction::Theme { arg: None })
         );
+        assert_eq!(
+            parse("/context"),
+            SlashInput::Command(SlashAction::Context { arg: None })
+        );
+        assert_eq!(
+            parse("/context 256k"),
+            SlashInput::Command(SlashAction::Context {
+                arg: Some("256k".into())
+            })
+        );
+    }
+
+    #[test]
+    fn context_preset_parsing() {
+        assert_eq!(context_presets_hint(), "默认|128k|256k|1m");
+        assert_eq!(parse_context_window("默认"), Some(None));
+        assert_eq!(parse_context_window("default"), Some(None));
+        assert_eq!(parse_context_window("128k"), Some(Some(128_000)));
+        assert_eq!(parse_context_window(" 256K "), Some(Some(256_000)));
+        assert_eq!(parse_context_window("1m"), Some(Some(1_000_000)));
+        // 预设之外一律拒绝(不解析任意值)
+        assert_eq!(parse_context_window("300k"), None);
+        assert_eq!(parse_context_window("200000"), None);
+        assert_eq!(parse_context_window("auto"), None);
+        assert_eq!(parse_context_window(""), None);
+        // 档位表与提示同源
+        for (name, window) in CONTEXT_PRESETS {
+            assert_eq!(parse_context_window(name).unwrap(), *window, "{name}");
+            assert!(context_presets_hint().contains(name), "{name}");
+        }
     }
 
     #[test]

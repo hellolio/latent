@@ -406,6 +406,120 @@ pub fn upsert_models_json_entry(path: &Path, entry: &NewModelEntry) -> Result<()
     save_models_file(path, &file)
 }
 
+/// 把某模型的 `contextWindow` upsert 进 models.json 并原子写回(`/context`
+/// 配置入口):`Some(v)` 写入(模型/provider 不存在时新建,api 取 `api`
+/// 参数、baseUrl/apiKey 留空以沿用 provider 级或内置端点);`None` 删除该键
+/// (回到「models.json 有记载就用记载值,否则 128k」),若被删成空条目的
+/// **内置** provider 模型则一并收回(自定义 provider 必须保留条目,否则
+/// 模型再也解析不出来);无变化则不落盘(不为 no-op 凭空建出空文件)。
+pub fn upsert_models_json_context_window(
+    path: &Path,
+    provider_id: &str,
+    model_id: &str,
+    api: &str,
+    context_window: Option<u64>,
+) -> Result<(), String> {
+    let provider_id = provider_id.trim();
+    let model_id = model_id.trim();
+    if provider_id.is_empty() || model_id.is_empty() {
+        return Err("provider 与 model id 不能为空".into());
+    }
+    let mut file = read_models_file(path)?;
+    let provider = match file.providers.get_mut(provider_id) {
+        Some(existing) => existing,
+        None => {
+            let api = api.trim();
+            if api.is_empty() {
+                return Err(format!("新 provider `{provider_id}` 需要指定 api 协议"));
+            }
+            file.providers.insert(
+                provider_id.to_string(),
+                ProviderConfig {
+                    api: Some(api.to_string()),
+                    ..ProviderConfig::default()
+                },
+            );
+            file.providers.get_mut(provider_id).unwrap()
+        }
+    };
+    let mut changed = false;
+    match provider.models.iter_mut().find(|m| m.id == model_id) {
+        Some(existing) => {
+            if existing.context_window != context_window {
+                existing.context_window = context_window;
+                changed = true;
+            }
+            // 清除后已无任何有效字段的空条目(如 /context 早前建起的
+            // `{ id }`)收回,不留痕;但仅限内置 provider —— 自定义 provider
+            // 的模型只能靠 models.json 注册,删掉条目会让当前会话的模型
+            // 再也解析不出来(用户在 models.json 手写的带 name 的条目也不动)
+            let builtin = latent_ai::default_provider_endpoint(provider_id).is_some();
+            if context_window.is_none() && existing.is_bare() && builtin {
+                provider.models.retain(|m| m.id != model_id);
+                changed = true;
+            }
+        }
+        None => {
+            if context_window.is_some() {
+                provider.models.push(ModelConfig {
+                    id: model_id.to_string(),
+                    context_window,
+                    ..ModelConfig::default()
+                });
+                changed = true;
+            }
+        }
+    }
+    // provider 也回到空(无 models 且除 api 外无有效字段)→ 一并收回;
+    // 同样只限内置 provider,自定义 provider 保留以免丢失端点信息
+    let reclaimable = latent_ai::default_provider_endpoint(provider_id).is_some()
+        && file
+            .providers
+            .get(provider_id)
+            .is_some_and(|provider| provider.models.is_empty() && provider.is_reclaimable());
+    if reclaimable {
+        file.providers.remove(provider_id);
+        changed = true;
+    }
+    if !changed {
+        // no-op(如已在目标档位、或「默认」档而文件里本就没这个键):
+        // 不写盘 —— 否则会为一个查询式命令凭空造出空 models.json
+        return Ok(());
+    }
+    save_models_file(path, &file)
+}
+
+impl ModelConfig {
+    /// 除 id/name 外无任何有效字段(且无未知字段)。
+    fn is_bare(&self) -> bool {
+        self.name.is_none()
+            && self.base_url.is_none()
+            && self.api.is_none()
+            && self.api_key.is_none()
+            && self.headers.is_none()
+            && self.compat.is_none()
+            && self.reasoning.is_none()
+            && self.input.is_none()
+            && self.context_window.is_none()
+            && self.max_tokens.is_none()
+            && self.thinking_level_map.is_none()
+            && self.sampling_params.is_none()
+            && self.extra.is_empty()
+    }
+}
+
+impl ProviderConfig {
+    /// 无 models 且除 api 外无任何有效字段(且无未知字段)—— api 单独存在
+    /// 是 no-op,可收回。
+    fn is_reclaimable(&self) -> bool {
+        self.base_url.is_none()
+            && self.api_key.is_none()
+            && self.headers.is_none()
+            && self.compat.is_none()
+            && self.extra.is_empty()
+    }
+}
+
 /// models.json 不存在时的初始模板:一个占位示例 provider,字段齐全、
 /// 保存后即可解析(URL 是占位符,使用前必须改掉)。
 pub fn write_models_template_if_absent(path: &Path) -> Result<bool, String> {
@@ -1005,6 +1119,85 @@ mod tests {
         .unwrap();
         let reloaded = read_models_file(&path).unwrap();
         assert_eq!(reloaded.providers.get("p1").unwrap().models.len(), 2);
+    }
+
+    #[test]
+    fn upsert_context_window_writes_reads_and_clears() {
+        let dir = TempDir::new("ctxwin");
+        let path = dir.0.join(".latent/models.json");
+        dir.write(
+            ".latent/models.json",
+            r#"{ "providers": { "p1": { "baseUrl": "http://p1/v1",
+                "api": "openai-completions", "customField": "keep",
+                "models": [{ "id": "m1", "contextWindow": 128000 }] } } }"#,
+        );
+        // 写入:覆盖已有 contextWindow,其它字段(含未知字段)不动
+        upsert_models_json_context_window(&path, "p1", "m1", "openai-completions", Some(256_000))
+            .unwrap();
+        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        assert_eq!(resolver.resolve("p1/m1").unwrap().context_window, 256_000);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("customField"), "未知字段保留: {text}");
+
+        // 未记载的模型:新建条目(api 取传入值,baseUrl/apiKey 留空 → 沿用内置端点)
+        upsert_models_json_context_window(&path, "p1", "m2", "openai-completions", Some(1_000_000))
+            .unwrap();
+        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        let m2 = resolver.resolve("p1/m2").unwrap();
+        assert_eq!(m2.context_window, 1_000_000);
+        assert_eq!(m2.base_url, "http://p1/v1", "沿用 provider 级 baseUrl");
+
+        // 清除(None):删除 contextWindow 键,模型回落到默认 128k
+        upsert_models_json_context_window(&path, "p1", "m1", "openai-completions", None).unwrap();
+        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        assert_eq!(
+            resolver.resolve("p1/m1").unwrap().context_window,
+            128_000,
+            "删除键后回落默认 128k"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("customField"), "其它字段仍保留: {text}");
+    }
+
+    #[test]
+    fn upsert_context_window_creates_then_reclaims_bare_entry() {
+        // 全新 provider(内置 provider 不在 models.json 时):写入时创建
+        // provider+model;清除时若条目由本次流程创建且已无有效字段,则收回
+        let dir = TempDir::new("ctxwin_new");
+        let path = dir.0.join(".latent/models.json");
+        upsert_models_json_context_window(&path, "anthropic", "claude-x", "anthropic-messages", Some(256_000))
+            .unwrap();
+        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        assert_eq!(resolver.resolve("anthropic/claude-x").unwrap().context_window, 256_000);
+
+        upsert_models_json_context_window(&path, "anthropic", "claude-x", "anthropic-messages", None)
+            .unwrap();
+        let file = read_models_file(&path).unwrap();
+        assert!(
+            !file.providers.contains_key("anthropic"),
+            "空条目与空 provider 应被收回: {file:?}"
+        );
+        // 收回后内置端点仍可解析(未被空 provider 污染)
+        let resolver = create_model_resolver_from_config(Some(&dir.0), Some(&dir.0.join(".latent")));
+        assert_eq!(
+            resolver.resolve("anthropic/claude-x").unwrap().context_window,
+            128_000
+        );
+    }
+
+    #[test]
+    fn upsert_context_window_noop_does_not_write() {
+        // no-op 不落盘:否则一次查询式 /context 会给不认识该模型的项目凭空
+        // 造出一份空 models.json
+        let dir = TempDir::new("ctxwin_noop");
+        let path = dir.0.join(".latent/models.json");
+        upsert_models_json_context_window(&path, "p1", "m1", "openai-completions", None).unwrap();
+        assert!(!path.exists(), "no-op 不应创建文件");
+
+        dir.write(".latent/models.json", r#"{ "providers": {} }"#);
+        let before = std::fs::read_to_string(&path).unwrap();
+        upsert_models_json_context_window(&path, "p1", "m1", "openai-completions", None).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "内容不变");
     }
 
     #[test]

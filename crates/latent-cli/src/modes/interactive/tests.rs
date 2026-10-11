@@ -2,6 +2,7 @@
 //! 走转录模型与待提交缓冲的 Line 文本)。
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -97,6 +98,70 @@ fn committed_text(state: &InteractiveState) -> String {
 }
 
 // ---- 输入提交与未知命令 ----
+
+/// `/context` 命令:写项目 models.json 的 `contextWindow` 并即时刷新 footer 窗口;
+/// 「默认」档删除该键回落 128k;预设之外的档位本地报错。
+#[tokio::test]
+async fn context_command_writes_models_json_and_updates_window() {
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+    // 隔离写盘位置:项目根 = 临时目录(preferred_models_path 恒写项目路径)
+    let dir = std::env::temp_dir().join(format!("latent_ctx_cmd_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    state.cwd = dir.clone();
+    super::handlers::refresh_footer(&ctx, &mut state);
+    assert_eq!(state.context_window, 128_000, "Model::minimal 默认窗口 128k");
+
+    state.editor.set_text("/context 256k");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    assert_eq!(state.context_window, 256_000, "footer 窗口即时刷新");
+    let path = dir.join(".latent/models.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("256000"), "写入 models.json: {text}");
+
+    // 「默认」档:删除键 → 回落模型缺省 128k
+    state.editor.set_text("/context default");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    assert_eq!(state.context_window, 128_000, "默认档回落 128k");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("contextWindow"), "默认档删除键: {text}");
+
+    // 预设之外的档位:本地报错,不动已有效窗口
+    state.pending.clear();
+    state.editor.set_text("/context 300k");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    let ephemeral: String = state.pending.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(ephemeral.contains("未知上下文档位"), "{ephemeral}");
+    assert_eq!(state.context_window, 128_000, "非法档位不改变窗口");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 裸 `/context`:打开四档选择器并标出当前档。
+#[tokio::test]
+async fn bare_context_opens_selector_on_current_preset() {
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+    // 隔离写盘位置(同 context_command 测试:绝不动仓库 / 真实数据目录)
+    let dir = std::env::temp_dir().join(format!("latent_ctx_bare_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    state.cwd = dir.clone();
+    super::handlers::refresh_footer(&ctx, &mut state);
+    state.editor.set_text("/context");
+    handle_key(&ctx, &mut state, Key::Enter).await;
+    let select = state.select.as_ref().expect("裸 /context 应打开选择器");
+    assert!(matches!(select.kind, SelectKind::Context), "选择器类型");
+    assert_eq!(select.list.options.len(), 4, "四档:默认/128k/256k/1m");
+    assert_eq!(select.list.selected, 1, "当前窗口 128k → 选中第二档(128k)");
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 #[tokio::test]
 async fn unknown_slash_input_is_local_warning_not_prompt() {
@@ -394,6 +459,21 @@ async fn turn_end_error_renders_without_usage_line() {
         !committed_text(&state).contains("[tokens]"),
         "错误回合不打用量行"
     );
+    assert!(state.pending_usage.is_none(), "错误回合不暂存用量行");
+    // 结算:错误 run 没有末轮用量行,总耗时无处可挂(即使计时起点存在也不显示)
+    state.run_started = Some(Instant::now() - Duration::from_secs(3));
+    handle_ui_event(
+        &ctx,
+        &mut state,
+        UiEvent::Session(AgentSessionEvent::AgentSettled),
+    )
+    .await;
+    assert!(
+        !committed_text(&state).contains("3.0s"),
+        "错误 run 不显示总耗时: {}",
+        committed_text(&state)
+    );
+    assert!(state.run_started.is_none(), "结算后 run 计时起点清空");
 }
 
 #[tokio::test]
@@ -423,13 +503,105 @@ async fn turn_end_success_records_usage_and_context() {
         })),
     )
     .await;
-    // ↑ = 完整 prompt(100 + cache_read 5),括号内缓存明细与命中率(5/105 ≈ 4%)
-    assert!(committed_text(&state).contains("↑ 105 (U 100 / R 5 · 4%)"));
+    // 末轮(无工具结果)的用量行暂存,等 AgentSettled 才能带上整个 run 的总耗时
+    assert!(state.pending_usage.is_some(), "末轮用量行应暂存");
+    assert!(
+        !committed_text(&state).contains("↑ 105"),
+        "暂存期间不上屏: {}",
+        committed_text(&state)
+    );
     assert_eq!(
         state.context_tokens, 115,
         "ctx 估计 = in+out+cacheRead+cacheWrite"
     );
     assert!(state.usage.summary().contains("110 tok"));
+
+    // AgentSettled 结算:用量行上屏,↑ = 完整 prompt(100 + cache_read 5),括号内
+    // 缓存明细与命中率(5/105 ≈ 4%),行首带整个 run 的总耗时(run 起点 2.5s 前)
+    state.run_started = Some(Instant::now() - Duration::from_millis(2500));
+    handle_ui_event(&ctx, &mut state, UiEvent::Session(AgentSessionEvent::AgentSettled)).await;
+    let committed = committed_text(&state);
+    assert!(committed.contains("↑ 105 (U 100 / R 5 · 4%)"), "{committed}");
+    assert!(committed.contains("2.5s"), "末条用量行应带总耗时: {committed}");
+    assert!(state.pending_usage.is_none(), "结算后暂存清空");
+    assert!(state.run_started.is_none(), "结算后 run 计时起点清空");
+}
+
+/// 中间轮次(带工具结果)用量行立即上屏且不带耗时;末轮暂存,只在 AgentSettled
+/// 带上整个 run 的总耗时(且只带一次)。
+#[tokio::test]
+async fn intermediate_usage_commits_immediately_final_turn_carries_total() {
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+    let model = latent_ai::Model::minimal("m", "mock", "mock");
+    let usage = |input: u64| latent_ai::Usage {
+        input,
+        output: 10,
+        total_tokens: input + 10,
+        ..Default::default()
+    };
+    let mut first = latent_ai::AssistantMessage::pending(&model);
+    first.stop_reason = StopReason::ToolUse;
+    first.usage = usage(100);
+    handle_ui_event(
+        &ctx,
+        &mut state,
+        UiEvent::Session(AgentSessionEvent::Agent(latent_agent::AgentEvent::TurnEnd {
+            message: Box::new(first),
+            // 带工具结果 = 中间轮次
+            tool_results: vec![latent_agent::AgentMessage::tool_result_text(
+                "call-1", "bash", "ok", false,
+            )],
+        })),
+    )
+    .await;
+    assert!(state.pending_usage.is_none(), "中间轮次不暂存");
+    assert!(
+        committed_text(&state).contains("↑ 100"),
+        "中间轮次用量行立即上屏: {}",
+        committed_text(&state)
+    );
+
+    let mut last = latent_ai::AssistantMessage::pending(&model);
+    last.stop_reason = StopReason::Stop;
+    last.usage = usage(200);
+    handle_ui_event(
+        &ctx,
+        &mut state,
+        UiEvent::Session(AgentSessionEvent::Agent(latent_agent::AgentEvent::TurnEnd {
+            message: Box::new(last),
+            tool_results: vec![],
+        })),
+    )
+    .await;
+    assert!(state.pending_usage.is_some(), "末轮暂存");
+    assert!(
+        !committed_text(&state).contains("↑ 200"),
+        "末轮结算前不上屏: {}",
+        committed_text(&state)
+    );
+
+    state.run_started = Some(Instant::now() - Duration::from_millis(3000));
+    handle_ui_event(&ctx, &mut state, UiEvent::Session(AgentSessionEvent::AgentSettled)).await;
+    let committed = committed_text(&state);
+    assert!(committed.contains("↑ 200"), "末轮结算后上屏: {committed}");
+    // 总耗时段只出现在末条用量行(中间轮次的行不带 "…s │ ↑" 前缀)
+    let duration_line = committed
+        .lines()
+        .find(|line| line.contains("↑ 200"))
+        .unwrap_or_else(|| panic!("末条用量行应在转录中: {committed}"));
+    assert!(duration_line.contains("s │ ↑ 200"), "末条带总耗时: {duration_line}");
+    let intermediate_line = committed
+        .lines()
+        .find(|line| line.starts_with("↑ 100"))
+        .unwrap_or_else(|| panic!("中间轮次用量行应在转录中: {committed}"));
+    assert!(
+        !intermediate_line.contains("s │ ↑"),
+        "中间轮次不带总耗时: {intermediate_line}"
+    );
 }
 
 #[tokio::test]

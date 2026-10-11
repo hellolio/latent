@@ -360,6 +360,14 @@ async fn chat_commands_work() {
     // /model(无参 = 查看当前)
     harness.gateway.dispatch_inbound(dm("u1", "c-8", "/model")).await;
     assert!(wait_for_reply_containing(&harness, "test-model").await);
+    // /context(无参 = 查看当前窗口)与非法档位(均不写盘)
+    harness.gateway.dispatch_inbound(dm("u1", "c-9", "/context")).await;
+    assert!(wait_for_reply_containing(&harness, "128000").await);
+    harness
+        .gateway
+        .dispatch_inbound(dm("u1", "c-10", "/context 300k"))
+        .await;
+    assert!(wait_for_reply_containing(&harness, "未知上下文档位").await);
 }
 
 #[tokio::test]
@@ -390,6 +398,11 @@ async fn group_session_commands_are_owner_only() {
     harness
         .gateway
         .dispatch_inbound(group("group1", "member", "g-1c", "/model mock/test-model", true))
+        .await;
+    assert!(wait_for_reply_containing(&harness, "该命令仅 owner 可用").await);
+    harness
+        .gateway
+        .dispatch_inbound(group("group1", "member", "g-1d", "/context 256k", true))
         .await;
     assert!(wait_for_reply_containing(&harness, "该命令仅 owner 可用").await);
     // owner 在群里发 /new → 通过

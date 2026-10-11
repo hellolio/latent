@@ -18,6 +18,7 @@ pub enum ChatCommand {
     Stop,
     Status,
     Model { arg: Option<String> },
+    Context { arg: Option<String> },
     Thinking { arg: Option<String> },
     Mode { arg: Option<String> },
     Queue { arg: Option<String> },
@@ -37,6 +38,7 @@ impl ChatCommand {
                 | ChatCommand::Stop
                 | ChatCommand::Status
                 | ChatCommand::Model { .. }
+                | ChatCommand::Context { .. }
                 | ChatCommand::Thinking { .. }
                 | ChatCommand::Mode { .. }
                 | ChatCommand::Queue { .. }
@@ -74,6 +76,9 @@ pub fn parse(text: &str) -> Option<ChatCommand> {
         "stop" => Some(ChatCommand::Stop),
         "status" => Some(ChatCommand::Status),
         "model" => Some(ChatCommand::Model {
+            arg: arg.map(str::to_string),
+        }),
+        "context" => Some(ChatCommand::Context {
             arg: arg.map(str::to_string),
         }),
         "thinking" => Some(ChatCommand::Thinking {
@@ -149,6 +154,7 @@ pub fn help_text() -> String {
      /stop — 中止当前任务\n\
      /status — 会话状态\n\
      /model <provider/model> — 查看/切换模型\n\
+     /context <默认|128k|256k|1m> — 查看/设置上下文窗口(写入 models.json,仅 owner)\n\
      /thinking <level> — 查看/设置思考级别\n\
      /mode <plan|confirm|full-access> — 切换会话模式\n\
      /queue <steer|followup|collect|interrupt> [cap N] — 队列模式(仅 owner)\n\
@@ -187,6 +193,13 @@ mod tests {
                 arg: Some("anthropic/claude-opus-4-6".into())
             })
         );
+        assert_eq!(
+            parse("/context 256k"),
+            Some(ChatCommand::Context {
+                arg: Some("256k".into())
+            })
+        );
+        assert_eq!(parse("/context"), Some(ChatCommand::Context { arg: None }));
         assert_eq!(
             parse("/thinking high"),
             Some(ChatCommand::Thinking {
@@ -242,6 +255,7 @@ mod tests {
     fn group_owner_only_rules() {
         assert!(ChatCommand::New.owner_only_in_group());
         assert!(ChatCommand::Mode { arg: None }.owner_only_in_group());
+        assert!(ChatCommand::Context { arg: None }.owner_only_in_group());
         assert!(!ChatCommand::Status.owner_only_in_group());
         assert!(!ChatCommand::Help.owner_only_in_group());
     }
@@ -250,8 +264,8 @@ mod tests {
     fn help_lists_every_command() {
         let text = help_text();
         for name in [
-            "/new", "/reset", "/compact", "/stop", "/status", "/model", "/thinking", "/mode",
-            "/queue", "/activation", "/approve", "/help",
+            "/new", "/reset", "/compact", "/stop", "/status", "/model", "/context",
+            "/thinking", "/mode", "/queue", "/activation", "/approve", "/help",
         ] {
             assert!(text.contains(name), "缺少 {name}");
         }

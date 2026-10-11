@@ -35,3 +35,19 @@
 
 - **坑**: cargo test 默认并行，每个 `#[tokio::test]` 一个 runtime，进程级全局（SIGCHLD 处理器、self-pipe、orphan 队列）被所有 runtime 共享；单测时序问题可能只在全量运行时暴露（或反之）。
 - **规避**: 时间敏感的异步测试先单独连跑（≥10 次）验证，再进全量；全量失败时先用 `--nocapture` + 打点区分邻居干扰与自身竞态。
+
+## TP-007: 写盘型单测必须先隔离 `state.cwd`，否则在仓库里造出文件
+
+- **坑**: `handle_key` 驱动的斜杠命令测试用 `test_state()`（`cwd = std::env::current_dir()`，即 crate 目录；`home` = 真实 HOME）。只要命令会写 models.json，测试就会在 `crates/latent-cli/.latent/` 或用户真实配置目录里落盘：一次早期版本的 `/context` 测试就留下了 `crates/latent-cli/.latent/models.json`（内容 `{}`），被 git status 当场揭发。事发测试当时恒免（断言选择器不开），只是碰巧没写成功——**“现在没写”不等于“将来不会写”**。
+- **规避**: 任何可能触到 `preferred_models_path`/`latent_dir` 的 CLI 单测，先 `state.cwd = 临时目录`（同测试内自建自删），并在测试内断言实际写入路径。另：`latent_dir()` 读 `LATENT_HOME`，跑单测前按 TP-003 剔离 `LATENT_*`。
+
+## TP-008: e2e 断言 footer 内容要开宽终端，窄屏右侧段会被左侧挤掉
+
+- **坑**: `footer` 是一行左右对齐，左侧是 cwd/模式段。在默认 `cols=100` 下，临时目录长路径占满行宽，右侧用量段被截成 `ctx 0% (`——断言 `(…/256k)` 必然超时，而屏幕上“确实有值”。
+- **证据**: `test_context_command.py` 首版在 cols=100 下报“当前屏幕上未出现 `/\s*256k\s*\)`”，失败输出里就是 `ctx 0% (` 被截断。
+- **规避**: 断言 footer 右段的场景显式 `LatentApp(..., cols=160)`（并把理由写进注释）；或用 `expect_text` 扫全转录（但注意它不区分历史与当前屏，见 TP-009）。
+
+## TP-009: 选择器/弹窗断言用 `expect_visible`，`expect_text` 会扫全转录而误命中
+
+- **坑**: `expect_text` 在**全量输出**里搜正则，选择器一显一隐后仍能匹配到早已消失的文本；用它断言“四档候选”时，`"256k"` 可能只是命中了上方转录里的 `context → 256000 tokens` 回执，等于什么都没验证。
+- **规避**: 断言“当前屏幕上有什么”用 `expect_visible(pattern)`（轮询 `visible_text`）；选中行标记也可断言——`_squeeze` 去掉空白后 `❯ 128k` 就是 `❯128k`（`expect_visible(r"❯\s*128k")`）。`expect_text` 留给“历史上出现过”的内容（如带耗时的用量行）。

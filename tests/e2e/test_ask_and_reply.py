@@ -17,6 +17,8 @@ def test_ask_and_reply_end_to_end():
         app.expect_text(r"这是 mock LLM 的固定回复")
         # 回复结束后回到可输入状态(编辑器重新出现,无 busy 状态)
         app.expect_text(r"你好,请介绍一下你自己")
+        # 用量行末尾带整个 run 的总耗时(速度 · TTFT · 总耗时 │ token 段)
+        app.expect_text(r"·\s*\d+(?:\.\d+)?s\s*│")
 
         # mock 侧:收到的请求里应带系统提示词与用户消息
         bodies = app.wait_for_requests(1)

@@ -14,8 +14,8 @@ use super::bash;
 use super::events::UiEvent;
 use super::replay;
 use super::state::{
-    instant_from_ms, InteractiveState, ScrollRequest, SelectKind, SelectRequest, Status, ToolStatus,
-    TranscriptItem,
+    instant_from_ms, InteractiveState, PendingUsage, ScrollRequest, SelectKind, SelectRequest, Status,
+    ToolStatus, TranscriptItem,
 };
 use super::usage::{context_tokens_of, usage_line};
 use super::view;
@@ -522,6 +522,9 @@ async fn handle_select_key(
                     SelectKind::Setting => {
                         apply_setting_selection(state, index);
                     }
+                    SelectKind::Context => {
+                        apply_context_selection(ctx, state, index).await;
+                    }
                     SelectKind::Approval { responder } => {
                         // 13 文档 §10.3:1=批准一次 2=本会话批准 3=拒绝 4=中止
                         let decision = match index {
@@ -549,6 +552,7 @@ async fn handle_select_key(
                     }
                     SelectKind::SubagentAgent { .. } | SelectKind::Session { .. } => {}
                     SelectKind::Model { .. } | SelectKind::Thinking => {}
+                    SelectKind::Context => {}
                     // Esc 在表单中途的选择列表上 = 取消整张表单
                     SelectKind::ModelApiChoice | SelectKind::ModelTargetChoice => {
                         state.model_form = None;
@@ -1029,6 +1033,21 @@ pub async fn execute_command(
             },
             None => open_thinking_selector(state),
         },
+        slash::SlashAction::Context { arg } => match arg {
+            Some(name) => match slash::parse_context_window(&name) {
+                Some(window) => apply_context_window(ctx, state, window).await,
+                None => {
+                    state.commit_ephemeral(view::error_line(
+                        &format!(
+                            "未知上下文档位: {name}(可用: {})",
+                            slash::context_presets_hint()
+                        ),
+                        &state.theme,
+                    ));
+                }
+            },
+            None => open_context_selector(ctx, state),
+        },
     }
     false
 }
@@ -1221,6 +1240,112 @@ fn open_thinking_selector(state: &mut InteractiveState) {
         list,
         kind: SelectKind::Thinking,
     });
+}
+
+/// 当前生效窗口对应的档位下标(非预设值如手写的 200000 归「默认」位:
+/// 选择器无法标出「不存在的档」,故退回第一项;提示行会写明当前值)。
+fn context_selection_index(window: u64) -> usize {
+    slash::CONTEXT_PRESETS
+        .iter()
+        .position(|(_, preset)| *preset == Some(window))
+        .unwrap_or(0)
+}
+
+/// 档位下标 → `contextWindow`(None = 默认档,从 models.json 删除该键)。
+fn context_window_of(index: usize) -> Option<u64> {
+    slash::CONTEXT_PRESETS.get(index).map(|(_, window)| *window).unwrap_or(None)
+}
+
+/// 开 `/context` 选择器:标出当前模型生效窗口对应的档。
+fn open_context_selector(ctx: &InteractiveCtx<'_>, state: &mut InteractiveState) {
+    let window = ctx
+        .session
+        .current()
+        .agent()
+        .state_snapshot()
+        .model
+        .map(|model| model.context_window)
+        .unwrap_or(0);
+    let mut list = SelectList::new(
+        slash::CONTEXT_PRESETS
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect(),
+    );
+    list.selected = context_selection_index(window);
+    state.select = Some(SelectRequest {
+        prompt: format!("选择上下文窗口(当前 {} tokens;写入 models.json)", window),
+        list,
+        kind: SelectKind::Context,
+    });
+}
+
+/// 选择器 Enter:按下标应用档位。
+async fn apply_context_selection(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    index: usize,
+) {
+    apply_context_window(ctx, state, context_window_of(index)).await;
+}
+
+/// 应用 `/context` 档位:写 `preferred_models_path`(有项目目录即写项目
+/// `.latent/models.json`,否则全局数据目录)→ 热重载 resolver → 按当前模型
+/// 重新解析 → 切到生效窗口的新模型。`window = None` = 默认档(删除该模型的
+/// contextWindow,回到「models.json 有记载就用记载值,否则 128k」)。
+/// 已知限制:装配期为 web 工具/subagent 建 resolver 快照不跟随(见
+/// `reload_model_resolver`),重启后生效;子代理默认继承父会话活模型,
+/// 因此默认路径跟随。
+async fn apply_context_window(
+    ctx: &InteractiveCtx<'_>,
+    state: &mut InteractiveState,
+    window: Option<u64>,
+) {
+    let Some(model) = ctx.session.current().agent().state_snapshot().model else {
+        state.commit_ephemeral(view::error_line("当前模型未知,无法设置上下文窗口", &state.theme));
+        return;
+    };
+    let dir = latent_core::latent_dir(state.home.as_deref());
+    let path = latent_core::preferred_models_path(Some(&state.cwd), dir.as_deref());
+    if let Err(error) = latent_core::upsert_models_json_context_window(
+        &path,
+        &model.provider,
+        &model.id,
+        &model.api,
+        window,
+    ) {
+        state.commit_ephemeral(view::error_line(
+            &format!("写入 {} 失败: {error}", path.display()),
+            &state.theme,
+        ));
+        return;
+    }
+    reload_model_resolver(ctx, state);
+    let spec = format!("{}/{}", model.provider, model.id);
+    // 解析结果先拷出、放开 resolver 读锁再 await(clippy::await_holding_lock)
+    let resolved = { ctx.resolver.read().unwrap().resolve(&spec) };
+    match resolved {
+        Ok(new_model) => {
+            let effective = new_model.context_window;
+            ctx.session.current().set_model(new_model).await;
+            refresh_footer(ctx, state);
+            state.status = Status::Idle;
+            state.commit_ephemeral(warning_line_theme(
+                &format!(
+                    "context → {} tokens(models.json:{})",
+                    effective,
+                    path.display()
+                ),
+                &state.theme,
+            ));
+        }
+        Err(error) => {
+            state.commit_ephemeral(view::error_line(
+                &format!("{spec} 写入成功但解析失败: {error}"),
+                &state.theme,
+            ));
+        }
+    }
 }
 
 /// 应用主题切换:更新状态并请求全文重绘(转录按新主题重新着色)。
@@ -1753,6 +1878,11 @@ async fn handle_session_event(
                 // 请求发出时刻回推;非请求路径(注入)回退当下时刻
                 state.stream_started = Some(instant_from_ms(started_at_ms));
                 state.first_delta_at = None;
+                // 整个用户回合的总耗时起点 = 本 run 首个请求发出时刻
+                // (后续轮次的 MessageStart 不覆盖;AgentSettled 清空)
+                if state.run_started.is_none() {
+                    state.run_started = Some(instant_from_ms(started_at_ms));
+                }
                 state.commit_blank();
             }
         }
@@ -1876,14 +2006,24 @@ async fn handle_session_event(
             }
             state.status = Status::Thinking;
         }
-        AgentSessionEvent::Agent(latent_agent::AgentEvent::TurnEnd { message, .. }) => {
+        AgentSessionEvent::Agent(latent_agent::AgentEvent::TurnEnd {
+            message,
+            tool_results,
+        }) => {
+            // 新轮次到达:先冲刷上一条未提交的末轮用量行(不带总耗时)——
+            // 防御 length 截断重试 / 多轮工具等"上一轮并非真末轮"的情形
+            flush_pending_usage(state, None);
             record_turn_speed(state, &message.usage);
+            let speed = state.last_tps.zip(state.last_ttft);
             // 注意此处保持 busy(Idle 在 AgentSettled):tokens 块必须在视口
             // 收缩**前**按 busy 高度落盘,与上文(assistant 正文/工具背景块)
             // 紧贴;随后收缩释放的 1 行预留空带全部落在 tokens 下方(输入框
             // 一侧)。
             // pi assistant-message.ts 语义:error/aborted 红字上屏且不打
-            // 用量行(错误回合无有效 usage);length 先打用量再补截断提示
+            // 用量行(错误回合无有效 usage);length 先打用量再补截断提示。
+            // 末轮(无工具结果)用量行暂存到 AgentSettled 提交,以便带上整个
+            // run 的总耗时;中间轮次(带工具结果)立即提交。
+            let final_turn = tool_results.is_empty();
             match message.stop_reason {
                 StopReason::Error => {
                     let error = message
@@ -1897,21 +2037,19 @@ async fn handle_session_event(
                 }
                 StopReason::Length => {
                     state.usage.push(&message.usage);
-                    for item in usage_item_of(state, &message.usage) {
-                        state.commit(item);
-                    }
-                    state.commit_ephemeral(view::error_line(
-                        "Response was truncated before completion.",
-                        &state.theme,
-                    ));
                     state.context_tokens = context_tokens_of(&message.usage);
+                    stage_usage(
+                        state,
+                        &message.usage,
+                        speed,
+                        final_turn,
+                        Some("Response was truncated before completion.".to_string()),
+                    );
                 }
                 _ => {
                     state.usage.push(&message.usage);
-                    for item in usage_item_of(state, &message.usage) {
-                        state.commit(item);
-                    }
                     state.context_tokens = context_tokens_of(&message.usage);
+                    stage_usage(state, &message.usage, speed, final_turn, None);
                 }
             }
         }
@@ -1933,6 +2071,15 @@ async fn handle_session_event(
                     is_error: state.last_tool_error,
                 });
             }
+            // 末轮用量行在 settle 提交并带上整个 run 的总耗时(对比起点 =
+            // run 首个请求发出时刻);仍在 status = Idle 之前,保持"tokens
+            // 块在视口收缩前按 busy 高度落盘"的布局语义。错误/中止 run
+            // 无末轮用量行,总耗时自然不显示。
+            let total = state
+                .run_started
+                .take()
+                .map(|started| (Instant::now() - started).as_secs_f64());
+            flush_pending_usage(state, total);
             state.status = Status::Idle;
         }
         AgentSessionEvent::QueueUpdate {
@@ -1974,9 +2121,8 @@ async fn handle_session_event(
 
 /// 回合结束换算最近一回合的输出速度与首 token 延迟(footer 展示):
 /// TTFT = 首 delta − 请求发出时刻(record_turn_speed;起点由 MessageStart
-/// 携带的 started_at_ms 回推);TPS = 输出 token ÷ 生成时长
-/// (首 delta → TurnEnd;TurnEnd 在工具执行前发出,时长即纯流式生成)。
-/// 计时缺失或输出为 0 不更新,保留上一回合数值。
+/// 携带的 started_at_ms 回推);TPS = 输出 token ÷ 生成时长(首 delta →
+/// TurnEnd)。计时缺失或输出为 0 不更新,保留上一回合数值。
 fn record_turn_speed(state: &mut InteractiveState, usage: &latent_ai::Usage) {
     let (started, first) = match (state.stream_started.take(), state.first_delta_at.take()) {
         (Some(started), Some(first)) => (started, first),
@@ -2016,17 +2162,61 @@ fn commit_pending_thinking(state: &mut InteractiveState) {
 }
 
 /// 单回合用量行上下各加一行空行(与正文/后续内容拉开间距,避免挤在一起);
-/// 行首带本回合速度段(TPS · TTFT,record_turn_speed 已在 TurnEnd 换算)。
-fn usage_item_of(state: &InteractiveState, usage: &latent_ai::Usage) -> Vec<TranscriptItem> {
-    let speed = state.last_tps.zip(state.last_ttft);
+/// 行首带本回合速度段(TPS · TTFT,record_turn_speed 已在 TurnEnd 换算),
+/// `total` 为整个 run 的总耗时(仅末轮用量行传 Some)。
+fn usage_item_of(
+    state: &InteractiveState,
+    usage: &latent_ai::Usage,
+    speed: Option<(f64, f64)>,
+    total: Option<f64>,
+) -> Vec<TranscriptItem> {
     vec![
         TranscriptItem::Blank,
         TranscriptItem::Line(latent_tui::UiLine::from(usage_line(
             usage,
             state.usage.cache_ever_reported,
             speed,
+            total,
             &state.theme,
         ))),
         TranscriptItem::Blank,
     ]
+}
+
+/// 提交或暂存一轮用量行:末轮(`final_turn`,无工具结果)暂存到 AgentSettled,
+/// 以便带上整个 run 的总耗时(总耗时只在 settle 可知);中间轮次立即提交。
+fn stage_usage(
+    state: &mut InteractiveState,
+    usage: &latent_ai::Usage,
+    speed: Option<(f64, f64)>,
+    final_turn: bool,
+    trailing: Option<String>,
+) {
+    if final_turn {
+        state.pending_usage = Some(PendingUsage {
+            usage: *usage,
+            speed,
+            trailing,
+        });
+        return;
+    }
+    for item in usage_item_of(state, usage, speed, None) {
+        state.commit(item);
+    }
+    if let Some(trailing) = trailing {
+        state.commit_ephemeral(view::error_line(&trailing, &state.theme));
+    }
+}
+
+/// 冲刷暂存的末轮用量行(无暂存则不变);`total` = 整个 run 的总耗时秒数。
+fn flush_pending_usage(state: &mut InteractiveState, total: Option<f64>) {
+    let Some(pending) = state.pending_usage.take() else {
+        return;
+    };
+    for item in usage_item_of(state, &pending.usage, pending.speed, total) {
+        state.commit(item);
+    }
+    if let Some(trailing) = pending.trailing {
+        state.commit_ephemeral(view::error_line(&trailing, &state.theme));
+    }
 }

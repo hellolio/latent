@@ -3,7 +3,10 @@
 //! `popup_entries()` 依赖 latent_tui::CommandEntry,是 interactive 专用
 //! (TUI 补全弹窗),不进 runtime。
 
-pub use latent_runtime::slash::{parse, help_markdown, SlashAction, SlashCommand, SlashInput, COMMANDS, MODE_VARIANTS, SESSION_VARIANTS};
+pub use latent_runtime::slash::{
+    context_presets_hint, help_markdown, parse, parse_context_window, SlashAction, SlashCommand,
+    SlashInput, COMMANDS, CONTEXT_PRESETS, MODE_VARIANTS, SESSION_VARIANTS,
+};
 
 /// 补全弹窗条目(静态命令表 + `/mode`/`/session` 参数变体 + `/skill`
 /// 伪命令的技能变体)。`/skill <名称>` 不是命令:补全/过滤后留在输入框,
