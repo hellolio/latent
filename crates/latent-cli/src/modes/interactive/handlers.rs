@@ -752,6 +752,26 @@ pub async fn execute_command(
                 ));
             }
         },
+        slash::SlashAction::Init { arg } => {
+            // /init 语义要求全新分析;流式期间提交会与进行中的 run 交叠,拒绝而非 steer
+            if ctx.session.current().agent().is_streaming() {
+                state.commit_ephemeral(view::error_line(
+                    "run 进行中不能执行 /init;等待 run 结束或 Esc 中止后再试",
+                    &state.theme,
+                ));
+                return false;
+            }
+            state.status = Status::Thinking;
+            state.stream_text.clear();
+            state.pending_thinking = None;
+            let session = ctx.session.current();
+            let ui_tx = ctx.ui_tx.clone();
+            tokio::spawn(async move {
+                if let Err(error) = session.prompt(latent_runtime::init::build_prompt(arg.as_deref())).await {
+                    let _ = ui_tx.send(UiEvent::Notify(format!("Error: {error}")));
+                }
+            });
+        }
         slash::SlashAction::Compact { arg } => {
             // 流式期间压缩会让 SessionCompactor 先落盘 Compaction entry、
             // 随后 set_messages 失败;摘要 LLM 调用内联 await 会冻结事件循环

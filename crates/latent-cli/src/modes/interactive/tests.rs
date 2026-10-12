@@ -1125,6 +1125,28 @@ async fn execute_help_and_session_commit_lines() {
     assert!(rendered.contains("usage:"), "{rendered}");
 }
 
+/// `/init`:streaming 守卫后提交内置提示词(状态切 Thinking,提示词文本
+/// 由 init.rs 纯函数单测钉死;这里用 LatentHome 隔离外置覆盖查找)。
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // LatentHome 守卫串行隔离 LATENT_HOME
+async fn execute_init_submits_prompt_and_sets_busy() {
+    let _home = LatentHome::new("init");
+    let built = built_memory_session().await;
+    let resolver = std::sync::RwLock::new(latent_core::create_model_resolver());
+    let router = crate::modes::interactive::handlers::SessionRouter::new(built.session.clone());
+    let ctx = ctx_of(&built, &resolver, &router);
+    let mut state = test_state();
+
+    let quit = super::handlers::execute_command(
+        &ctx,
+        &mut state,
+        slash::SlashAction::Init { arg: None },
+    )
+    .await;
+    assert!(!quit);
+    assert_eq!(state.status, Status::Thinking);
+}
+
 #[tokio::test]
 async fn execute_thinking_with_arg_updates_footer() {
     let built = built_memory_session().await;

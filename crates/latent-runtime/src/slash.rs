@@ -40,6 +40,11 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "压缩上下文(摘要替换历史)",
     },
     SlashCommand {
+        name: "init",
+        args: "[附加要求]",
+        description: "分析代码库,创建/更新项目根 AGENTS.md",
+    },
+    SlashCommand {
         name: "new",
         args: "",
         description: "新建会话(当前会话已保存,原样保留在原文件)",
@@ -84,6 +89,7 @@ pub enum SlashAction {
     Thinking { arg: Option<String> },
     Theme { arg: Option<String> },
     Compact { arg: Option<String> },
+    Init { arg: Option<String> },
     New,
     Mode { arg: Option<String> },
     Subagent { arg: Option<String> },
@@ -183,6 +189,9 @@ pub fn parse(input: &str) -> SlashInput {
         "compact" => SlashInput::Command(SlashAction::Compact {
             arg: arg.map(str::to_string),
         }),
+        "init" => SlashInput::Command(SlashAction::Init {
+            arg: arg.map(str::to_string),
+        }),
         "new" => SlashInput::Command(SlashAction::New),
         "setting" => SlashInput::Command(SlashAction::Setting),
         "context" => SlashInput::Command(SlashAction::Context {
@@ -249,6 +258,16 @@ mod tests {
             SlashInput::Command(SlashAction::Compact {
                 arg: Some("保留近期消息".into())
             })
+        );
+        assert_eq!(
+            parse("/init 重点是测试命令"),
+            SlashInput::Command(SlashAction::Init {
+                arg: Some("重点是测试命令".into())
+            })
+        );
+        assert_eq!(
+            parse("/INIT"),
+            SlashInput::Command(SlashAction::Init { arg: None })
         );
         assert_eq!(
             parse("/model anthropic/claude-opus-4-6"),

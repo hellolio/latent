@@ -202,6 +202,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `src/bootstrap.rs` | 入口层共享助手：`resolve_provider_and_model`（mock + models.json 体系）、`resolve_session_store`（-c/-r）、`print_session_list`、`notify_legacy_data_dir`、`maybe_dispatch_landlock_helper`（**两个 bin 的 main 开头都必须调用**，否则 Linux 沙箱静默失效） |
 | `src/events.rs` | json/rpc/聊天网关共用的事件 → JSON 映射（剥离流式 partial） |
 | `src/slash.rs` | 斜杠命令解析层（`COMMANDS`/`SlashAction`/`parse`/`help_markdown`；TUI 的 `popup_entries()` 留在 latent-cli） |
+| `src/init.rs` | `/init` 提示词：内置默认模板（参照 Claude Code /init：常用命令/大图架构/目录索引）+ 外置覆盖查找（项目 `.latent/init-prompt.md` → 全局 `init-prompt.md`，首个非空整体替换；**dispatch 时读取**，中途修改即时生效）与附加要求尾部拼接（`assemble` 纯函数可测） |
 
 ### crates/latent-channel — L1 纯聊天域（零内部依赖，feature 门控渠道）
 
@@ -277,6 +278,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | agents | `.latent/agents/<name>.md` / `<数据目录>/agents/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
 | system-prompt.md | `.latent/system-prompt.md` / `<数据目录>/system-prompt.md` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
 | compact-prompt.md | `.latent/compact-prompt.md` / `<数据目录>/compact-prompt.md` | 压缩提示词外置（/compact、阈值自动压缩、overflow 恢复共用）：块外正文 = 摘要请求 system 角色，`<compact>` 块 = 首次压缩指令，`<update>` 块 = 增量压缩指令（旧摘要仍以 `<previous-summary>` 标签前置）；同名块按序拼接、未闭合取余下全文、空节回退内置；装配期读一次，中途修改不生效 |
+| init-prompt.md | `.latent/init-prompt.md` / `<数据目录>/init-prompt.md` | `/init` 提示词外置（创建/更新项目根 AGENTS.md）：首个存在且非空的文件整体替换内置默认提示词；项目优先全局，空白文件视为未配置；dispatch 时读取，会话中途修改即时生效；`/init <附加要求>` 的用户输入拼在提示词尾部 |
 
 会话文件写 `<数据目录>/sessions/<项目前缀>/`（目录名 = cwd 编码；文件名 `<时间>__<tag>__<id>.jsonl`，时间为本地 %Y%m%d-%H%M%S）；`contextSnapshot` 开启时请求快照落旁路 `.ctx/` 目录，不进模型上下文。
 

@@ -8,6 +8,7 @@
 pub mod assembly;
 pub mod bootstrap;
 pub mod events;
+pub mod init;
 pub mod slash;
 
 /// 聊天栈统一依赖面(P1-14):latent-gateway 按计划只依赖
