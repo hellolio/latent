@@ -7,8 +7,8 @@ use latent_session::{
     create_fixed_summarizer, create_session,
     create_session_in_dir, create_session_with, estimate_context_tokens, estimate_tokens,
     find_cut_point, run_compaction, serialize_conversation, should_compact, CompactionOutcome,
-    CompactionSettings, ContextReplacement, Entry, SummarizationResponse, Summarizer,
-    DEFAULT_COMPACTION_SETTINGS, DEFAULT_RESERVE_RATIO,
+    CompactionPrompts, CompactionSettings, ContextReplacement, Entry, SummarizationResponse,
+    Summarizer, DEFAULT_COMPACTION_SETTINGS, DEFAULT_RESERVE_RATIO,
 };
 
 fn assistant(text: &str, total_tokens: u64, stop: StopReason) -> AgentMessage {
@@ -586,6 +586,7 @@ async fn run_compaction_end_to_end() {
             keep_recent_tokens: 1,
             ..Default::default()
         },
+        &CompactionPrompts::default(),
         &summarizer,
     )
     .await
@@ -630,7 +631,7 @@ async fn run_compaction_skips_empty_conversation_range() {
             panic!("不应发出摘要请求,对话内容: {:?}", request.messages);
         }
     }
-    let outcome = run_compaction(&entries, &CompactionSettings::default(), &NoCall)
+    let outcome = run_compaction(&entries, &CompactionSettings::default(), &CompactionPrompts::default(), &NoCall)
         .await
         .unwrap();
     assert!(outcome.is_none(), "空对话范围不应产出压缩结果");
@@ -676,6 +677,7 @@ async fn run_compaction_uses_update_template_when_previous_summary_exists() {
             keep_recent_tokens: 1,
             ..Default::default()
         },
+        &CompactionPrompts::default(),
         &summarizer,
     )
     .await
@@ -707,6 +709,102 @@ async fn run_compaction_uses_update_template_when_previous_summary_exists() {
         !conversation.contains("old question") && !conversation.contains("old answer"),
         "旧消息不应随增量请求重发: {conversation}"
     );
+}
+
+/// 用户外置 compact-prompt.md:首次压缩指令被 `<compact>` 节取代
+#[tokio::test]
+async fn run_compaction_custom_compact_prompt_replaces_builtin() {
+    let session = create_session(None::<String>).unwrap();
+    session
+        .append_message(AgentMessage::user("q"))
+        .unwrap();
+    session
+        .append_message(assistant("a", 0, StopReason::Stop))
+        .unwrap();
+    let entries = session.entries();
+
+    let summarizer = CapturingSummarizer {
+        summary: "s".into(),
+        stop_reason: StopReason::Stop,
+        captured: std::sync::Mutex::new(Vec::new()),
+    };
+    let prompts = CompactionPrompts {
+        compact: Some("CUSTOM COMPACT PROMPT".into()),
+        ..Default::default()
+    };
+    run_compaction(
+        &entries,
+        &CompactionSettings {
+            keep_recent_tokens: 1,
+            ..Default::default()
+        },
+        &prompts,
+        &summarizer,
+    )
+    .await
+    .unwrap()
+    .expect("应产出压缩结果");
+
+    let captured = summarizer.captured.lock().unwrap();
+    assert_eq!(captured[0].instruction, "CUSTOM COMPACT PROMPT");
+}
+
+/// 用户外置 compact-prompt.md:增量压缩指令被 `<update>` 节取代,
+/// 旧摘要仍以 <previous-summary> 前置(约定不变)
+#[tokio::test]
+async fn run_compaction_custom_update_prompt_applies_to_incremental() {
+    let session = create_session(None::<String>).unwrap();
+    session
+        .append_message(AgentMessage::user("old question"))
+        .unwrap();
+    session
+        .append_message(assistant("old answer", 0, StopReason::Stop))
+        .unwrap();
+    let old_leaf = session.get_leaf_id().unwrap();
+    session
+        .append_compaction("previous summary", old_leaf, 100, None, None, false)
+        .unwrap();
+    session
+        .append_message(AgentMessage::user("new question"))
+        .unwrap();
+    session
+        .append_message(assistant("new answer", 0, StopReason::Stop))
+        .unwrap();
+    let entries = session.entries();
+
+    let summarizer = CapturingSummarizer {
+        summary: "updated".into(),
+        stop_reason: StopReason::Stop,
+        captured: std::sync::Mutex::new(Vec::new()),
+    };
+    let prompts = CompactionPrompts {
+        update: Some("CUSTOM UPDATE PROMPT".into()),
+        ..Default::default()
+    };
+    run_compaction(
+        &entries,
+        &CompactionSettings {
+            keep_recent_tokens: 1,
+            ..Default::default()
+        },
+        &prompts,
+        &summarizer,
+    )
+    .await
+    .unwrap()
+    .expect("应产出压缩结果");
+
+    let captured = summarizer.captured.lock().unwrap();
+    assert_eq!(captured[0].instruction, "CUSTOM UPDATE PROMPT");
+    let conversation = captured[0]
+        .messages
+        .iter()
+        .find_map(|m| match m {
+            AgentMessage::User { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .expect("user 承载序列化对话");
+    assert!(conversation.contains("<previous-summary>\nprevious summary\n</previous-summary>"));
 }
 
 #[tokio::test]
@@ -772,6 +870,7 @@ async fn run_compaction_incremental_merges_file_lists_from_previous_summary() {
             keep_recent_tokens: 1,
             ..Default::default()
         },
+        &CompactionPrompts::default(),
         &summarizer,
     )
     .await
@@ -824,6 +923,7 @@ async fn run_compaction_returns_none_when_nothing_new_since_last_compaction() {
             keep_recent_tokens: 1,
             ..Default::default()
         },
+        &CompactionPrompts::default(),
         &summarizer,
     )
     .await
@@ -853,6 +953,7 @@ async fn run_compaction_rejects_length_and_error_summaries() {
             keep_recent_tokens: 10,
             ..Default::default()
         },
+        &CompactionPrompts::default(),
         &*summarizer,
     )
     .await
@@ -881,6 +982,7 @@ async fn run_compaction_rejects_length_and_error_summaries() {
             keep_recent_tokens: 10,
             ..Default::default()
         },
+        &CompactionPrompts::default(),
         &LengthSummarizer,
     )
     .await
@@ -908,6 +1010,7 @@ async fn run_compaction_rejects_length_and_error_summaries() {
             keep_recent_tokens: 10,
             ..Default::default()
         },
+        &CompactionPrompts::default(),
         &ErrorSummarizer,
     )
     .await
