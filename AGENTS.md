@@ -95,7 +95,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `src/entry.rs` | 会话 entry 类型：14 种变体（pi 11 种 + latent 扩展 tool_set_change/mode_change/context_ref），8 位 hex id + parentId 构成树；时间戳毫秒整数 |
 | `src/manager.rs` | `SessionManager`：append-only JSONL 树唯一权威；`branch()` 移动 leaf 指针零拷贝分叉；崩溃半行恢复；`find_latest_session_file`/`list_session_files`（--continue/-l/TUI 会话切换共用候选集，按 mtime 倒序、排除子会话 tag 文件） |
 | `src/projection.rs` | 上下文重建三算法（纯函数）：leaf→root 回溯、最新 compaction 虚拟展开、context_edit 投影（只投影 index==0 的 compaction）；哪些 entry 进/不进模型上下文 |
-| `src/compaction.rs` | 自动压缩全套：触发阈值（窗口 − reserve，reserve 支持绝对值/百分比双轨）、token 估算（usage 优先 + chars/4 启发式）、切点算法（**绝不在 toolResult 处切**）、序列化（tool result 截 2000 字符）、`Summarizer` trait 注入接缝、length/error 摘要拒绝入库 |
+| `src/compaction.rs` | 自动压缩全套：触发阈值（窗口 − reserve，reserve 支持绝对值/百分比双轨）、token 估算（usage 优先 + chars/4 启发式）、切点算法（**绝不在 toolResult 处切**）、序列化（tool result 截 2000 字符）、`Summarizer` trait 注入接缝、length/error 摘要拒绝入库；提示词三节外置（`CompactionPrompts` + `split_compaction_prompt`：块外=system 角色/`<compact>`=首次/`<update>`=增量，未定义节回退内置） |
 | `tests/session_tree_and_compaction.rs` | 16 个集成测试：分叉投影、多压缩、切点边界、端到端 run_compaction、半行恢复 |
 
 ### crates/latent-tools — L2 可选组件：内置 8 工具
@@ -198,7 +198,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 
 | 文件 | 说明 |
 |---|---|
-| `src/assembly.rs` | **共享装配点** `build_session`（自 latent-cli 迁出，四种运行模式与聊天网关共用）：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子（仅 Plan 包装）+ LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；后台任务登记表与 `AgentFollowUpNotifier` 装配（bash 转后台 + task_status 工具，主会话与 subagent 池共享 registry，agent 弱引回填）；settings 解析（仅全局数据目录 settings.json）；`switch_new_session`/`switch_resume_session` |
+| `src/assembly.rs` | **共享装配点** `build_session`（自 latent-cli 迁出，四种运行模式与聊天网关共用）：扩展总线 + 权限引擎 + 审批/扩展两层 hooks 洋葱（Approval 最外 → Extension）+ 沙箱 spawn 钩子（仅 Plan 包装）+ LATENT_* 环境 + 重试装饰器 + web 四工具 + LoadSkill/Subagent 工具 + 会话持久化与压缩器；后台任务登记表与 `AgentFollowUpNotifier` 装配（bash 转后台 + task_status 工具，主会话与 subagent 池共享 registry，agent 弱引回填）；settings 解析（仅全局数据目录 settings.json）；system-prompt.md 与 compact-prompt.md 外置提示词装配（后者三节拆分后注入 SessionCompactor/ProviderSummarizer）；`switch_new_session`/`switch_resume_session` |
 | `src/bootstrap.rs` | 入口层共享助手：`resolve_provider_and_model`（mock + models.json 体系）、`resolve_session_store`（-c/-r）、`print_session_list`、`notify_legacy_data_dir`、`maybe_dispatch_landlock_helper`（**两个 bin 的 main 开头都必须调用**，否则 Linux 沙箱静默失效） |
 | `src/events.rs` | json/rpc/聊天网关共用的事件 → JSON 映射（剥离流式 partial） |
 | `src/slash.rs` | 斜杠命令解析层（`COMMANDS`/`SlashAction`/`parse`/`help_markdown`；TUI 的 `popup_entries()` 留在 latent-cli） |
@@ -276,6 +276,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | skills | `.latent/skills/<name>/SKILL.md` / `<数据目录>/skills/…` | frontmatter name/description（必填）+ 正文；经 `load_skill` 工具按需加载，或输入框 `/skill <名称>` 前缀随消息自动加载 —— 两条路径均以 developer 角色注入模型上下文 |
 | agents | `.latent/agents/<name>.md` / `<数据目录>/agents/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
 | system-prompt.md | `.latent/system-prompt.md` / `<数据目录>/system-prompt.md` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
+| compact-prompt.md | `.latent/compact-prompt.md` / `<数据目录>/compact-prompt.md` | 压缩提示词外置（/compact、阈值自动压缩、overflow 恢复共用）：块外正文 = 摘要请求 system 角色，`<compact>` 块 = 首次压缩指令，`<update>` 块 = 增量压缩指令（旧摘要仍以 `<previous-summary>` 标签前置）；同名块按序拼接、未闭合取余下全文、空节回退内置；装配期读一次，中途修改不生效 |
 
 会话文件写 `<数据目录>/sessions/<项目前缀>/`（目录名 = cwd 编码；文件名 `<时间>__<tag>__<id>.jsonl`，时间为本地 %Y%m%d-%H%M%S）；`contextSnapshot` 开启时请求快照落旁路 `.ctx/` 目录，不进模型上下文。
 

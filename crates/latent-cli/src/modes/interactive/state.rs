@@ -748,8 +748,8 @@ mod tests {
     #[test]
     fn stream_markdown_cache_incremental_matches_one_shot() {
         // 覆盖:围栏(闭合/未闭合)、围栏后直接跟标题、连续空行折叠、
-        // 表格、列表、引用、EOF 尾部空行
-        let full = "# 标题\n\n正文 **bold** 与 `code`。\n\n```rust\nlet a = 1;\nlet s = \"x\";\n```\n# 围栏后直接跟标题\n- 列表项\n- 第二项\n\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n> 引用\n\n尾段\n\n\n```python\nx = 1";
+        // 表格(含长单元格折行)、列表、引用、EOF 尾部空行
+        let full = "# 标题\n\n正文 **bold** 与 `code`。\n\n```rust\nlet a = 1;\nlet s = \"x\";\n```\n# 围栏后直接跟标题\n- 列表项\n- 第二项\n\n\n| a | b |\n|---|---|\n| 这是一段比较长的单元格内容需要折行显示 | 2 |\n\n> 引用\n\n尾段\n\n\n```python\nx = 1";
         let theme = Theme::dark_ansi();
         let md = Markdown::new(&theme);
         let mut cache = StreamMarkdownCache {

@@ -587,6 +587,77 @@ pub fn update_summarization_prompt() -> String {
     format!("{UPDATE_SUMMARIZATION_HEADER}\n\n{UPDATE_SUMMARIZATION_INSTRUCTIONS}")
 }
 
+/// 用户外置压缩提示词的三节(compact-prompt.md):`system` = 摘要请求的
+/// system 角色(块外正文),`compact` = 首次压缩指令(`<compact>` 标记块),
+/// `update` = 增量压缩指令(`<update>` 标记块)。None = 该节未定义,
+/// 回退内置模板。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompactionPrompts {
+    pub system: Option<String>,
+    pub compact: Option<String>,
+    pub update: Option<String>,
+}
+
+/// 拆分外置 compact-prompt.md 为三节:块外正文 = system 角色,`<compact>` =
+/// 首次压缩指令,`<update>` = 增量压缩指令(语义对齐 system-prompt.md 的
+/// `<rules>` 拆分:同名标记块可多处、按出现顺序拼接;未闭合标记把余下全文
+/// 归该节;某节 trim 后为空 = 未定义)。未知标记不识别,原样留在块外正文。
+pub fn split_compaction_prompt(text: &str) -> CompactionPrompts {
+    const COMPACT_OPEN: &str = "<compact>";
+    const COMPACT_CLOSE: &str = "</compact>";
+    const UPDATE_OPEN: &str = "<update>";
+    const UPDATE_CLOSE: &str = "</update>";
+
+    enum Section {
+        Compact,
+        Update,
+    }
+
+    let mut outside = String::new();
+    let mut compact_parts: Vec<&str> = Vec::new();
+    let mut update_parts: Vec<&str> = Vec::new();
+    let mut rest = text;
+    loop {
+        let next = match (rest.find(COMPACT_OPEN), rest.find(UPDATE_OPEN)) {
+            (Some(c), Some(u)) if u < c => Some((u, UPDATE_OPEN, UPDATE_CLOSE, Section::Update)),
+            (Some(c), _) => Some((c, COMPACT_OPEN, COMPACT_CLOSE, Section::Compact)),
+            (None, Some(u)) => Some((u, UPDATE_OPEN, UPDATE_CLOSE, Section::Update)),
+            (None, None) => None,
+        };
+        let Some((start, open, close, section)) = next else {
+            outside.push_str(rest);
+            break;
+        };
+        outside.push_str(&rest[..start]);
+        let after_open = &rest[start + open.len()..];
+        match after_open.find(close) {
+            Some(end) => {
+                match section {
+                    Section::Compact => compact_parts.push(&after_open[..end]),
+                    Section::Update => update_parts.push(&after_open[..end]),
+                }
+                rest = &after_open[end + close.len()..];
+            }
+            None => {
+                match section {
+                    Section::Compact => compact_parts.push(after_open),
+                    Section::Update => update_parts.push(after_open),
+                }
+                rest = "";
+            }
+        }
+    }
+
+    let outside = outside.trim();
+    let compact = compact_parts.join("\n").trim().to_string();
+    let update = update_parts.join("\n").trim().to_string();
+    CompactionPrompts {
+        system: (!outside.is_empty()).then(|| outside.to_string()),
+        compact: (!compact.is_empty()).then_some(compact),
+        update: (!update.is_empty()).then_some(update),
+    }
+}
+
 /// length 摘要不可入库(06 文档 getSummarizationFailure)。
 pub fn get_summarization_failure(response: &SummarizationResponse, label: &str) -> Option<String> {
     match response.stop_reason {
@@ -703,9 +774,13 @@ pub struct CompactionOutcome {
 /// 取舍:分割 turn 时不做 history/prefix 两次请求,
 /// 单请求覆盖全范围,turn_start_index 经 `CompactionOutcome` 的 details 之外
 /// 由调用方按需从 entries 推导。
+///
+/// 提示词覆盖:`prompts` 的 compact/update 节已定义时取代对应内置模板,
+/// 未定义的节回退内置(见 `CompactionPrompts`)。
 pub async fn run_compaction(
     entries: &[Entry],
     settings: &CompactionSettings,
+    prompts: &CompactionPrompts,
     summarizer: &dyn Summarizer,
 ) -> Result<Option<CompactionOutcome>, String> {
     let projection = build_session_projection(entries, None);
@@ -761,11 +836,17 @@ pub async fn run_compaction(
                 "<previous-summary>\n{previous}\n</previous-summary>\n\n{}",
                 serialize_conversation(&summarized_messages)
             ),
-            update_summarization_prompt(),
+            prompts
+                .update
+                .clone()
+                .unwrap_or_else(update_summarization_prompt),
         ),
         None => (
             serialize_conversation(&summarized_messages),
-            SUMMARIZATION_PROMPT.to_string(),
+            prompts
+                .compact
+                .clone()
+                .unwrap_or_else(|| SUMMARIZATION_PROMPT.to_string()),
         ),
     };
     // 序列化后为空(短会话切点落在首个 user 消息,范围内只有元数据 entry)
@@ -831,4 +912,67 @@ pub async fn run_compaction(
         details,
         usage: response.usage,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_without_markers_treats_whole_text_as_system() {
+        let prompts = split_compaction_prompt("You are a summarizer.\nOnly output the summary.");
+        assert_eq!(
+            prompts.system.as_deref(),
+            Some("You are a summarizer.\nOnly output the summary.")
+        );
+        assert_eq!(prompts.compact, None);
+        assert_eq!(prompts.update, None);
+    }
+
+    #[test]
+    fn split_reads_all_three_sections() {
+        let text = "system guardrail\n\n<compact>\nfirst template\n</compact>\n\n<update>\nupdate template\n</update>\n";
+        let prompts = split_compaction_prompt(text);
+        assert_eq!(prompts.system.as_deref(), Some("system guardrail"));
+        assert_eq!(prompts.compact.as_deref(), Some("first template"));
+        assert_eq!(prompts.update.as_deref(), Some("update template"));
+    }
+
+    #[test]
+    fn split_blank_sections_fall_back_to_none() {
+        // 定义了块结构但内容为空白 = 未定义(回退内置),块外全空白同理
+        let prompts = split_compaction_prompt("<compact>   </compact>\n\n<update>\n\t\n</update>");
+        assert_eq!(prompts.system, None);
+        assert_eq!(prompts.compact, None);
+        assert_eq!(prompts.update, None);
+    }
+
+    #[test]
+    fn split_joins_same_name_blocks_in_order() {
+        let text =
+            "<compact>A</compact><compact>B</compact><update>U1</update>tail<update>U2</update>";
+        let prompts = split_compaction_prompt(text);
+        assert_eq!(prompts.system.as_deref(), Some("tail"));
+        assert_eq!(prompts.compact.as_deref(), Some("A\nB"));
+        assert_eq!(prompts.update.as_deref(), Some("U1\nU2"));
+    }
+
+    #[test]
+    fn split_unclosed_tag_takes_rest_of_file() {
+        let prompts = split_compaction_prompt("sys\n<update>update rules never closed");
+        assert_eq!(prompts.system.as_deref(), Some("sys"));
+        assert_eq!(prompts.compact, None);
+        assert_eq!(
+            prompts.update.as_deref(),
+            Some("update rules never closed")
+        );
+    }
+
+    #[test]
+    fn split_unknown_tags_stay_in_outside_text() {
+        let prompts = split_compaction_prompt("<foo>bar</foo>");
+        assert_eq!(prompts.system.as_deref(), Some("<foo>bar</foo>"));
+        assert_eq!(prompts.compact, None);
+        assert_eq!(prompts.update, None);
+    }
 }

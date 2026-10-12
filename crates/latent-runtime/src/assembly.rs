@@ -322,6 +322,39 @@ fn system_prompt_override_from(cwd: Option<&Path>, latent_dir: Option<&Path>) ->
     None
 }
 
+/// 压缩提示词外置文件(用户可编辑):项目 `.latent/compact-prompt.md` → 全局
+/// 数据目录 `compact-prompt.md`,首个存在且非空的文件生效。文件经
+/// `latent_session::split_compaction_prompt` 拆三节:块外正文 = 摘要请求的
+/// system 角色,`<compact>` = 首次压缩指令,`<update>` = 增量压缩指令;
+/// 未定义的节回退内置模板。仅在装配期读取一次,会话中途修改不生效。
+pub fn load_compaction_prompt_override() -> Option<String> {
+    let cwd = std::env::current_dir().ok();
+    let dir = latent_dir();
+    compaction_prompt_override_from(cwd.as_deref(), dir.as_deref())
+}
+
+/// 纯函数面(可测):按 项目 → 全局 找 compact-prompt.md,空白文件视为未配置。
+fn compaction_prompt_override_from(cwd: Option<&Path>, latent_dir: Option<&Path>) -> Option<String> {
+    let mut paths = Vec::new();
+    if let Some(cwd) = cwd {
+        paths.push(cwd.join(".latent/compact-prompt.md"));
+    }
+    if let Some(dir) = latent_dir {
+        paths.push(dir.join("compact-prompt.md"));
+    }
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 /// 装配产物:四种模式共享的业务核句柄。`session_manager` 供 rpc 模式的
 /// get_tree/get_entries/fork 命令查询会话树(latent-session 是可选组件);
 /// `manager_holder` 是可切换指针 —— /new 运行期新建 session 时整体换目标,
@@ -1350,10 +1383,16 @@ pub async fn build_session(options: BuildOptions) -> Result<BuiltSession, String
     tools.push(subagent_tool.clone());
 
     let compaction_settings: latent_session::CompactionSettings = compaction.clone().into();
+    // 用户外置压缩提示词(.latent/compact-prompt.md,项目→全局):三节拆分,
+    // 未定义节回退内置模板(块外=system 角色,<compact>=首次,<update>=增量)
+    let compaction_prompts = load_compaction_prompt_override()
+        .map(|text| latent_session::split_compaction_prompt(&text))
+        .unwrap_or_default();
     let compactor: Arc<dyn latent_core::ContextCompactor> = Arc::new(SessionCompactor {
         manager_holder: manager_holder.clone(),
         provider: provider.clone(),
         settings: compaction_settings,
+        prompts: compaction_prompts,
     });
     // 外置提示词 + 自定义规则:同一个文件(.latent/system-prompt.md)一次读出
     let prompt_override = load_system_prompt_override();
@@ -1638,6 +1677,8 @@ impl SessionSink for SessionManagerSink {
 struct ProviderSummarizer {
     provider: Arc<dyn latent_ai::Provider>,
     model: latent_ai::Model,
+    /// 摘要请求的 system 角色(compact-prompt.md 块外正文);None = 内置
+    system_prompt: Option<String>,
 }
 
 #[async_trait]
@@ -1658,9 +1699,13 @@ impl latent_session::Summarizer for ProviderSummarizer {
         use latent_agent::LoopHooks as _;
         let llm_messages = latent_agent::PassthroughHooks.convert_to_llm(&messages);
         // 摘要请求挂专用 system 提示词(一次性异构请求,不参与正常对话的缓存前缀);
-        // 无工具定义,防止摘要模型续写对话或调用工具
+        // 无工具定义,防止摘要模型续写对话或调用工具;用户外置覆盖优先
         let transcript = latent_ai::normalize_context(latent_ai::Context {
-            system_prompt: Some(latent_session::SUMMARIZATION_SYSTEM_PROMPT.to_string()),
+            system_prompt: Some(
+                self.system_prompt
+                    .clone()
+                    .unwrap_or_else(|| latent_session::SUMMARIZATION_SYSTEM_PROMPT.to_string()),
+            ),
             messages: llm_messages,
             tools: Vec::new(),
         });
@@ -1700,6 +1745,8 @@ struct SessionCompactor {
     manager_holder: SessionManagerHolder,
     provider: Arc<dyn latent_ai::Provider>,
     settings: latent_session::CompactionSettings,
+    /// 用户外置压缩提示词(compact-prompt.md 三节);未定义节回退内置模板
+    prompts: latent_session::CompactionPrompts,
 }
 
 #[async_trait]
@@ -1729,9 +1776,11 @@ impl latent_core::ContextCompactor for SessionCompactor {
         let summarizer = ProviderSummarizer {
             provider: self.provider.clone(),
             model: model.clone(),
+            system_prompt: self.prompts.system.clone(),
         };
         if let Some(outcome) =
-            latent_session::run_compaction(&entries, &self.settings, &summarizer).await?
+            latent_session::run_compaction(&entries, &self.settings, &self.prompts, &summarizer)
+                .await?
         {
             manager
                 .append_compaction(
@@ -1994,6 +2043,43 @@ mod tests {
         );
     }
 
+    // ---- 压缩提示词外置文件(.latent/compact-prompt.md) ----
+
+    #[test]
+    fn compaction_prompt_override_unset_yields_none() {
+        let project = TempDir::new("cp_unset");
+        assert_eq!(
+            compaction_prompt_override_from(Some(&project.0), None),
+            None,
+            "未配置 = None(用内置压缩提示词)"
+        );
+    }
+
+    #[test]
+    fn compaction_prompt_override_project_wins_global_fallback_blank_skipped() {
+        let project = TempDir::new("cp_prio");
+        let global = TempDir::new("cp_prio_global");
+        global.write_file(".latent/compact-prompt.md", "global compact prompt");
+        assert_eq!(
+            compaction_prompt_override_from(Some(&project.0), Some(&global.0.join(".latent"))),
+            Some("global compact prompt".into()),
+            "项目无文件时回退全局"
+        );
+        // 空白文件 = 未配置,继续看全局
+        project.write_file(".latent/compact-prompt.md", "   \n\t");
+        assert_eq!(
+            compaction_prompt_override_from(Some(&project.0), Some(&global.0.join(".latent"))),
+            Some("global compact prompt".into()),
+            "项目空白文件跳过"
+        );
+        project.write_file(".latent/compact-prompt.md", "project compact prompt\n");
+        assert_eq!(
+            compaction_prompt_override_from(Some(&project.0), Some(&global.0.join(".latent"))),
+            Some("project compact prompt".into()),
+            "项目文件优先且去除首尾空白"
+        );
+    }
+
     #[test]
     fn command_prefix_from_settings() {
         let dir = TempDir::new("project");
@@ -2240,6 +2326,7 @@ mod tests {
                 reserve_tokens: 0.0,
                 keep_recent_tokens: 0,
             },
+            prompts: Default::default(),
         };
         use latent_core::ContextCompactor as _;
         let messages = compactor.compact(&m).await.unwrap();
@@ -2444,6 +2531,7 @@ mod tests {
         let summarizer = ProviderSummarizer {
             provider: provider.clone(),
             model: latent_ai::Model::minimal("m1", "mock", "mock"),
+            system_prompt: None,
         };
         let response = summarizer
             .summarize(&latent_session::SummarizationRequest {
@@ -2470,6 +2558,35 @@ mod tests {
                 ..
             } => assert_eq!(text, "conversation body\n\nsummarize it"),
             other => panic!("第二条应为承载对话+指令的 user 消息: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_summarizer_uses_custom_system_prompt() {
+        use latent_session::Summarizer as _;
+
+        let provider = std::sync::Arc::new(RecordingProvider {
+            captured: std::sync::Mutex::new(Vec::new()),
+        });
+        let summarizer = ProviderSummarizer {
+            provider: provider.clone(),
+            model: latent_ai::Model::minimal("m1", "mock", "mock"),
+            system_prompt: Some("CUSTOM SUMMARIZER SYSTEM".into()),
+        };
+        summarizer
+            .summarize(&latent_session::SummarizationRequest {
+                messages: vec![latent_agent::AgentMessage::user("conversation body")],
+                instruction: "summarize it".into(),
+            })
+            .await
+            .unwrap();
+
+        let captured = provider.captured.lock().unwrap();
+        match &captured[0][0] {
+            latent_ai::Message::System { content, .. } => {
+                assert_eq!(content, "CUSTOM SUMMARIZER SYSTEM")
+            }
+            other => panic!("首条消息应为 System: {other:?}"),
         }
     }
 
