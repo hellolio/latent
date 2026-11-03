@@ -747,3 +747,54 @@ async fn anthropic_truncated_body_error_keeps_chain_and_is_retryable() {
         other => panic!("expected transport error terminal, got {other:?}"),
     }
 }
+
+/// send 阶段建连失败(无监听端口):错误文案沿 source 链保留真实原因
+/// (Connection refused),且落入可重试分类(提交点前静默重试的入口)。
+#[tokio::test]
+async fn send_error_keeps_chain_and_is_retryable() {
+    // 取一个端口后立即释放:本机回环上连接它必然被拒
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let base = format!("http://{addr}");
+
+    for (name, model) in [
+        ("openai", openai_model(&base)),
+        ("anthropic", anthropic_model(&base)),
+    ] {
+        let events = collect(
+            match name {
+                "openai" => {
+                    create_openai_completions_adapter()
+                        .stream(&model, TranscriptContext { messages: vec![] }, key_opts())
+                        .await
+                }
+                _ => {
+                    create_anthropic_adapter()
+                        .stream(&model, TranscriptContext { messages: vec![] }, key_opts())
+                        .await
+                }
+            },
+        )
+        .await;
+        assert_eq!(events.len(), 1, "[{name}] 建连失败应直接以 error 终态收尾");
+        match events.last() {
+            Some(AssistantMessageEvent::Error(message)) => {
+                let text = message.error_message.as_deref().unwrap_or_default();
+                assert!(
+                    text.contains("error sending request"),
+                    "[{name}] 错误文案应保留 reqwest 基础描述: {text}"
+                );
+                assert!(
+                    text.contains("Connection refused"),
+                    "[{name}] 错误文案应保留链上真实原因: {text}"
+                );
+                assert!(
+                    latent_ai::is_retryable_assistant_error(message),
+                    "[{name}] 建连失败应落入可重试分类: {text}"
+                );
+            }
+            other => panic!("[{name}] expected transport error terminal, got {other:?}"),
+        }
+    }
+}

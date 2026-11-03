@@ -14,7 +14,7 @@ use crate::adapters::{
     build_http_client, effective_max_tokens, error_with_partial, http_error_message,
     map_thinking_level, observe_payload, observe_provider_event, observe_response,
     parse_retry_after_header, read_chunk, resolve_cache_retention, setup_error, trim_base_url,
-    ReadOutcome,
+    describe_transport_error, ReadOutcome,
 };
 use crate::json_parse::{parse_json_with_repair, parse_streaming_json};
 use crate::provider::{AssistantMessageEventStream, Provider};
@@ -954,7 +954,7 @@ async fn stream_impl(
                 r
             }
             Err(err) => {
-                yield setup_error(&model, err.to_string());
+                yield setup_error(&model, describe_transport_error(&err));
                 return;
             }
         };

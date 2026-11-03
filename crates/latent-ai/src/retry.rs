@@ -66,6 +66,13 @@ static RETRYABLE_PROVIDER_ERROR: LazyLock<Regex> = LazyLock::new(|| {
         "connection.?lost",
         "other side closed",
         "fetch failed",
+        "error.?sending.?request",
+        "tcp.?connect",
+        "dns.?error",
+        "failed.?to.?lookup.?address",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
         "getaddrinfo",
         "ENOTFOUND",
         "EAI_AGAIN",
@@ -598,6 +605,17 @@ mod tests {
         // 错误链为空时靠基础文案兜底
         assert!(is_retryable_assistant_error(&error_message(
             "error decoding response body (stream interrupted, resend to continue)"
+        )));
+        // reqwest send 阶段建连失败:伞模式兜底 + 链上具体文案
+        assert!(is_retryable_assistant_error(&error_message(
+            "error sending request for url (https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions)"
+        )));
+        assert!(is_retryable_assistant_error(&error_message(
+            "error sending request for url (https://x): client error (Connect): tcp connect error: Connection refused (os error 61)"
+        )));
+        // DNS 解析失败(Rust/hyper 文案)
+        assert!(is_retryable_assistant_error(&error_message(
+            "error sending request for url (https://x): client error (Connect): dns error: failed to lookup address information: Name or service not known"
         )));
         assert!(is_retryable_assistant_error(&error_message(
             "incomplete message"
