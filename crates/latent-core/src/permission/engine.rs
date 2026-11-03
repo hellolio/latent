@@ -166,7 +166,8 @@ impl PermissionEngine {
                         ) {
                             ShellSafety::ReadOnly | ShellSafety::NetworkQuery => Verdict::Allow,
                             ShellSafety::Write => Verdict::Deny(format!(
-                                "Plan mode blocks commands that modify files or system state"
+                                "Plan mode blocks commands that modify files or system state: {}",
+                                shell_detail(command)
                             )),
                             ShellSafety::Unknown if self.sandbox_available => Verdict::Allow,
                             ShellSafety::Unknown => Verdict::Deny(format!(
