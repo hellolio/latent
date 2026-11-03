@@ -277,6 +277,8 @@ async fn event_loop(
             let partial = ctx.session.current().agent().partial_message();
             let frame = build_frame(state, app, partial.as_ref());
             app.redraw_all(&transcript).map_err(|e| e.to_string())?;
+            // busy/后台 subagent 活跃期帧动画高频重绘:真实光标虚拟化防闪烁
+            app.set_show_cursor_on_render(!state.is_animated());
             app.render(&frame.lines, frame.cursor)
                 .map_err(|e| e.to_string())?;
             continue;
@@ -327,7 +329,7 @@ async fn event_loop(
             // busy 或有后台 subagent 时驱动 spinner 动画(两者皆空闲时
             // pending 永不就绪,零开销;14 文档 §4.3 进度可见)
             _ = async {
-                if state.status.is_busy() || state.subagent_active > 0 {
+                if state.is_animated() {
                     tokio::time::sleep(SPINNER_INTERVAL).await;
                 } else {
                     futures::future::pending::<()>().await;
@@ -469,6 +471,8 @@ fn render_tick(
         frame.preview_full_len,
         &frame.scroll_extra,
     );
+    // busy/后台 subagent 活跃期帧动画高频重绘:真实光标虚拟化防闪烁
+    app.set_show_cursor_on_render(!state.is_animated());
     app.render(&frame.lines, frame.cursor)
 }
 

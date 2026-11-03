@@ -35,8 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/hellolio/latent/main/install.sh | s
 git clone https://github.com/hellolio/latent.git
 cd latent
 cargo build --release -p latent
-# 产物在 target/release/latent，可复制到 PATH：
-cp target/release/latent /usr/local/bin/
+cp target/release/latent ~/.local/bin
 ```
 
 > 没有 API key 也能先体验：`cargo run -p latent -- --mock "你好"` 会用内置 mock provider 走通全链路。
