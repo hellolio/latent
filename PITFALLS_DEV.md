@@ -79,3 +79,9 @@
 
 - **坑**: 按 DEV-013 整块替换 `render_table` 时，旧函数体内定义的 `is_separator` 闭包随替换一起消失，新函数体引用它直接编译失败；若新写法恰好不再引用某个内部 helper，则会静默丢能力而非报错。
 - **规避**: 整函数替换前先盘点旧函数体内定义了哪些闭包/局部变量 helper：仍需要的提升为自由函数或搬进新函数体；替换后 `cargo check` 必跑（DEV-013 同款），不能只依赖锚点正确。
+
+## DEV-015: reqwest 把 body 读取失败统一包装成 Kind::Decode,真实原因在 source() 链里
+
+- **坑**: `bytes_stream()` 产出的任何 body 读取错误(连接被中间设备重置/截断/HTTP2 流错误)经 reqwest 统一包装成 decode 类错误,`to_string()` 恒为 "error decoding response body"——直接透传给用户毫无诊断价值,且重试分类正则(连接/超时类词)全部匹配不上,提交点前本可静默重试的传输中断也直接报错。
+- **证据**: reqwest 0.12.28 `async_impl/response.rs` 的 `bytes_stream()` 对 body 逐项 `map_err(crate::error::decode)`;hyper 的真实原因(如 "end of file before message length reached")在 `err.source()` 链里。另:`http2_keep_alive_*` builder 方法被 `http2` feature 门控,`default-features = false` 时不存在,启用后 https 经 ALPN 协商 h2、明文 http(本地 mock)仍走 h1 不受影响。
+- **规避**: 读流错误必须沿 `source()` 链拼接(限深+相邻去重)再交给重试分类;错误链文案里出现 connection reset/incomplete message 等词后自动落入现有可重试词表,decode 基础文案本身也应加入词表兜底。见 `adapters/mod.rs::describe_transport_error`。

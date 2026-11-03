@@ -76,6 +76,10 @@ static RETRYABLE_PROVIDER_ERROR: LazyLock<Regex> = LazyLock::new(|| {
         "timed? out",
         "timeout",
         "terminated",
+        "decoding response body",
+        "incomplete.?message",
+        "connection.?reset",
+        "stream.?interrupted",
         "websocket.?closed",
         "websocket.?error",
         "ended without",
@@ -586,6 +590,17 @@ mod tests {
         )));
         assert!(is_retryable_assistant_error(&error_message(
             "Connection refused"
+        )));
+        // reqwest body 读取失败(完整错误链含真实原因)
+        assert!(is_retryable_assistant_error(&error_message(
+            "error decoding response body: connection error: Connection reset by peer (os error 54) (stream interrupted, resend to continue)"
+        )));
+        // 错误链为空时靠基础文案兜底
+        assert!(is_retryable_assistant_error(&error_message(
+            "error decoding response body (stream interrupted, resend to continue)"
+        )));
+        assert!(is_retryable_assistant_error(&error_message(
+            "incomplete message"
         )));
         assert!(is_retryable_assistant_error(&error_message(
             "Anthropic stream ended before message_stop"

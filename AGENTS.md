@@ -66,7 +66,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `src/json_parse.rs` | 流式 JSON 尽力解析：`repair_json` 状态机修复 + `complete_partial_json` 补全未闭合容器，全败返回空对象永不 panic |
 | `src/sse.rs` | SSE / 按行解码器（跨 chunk 多字节安全、扫描偏移避免 O(n²)） |
 | `src/mock.rs` | 测试用 `MockProvider`（文本分块流式）与 `ScriptedProvider`（按 turn 出脚本，供集成测试） |
-| `src/adapters/mod.rs` | 适配器共享设施：HTTP 错误统一文案、cancel 竞速读块、观察回调 panic 吞掉、thinking level 映射 |
+| `src/adapters/mod.rs` | 适配器共享设施：HTTP 错误统一文案、cancel 竞速读块、传输错误沿 source() 链拼接完整原因（reqwest body 读失败统一包装成 decode 错误）、共享 HTTP 客户端（TCP/HTTP2 keepalive + 池空闲超时，防长空闲后复用半死连接）、观察回调 panic 吞掉、thinking level 映射 |
 | `src/adapters/anthropic.rs` | anthropic-messages 适配器：7 个 compat 开关、Developer→user 降级、连续 toolResult 合并、thinking 签名回退、温度与思考互斥 |
 | `src/adapters/openai_completions.rs` | openai-completions 适配器：按 provider/baseUrl 自动 compat 检测（max_tokens 字段、六种 thinking_format、deepseek reasoning_content 等） |
 | `tests/adapters.rs` | 适配器集成测试：本地一次性 SSE 服务器；toolcall partial json、429 分类、缺 key 前置报错、流早断、取消 → Aborted |

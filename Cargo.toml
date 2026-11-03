@@ -49,7 +49,7 @@ tokio-util = "0.7"
 uuid = { version = "1", features = ["v7", "serde"] }
 
 # latent-ai 真实适配器所需(M1):HTTP/SSE、错误文案正则分类、流式事件构造
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
 regex = "1"
 async-stream = "0.3"
 bytes = "1"
