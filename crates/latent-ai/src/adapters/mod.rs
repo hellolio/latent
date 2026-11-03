@@ -42,15 +42,32 @@ pub(crate) async fn read_chunk(
     }
 }
 
+/// 流中断提示后缀:decode 类传输错误(响应体读取阶段断连)附加;
+/// 会话层据此识别可自动重发的中断(run_with_recovery)。
+pub(crate) const STREAM_INTERRUPTED_HINT: &str = "(stream interrupted, resend to continue)";
+
 /// 传输错误的完整文案:沿 source() 链逐层拼接(限深 + 相邻去重),
 /// 保住被 reqwest 包装层藏掉的真实原因(如 connection reset/incomplete message)。
 pub(crate) fn describe_transport_error(err: &reqwest::Error) -> String {
     let text = format_error_chain(err);
     if err.is_decode() {
-        format!("{text} (stream interrupted, resend to continue)")
+        format!("{text} {STREAM_INTERRUPTED_HINT}")
     } else {
         text
     }
+}
+
+/// 流中断类错误文案判定(会话层自动重发的资格线):decode 类传输错误的
+/// HINT、重试装饰器/适配器在流未走到终态时的合成文案。quota/HTTP 状态
+/// 码/建连失败等非中断类不匹配(建连失败在提交点前,由重试装饰器处理)。
+pub fn is_stream_interrupted_error(message: &str) -> bool {
+    const MARKERS: [&str; 3] = [
+        "stream interrupted",
+        "stream ended without",
+        "stream ended before",
+    ];
+    let lowered = message.to_lowercase();
+    MARKERS.iter().any(|marker| lowered.contains(marker))
 }
 
 fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
@@ -278,5 +295,32 @@ mod tests {
         assert_eq!(format_error_chain(&err), "same text");
         let leaf = Leaf("root cause only");
         assert_eq!(format_error_chain(&leaf), "root cause only");
+    }
+
+    #[test]
+    fn stream_interrupted_classifier_matches_transport_breaks_only() {
+        assert!(is_stream_interrupted_error(
+            "error decoding response body: error reading a body from connection: stream closed because of a broken pipe (stream interrupted, resend to continue)"
+        ));
+        assert!(is_stream_interrupted_error(
+            "stream ended without a terminal event"
+        ));
+        assert!(is_stream_interrupted_error(
+            "Anthropic stream ended before message_stop"
+        ));
+        assert!(is_stream_interrupted_error(
+            "Anthropic stream ended without a stop reason"
+        ));
+        assert!(is_stream_interrupted_error(
+            "Stream ended without finish_reason"
+        ));
+        // 非中断类:建连失败(提交点前,装饰器处理)、quota、HTTP 状态
+        assert!(!is_stream_interrupted_error(
+            "error sending request for url (https://x): client error (Connect): tcp connect error: Connection refused (os error 61)"
+        ));
+        assert!(!is_stream_interrupted_error(
+            "insufficient_quota: billing cycle exhausted"
+        ));
+        assert!(!is_stream_interrupted_error("HTTP 503: overloaded"));
     }
 }

@@ -987,3 +987,115 @@ async fn tool_call_guard_inactive_in_confirm_mode() {
         "不应合成终止通知"
     );
 }
+
+/// 提交点后断连的流中断错误轮:partial 内容已流出(重试装饰器已提交,
+/// 不做中途重试),错误终态交由会话层恢复(run_with_recovery 流中断分支)。
+fn interrupted_turn(m: &Model, error: &str) -> ScriptedTurn {
+    let mut message = latent_ai::AssistantMessage::pending(m);
+    message.content = vec![latent_ai::ContentBlock::text("半截回复")];
+    message.stop_reason = latent_ai::StopReason::Error;
+    message.error_message = Some(error.to_string());
+    ScriptedTurn::new(message)
+}
+
+#[tokio::test]
+async fn stream_interrupt_error_auto_resends_once() {
+    let m = model();
+    let (session, log, _sink, _provider) = build_session(
+        vec![
+            interrupted_turn(
+                &m,
+                "error decoding response body: error reading a body from connection: stream closed because of a broken pipe (stream interrupted, resend to continue)",
+            ),
+            ScriptedTurn::text(&m, "重发成功"),
+        ],
+        vec![],
+        None,
+        SystemPromptOptions::default(),
+    )
+    .await;
+
+    let stop = session.prompt("开始").await.unwrap().stop();
+    assert_eq!(stop, RunStop::EndTurn, "流中断重发后应正常结束");
+
+    let events = log.events();
+    assert!(events.iter().any(|e| e == "retry_start"), "{events:?}");
+    assert!(events.iter().any(|e| e == "retry_end"), "{events:?}");
+
+    // 半截错误回复已从内存上下文丢弃,恢复轮回复在转录末尾
+    let messages = session.agent().messages();
+    let last = messages.last().unwrap().as_assistant().unwrap();
+    assert_eq!(last.text_content(), "重发成功");
+    assert!(
+        messages.iter().all(|message| {
+            message
+                .as_assistant()
+                .map(|assistant| assistant.stop_reason != latent_ai::StopReason::Error)
+                .unwrap_or(true)
+        }),
+        "错误 partial 不应留在内存上下文"
+    );
+}
+
+#[tokio::test]
+async fn stream_interrupt_error_resends_at_most_once() {
+    let m = model();
+    let (session, log, _sink, _provider) = build_session(
+        vec![
+            interrupted_turn(
+                &m,
+                "error decoding response body: stream closed because of a broken pipe (stream interrupted, resend to continue)",
+            ),
+            interrupted_turn(
+                &m,
+                "error decoding response body: stream closed because of a broken pipe (stream interrupted, resend to continue)",
+            ),
+        ],
+        vec![],
+        None,
+        SystemPromptOptions::default(),
+    )
+    .await;
+
+    let stop = session.prompt("开始").await.unwrap().stop();
+    match stop {
+        RunStop::Error(message) => {
+            assert!(message.contains("stream interrupted"), "{message}");
+        }
+        other => panic!("重发再失败应透出错误终态,得到 {other:?}"),
+    }
+    // 每次 run 至多重发一次:恰好一对 retry 事件
+    let events = log.events();
+    assert_eq!(
+        events.iter().filter(|e| *e == "retry_start").count(),
+        1,
+        "{events:?}"
+    );
+    assert_eq!(
+        events.iter().filter(|e| *e == "retry_end").count(),
+        1,
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn non_stream_errors_do_not_auto_resend() {
+    let m = model();
+    let (session, log, _sink, _provider) = build_session(
+        vec![ScriptedTurn::error(&m, "insufficient_quota: billing cycle exhausted")],
+        vec![],
+        None,
+        SystemPromptOptions::default(),
+    )
+    .await;
+
+    let stop = session.prompt("开始").await.unwrap().stop();
+    assert!(
+        matches!(stop, RunStop::Error(_)),
+        "非中断错误原样透出,得到 {stop:?}"
+    );
+    assert!(
+        !log.events().iter().any(|e| e == "retry_start"),
+        "非中断错误不应触发重发"
+    );
+}
