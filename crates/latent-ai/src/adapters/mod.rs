@@ -35,9 +35,70 @@ pub(crate) async fn read_chunk(
     };
     match item {
         Some(Ok(bytes)) => ReadOutcome::Chunk(bytes.to_vec()),
-        Some(Err(err)) => ReadOutcome::Transport(err.to_string()), // 保留原始文案供重试分类
+        // 保留完整错误链供重试分类(reqwest 把 body 读取阶段的传输失败统一包装成
+        // decode 错误,Display 恒为 "error decoding response body",真实原因在 source 链)
+        Some(Err(err)) => ReadOutcome::Transport(describe_transport_error(&err)),
         None => ReadOutcome::Ended,
     }
+}
+
+/// 流中断提示后缀:decode 类传输错误(响应体读取阶段断连)附加;
+/// 会话层据此识别可自动重发的中断(run_with_recovery)。
+pub(crate) const STREAM_INTERRUPTED_HINT: &str = "(stream interrupted, resend to continue)";
+
+/// 传输错误的完整文案:沿 source() 链逐层拼接(限深 + 相邻去重),
+/// 保住被 reqwest 包装层藏掉的真实原因(如 connection reset/incomplete message)。
+pub(crate) fn describe_transport_error(err: &reqwest::Error) -> String {
+    let text = format_error_chain(err);
+    if err.is_decode() {
+        format!("{text} {STREAM_INTERRUPTED_HINT}")
+    } else {
+        text
+    }
+}
+
+/// 流中断类错误文案判定(会话层自动重发的资格线):decode 类传输错误的
+/// HINT、重试装饰器/适配器在流未走到终态时的合成文案。quota/HTTP 状态
+/// 码/建连失败等非中断类不匹配(建连失败在提交点前,由重试装饰器处理)。
+pub fn is_stream_interrupted_error(message: &str) -> bool {
+    const MARKERS: [&str; 3] = [
+        "stream interrupted",
+        "stream ended without",
+        "stream ended before",
+    ];
+    let lowered = message.to_lowercase();
+    MARKERS.iter().any(|marker| lowered.contains(marker))
+}
+
+fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    const MAX_CHAIN_DEPTH: usize = 8;
+    let mut parts = vec![err.to_string()];
+    let mut current = err.source();
+    while let Some(source) = current {
+        if parts.len() >= MAX_CHAIN_DEPTH {
+            break;
+        }
+        let text = source.to_string();
+        if parts.last() != Some(&text) {
+            parts.push(text);
+        }
+        current = source.source();
+    }
+    parts.join(": ")
+}
+
+/// 共享 HTTP 客户端:流式响应不设整体超时;TCP keepalive + HTTP/2 keep-alive
+/// ping 保长空闲间隙的连接映射活性并快速检测半死连接;连接池空闲超时短于
+/// 常见中间设备(NAT/代理/LB)的静默掊断阈值,陈旧空闲连接主动丢弃、下轮重建。
+pub(crate) fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(15))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+        .http2_keep_alive_while_idle(true)
+        .build()
+        .unwrap_or_default()
 }
 
 /// 解析缓存保持期:显式优先,其次 LATENT_CACHE_RETENTION=long,默认 short(pi 语义)。
@@ -190,5 +251,76 @@ pub(crate) fn observe_provider_event(
 ) {
     if let Some(callback) = callback {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Leaf(&'static str);
+    impl std::fmt::Display for Leaf {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+    impl std::error::Error for Leaf {}
+
+    #[derive(Debug)]
+    struct Wrapper(&'static str, Leaf);
+    impl std::fmt::Display for Wrapper {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+    impl std::error::Error for Wrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.1)
+        }
+    }
+
+    #[test]
+    fn error_chain_joins_with_sources() {
+        let err = Wrapper("error decoding response body", Leaf("Connection reset by peer (os error 54)"));
+        assert_eq!(
+            format_error_chain(&err),
+            "error decoding response body: Connection reset by peer (os error 54)"
+        );
+    }
+
+    #[test]
+    fn error_chain_dedups_adjacent_and_stops_at_none() {
+        let err = Wrapper("same text", Leaf("same text"));
+        assert_eq!(format_error_chain(&err), "same text");
+        let leaf = Leaf("root cause only");
+        assert_eq!(format_error_chain(&leaf), "root cause only");
+    }
+
+    #[test]
+    fn stream_interrupted_classifier_matches_transport_breaks_only() {
+        assert!(is_stream_interrupted_error(
+            "error decoding response body: error reading a body from connection: stream closed because of a broken pipe (stream interrupted, resend to continue)"
+        ));
+        assert!(is_stream_interrupted_error(
+            "stream ended without a terminal event"
+        ));
+        assert!(is_stream_interrupted_error(
+            "Anthropic stream ended before message_stop"
+        ));
+        assert!(is_stream_interrupted_error(
+            "Anthropic stream ended without a stop reason"
+        ));
+        assert!(is_stream_interrupted_error(
+            "Stream ended without finish_reason"
+        ));
+        // 非中断类:建连失败(提交点前,装饰器处理)、quota、HTTP 状态
+        assert!(!is_stream_interrupted_error(
+            "error sending request for url (https://x): client error (Connect): tcp connect error: Connection refused (os error 61)"
+        ));
+        assert!(!is_stream_interrupted_error(
+            "insufficient_quota: billing cycle exhausted"
+        ));
+        assert!(!is_stream_interrupted_error("HTTP 503: overloaded"));
     }
 }

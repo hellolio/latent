@@ -35,8 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/hellolio/latent/main/install.sh | s
 git clone https://github.com/hellolio/latent.git
 cd latent
 cargo build --release -p latent
-# 产物在 target/release/latent，可复制到 PATH：
-cp target/release/latent /usr/local/bin/
+cp target/release/latent ~/.local/bin
 ```
 
 > 没有 API key 也能先体验：`cargo run -p latent -- --mock "你好"` 会用内置 mock provider 走通全链路。
@@ -243,6 +242,11 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [ ] 实现一个扩展用于测试扩展功能（文件搜索加强？暂时不做等其他功能稳定）
  - [ ] 实现可配置追加系统提示词（当前仅可替换，现有系统提示词替换功能已经足够？）
  - [ ] /compact命令可以设置压缩方式（auto，实时主动？上限触发被动压缩？）
+ - [ ] 压缩启动时，没有在上下文中看到相关提示词，需要检查是否正常工作
+ - [x] 增加/init命令
+ - [ ] 重新考虑默认工具，比如非bash工具，包括网络搜索，是否必要
+ - [ ] 并行开发，做多个git-workspace?
+ - [ ] 使用rust专用脚本语言roto构建插件
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 

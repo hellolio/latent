@@ -14,7 +14,10 @@ use latent_agent::{
     AgentError, AgentEvent, AgentMessage, LoopHooks, RequestUpdate, Subscriber, Tool, ToolBlock,
     ToolCallCtx, ToolExecution, ToolPatch, ToolResultCtx, TurnCtx, TurnDecision, TurnUpdate,
 };
-use latent_ai::{is_context_overflow, Message, Model, Provider, StreamOptions, ThinkingLevel};
+use latent_ai::{
+    is_context_overflow, is_stream_interrupted_error, Message, Model, Provider, StreamOptions,
+    ThinkingLevel,
+};
 
 use crate::extensions::{ExtensionActions, ExtensionDiagnostic, ExtensionRegistry, ExtensionUi};
 use crate::permission::{
@@ -26,6 +29,10 @@ use crate::system_prompt::{
     SystemPromptSections, SystemPromptState,
 };
 use latent_agent::{RunStop, TurnLimits};
+
+/// 流中断自动重发前的退避:瞬时断连通常亚秒级恢复;期间 abort 无害,
+/// continue_run 会立即以 aborted 终态收尾。
+const STREAM_RETRY_DELAY_MS: u64 = 1000;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
@@ -179,6 +186,9 @@ struct SessionRuntime {
     default_mode: SessionMode,
     /// 每次 run 只尝试一次 overflow 恢复(04 文档 _overflowRecoveryAttempted)
     overflow_recovery_attempted: bool,
+    /// 每次 run 只尝试一次流中断自动重发(提交点后断连:partial 已流出,
+    /// 装饰器不做中途重试,由会话层丢弃半截回复整体重发)
+    stream_retry_attempted: bool,
 }
 
 /// prompt 结果(T8,04 文档踩坑②):流式中按 streamingBehavior 转 steer 时返回
@@ -311,6 +321,7 @@ pub async fn create_agent_session(config: AgentSessionConfig) -> Result<AgentSes
             mode: SessionMode::Plan,
             default_mode: SessionMode::Plan,
             overflow_recovery_attempted: false,
+            stream_retry_attempted: false,
         }),
     })
 }
@@ -910,8 +921,9 @@ impl AgentSession {
         {
             let mut runtime = self.runtime.lock().unwrap();
             runtime.overflow_recovery_attempted = false;
+            runtime.stream_retry_attempted = false;
         }
-        let stop = run.await?;
+        let mut stop = run.await?;
 
         if let RunStop::Error(_) = &stop {
             let needs_recovery = {
@@ -974,6 +986,44 @@ impl AgentSession {
                 .await;
                 self.maybe_auto_compact().await;
                 return retry_stop.map_err(CoreError::from);
+            }
+        }
+        // 流中断自动重发:提交点后断连的传输错误(partial 已流出,装饰器不做
+        // 中途重试)在会话层丢弃半截回复整体重发一次;每次 run 至多一次。
+        if let RunStop::Error(message) = &stop {
+            let should_retry = {
+                let runtime = self.runtime.lock().unwrap();
+                !runtime.stream_retry_attempted && is_stream_interrupted_error(message)
+            };
+            if should_retry {
+                self.runtime.lock().unwrap().stream_retry_attempted = true;
+                self.broadcast(&AgentSessionEvent::AutoRetryStart {
+                    attempt: 1,
+                    delay_ms: STREAM_RETRY_DELAY_MS,
+                    reason: "stream interrupted: resending".into(),
+                })
+                .await;
+                // 退避中 abort 无害:continue_run 会立即以 aborted 终态收尾
+                tokio::time::sleep(std::time::Duration::from_millis(STREAM_RETRY_DELAY_MS)).await;
+                self.agent.drop_last_message();
+                match self.agent.continue_run().await {
+                    Ok(retry_stop) => {
+                        self.broadcast(&AgentSessionEvent::AutoRetryEnd {
+                            success: matches!(retry_stop, RunStop::EndTurn),
+                            reason: "stream interrupted: resend".into(),
+                        })
+                        .await;
+                        stop = retry_stop;
+                    }
+                    Err(_) => {
+                        // 重发未启动(如 budget 闩锁):保留原错误终态透出
+                        self.broadcast(&AgentSessionEvent::AutoRetryEnd {
+                            success: false,
+                            reason: "stream interrupted: resend failed to start".into(),
+                        })
+                        .await;
+                    }
+                }
             }
         }
         if let RunStop::EndTurn = &stop {

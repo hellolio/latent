@@ -66,7 +66,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `src/json_parse.rs` | 流式 JSON 尽力解析：`repair_json` 状态机修复 + `complete_partial_json` 补全未闭合容器，全败返回空对象永不 panic |
 | `src/sse.rs` | SSE / 按行解码器（跨 chunk 多字节安全、扫描偏移避免 O(n²)） |
 | `src/mock.rs` | 测试用 `MockProvider`（文本分块流式）与 `ScriptedProvider`（按 turn 出脚本，供集成测试） |
-| `src/adapters/mod.rs` | 适配器共享设施：HTTP 错误统一文案、cancel 竞速读块、观察回调 panic 吞掉、thinking level 映射 |
+| `src/adapters/mod.rs` | 适配器共享设施：HTTP 错误统一文案、cancel 竞速读块、传输错误沿 source() 链拼接完整原因（reqwest body 读失败统一包装成 decode 错误）、流中断错误分类器 `is_stream_interrupted_error`（会话层自动重发资格线）、共享 HTTP 客户端（TCP/HTTP2 keepalive + 池空闲超时，防长空闲后复用半死连接）、观察回调 panic 吞掉、thinking level 映射 |
 | `src/adapters/anthropic.rs` | anthropic-messages 适配器：7 个 compat 开关、Developer→user 降级、连续 toolResult 合并、thinking 签名回退、温度与思考互斥 |
 | `src/adapters/openai_completions.rs` | openai-completions 适配器：按 provider/baseUrl 自动 compat 检测（max_tokens 字段、六种 thinking_format、deepseek reasoning_content 等） |
 | `tests/adapters.rs` | 适配器集成测试：本地一次性 SSE 服务器；toolcall partial json、429 分类、缺 key 前置报错、流早断、取消 → Aborted |
@@ -122,7 +122,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 
 | 文件 | 说明 |
 |---|---|
-| `src/session.rs` | 业务核 `AgentSession`：prompt/steer/follow_up、模式切换、激活工具集切换、overflow 恢复（`run_with_recovery`）与自动压缩（`maybe_auto_compact`）、`SessionSink`/`ContextCompactor` trait、事件翻译层 `SessionBridge`；EndTurn 后补追加流式切档被跳过的模式节（转录已有模式节才补） |
+| `src/session.rs` | 业务核 `AgentSession`：prompt/steer/follow_up、模式切换、激活工具集切换、overflow 恢复与流中断自动重发（`run_with_recovery`：overflow → 压缩重放；流中断 → 丢弃半截回复重发一次，AutoRetry 事件上报）与自动压缩（`maybe_auto_compact`）、`SessionSink`/`ContextCompactor` trait、事件翻译层 `SessionBridge`；EndTurn 后补追加流式切档被跳过的模式节（转录已有模式节才补） |
 | `src/system_prompt.rs` | 系统提示词命名 sections 机制（preamble/tools/rules/project_context/env/addendum）；env 节含工作目录与当前本地时间，rules 节支持 system-prompt.md `<rules>` 标记块自定义追加；提示词不持久化，恢复时按配置重组 |
 | `src/model.rs` | `ModelResolver`：`provider/model` spec 解析、内置默认模型表、/model 候选清单 |
 | `src/config.rs` | models.json/settings.json 配置体系：仅全局数据目录（见 `src/paths.rs`）；apiKey 按环境变量名解析 |
@@ -202,6 +202,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | `src/bootstrap.rs` | 入口层共享助手：`resolve_provider_and_model`（mock + models.json 体系）、`resolve_session_store`（-c/-r）、`print_session_list`、`notify_legacy_data_dir`、`maybe_dispatch_landlock_helper`（**两个 bin 的 main 开头都必须调用**，否则 Linux 沙箱静默失效） |
 | `src/events.rs` | json/rpc/聊天网关共用的事件 → JSON 映射（剥离流式 partial） |
 | `src/slash.rs` | 斜杠命令解析层（`COMMANDS`/`SlashAction`/`parse`/`help_markdown`；TUI 的 `popup_entries()` 留在 latent-cli） |
+| `src/init.rs` | `/init` 提示词：内置默认模板（参照 Claude Code /init：常用命令/大图架构/目录索引）+ 外置覆盖查找（项目 `.latent/init-prompt.md` → 全局 `init-prompt.md`，首个非空整体替换；**dispatch 时读取**，中途修改即时生效）与附加要求尾部拼接（`assemble` 纯函数可测） |
 
 ### crates/latent-channel — L1 纯聊天域（零内部依赖，feature 门控渠道）
 
@@ -277,6 +278,7 @@ test -z "$(cargo tree -p latent-gateway  | grep 'latent-tui')"                  
 | agents | `.latent/agents/<name>.md` / `<数据目录>/agents/…` | frontmatter name/description/model/tools + 正文即 system prompt；驱动 `subagent` 工具与 `/subagent` 命令 |
 | system-prompt.md | `.latent/system-prompt.md` / `<数据目录>/system-prompt.md` | 块外内容替换系统提示词身份句（动态节保留），`<rules>...</rules>` 标记块内容追加进 `<rules>` 节（无标记块 = 全文是身份句） |
 | compact-prompt.md | `.latent/compact-prompt.md` / `<数据目录>/compact-prompt.md` | 压缩提示词外置（/compact、阈值自动压缩、overflow 恢复共用）：块外正文 = 摘要请求 system 角色，`<compact>` 块 = 首次压缩指令，`<update>` 块 = 增量压缩指令（旧摘要仍以 `<previous-summary>` 标签前置）；同名块按序拼接、未闭合取余下全文、空节回退内置；装配期读一次，中途修改不生效 |
+| init-prompt.md | `.latent/init-prompt.md` / `<数据目录>/init-prompt.md` | `/init` 提示词外置（创建/更新项目根 AGENTS.md）：首个存在且非空的文件整体替换内置默认提示词；项目优先全局，空白文件视为未配置；dispatch 时读取，会话中途修改即时生效；`/init <附加要求>` 的用户输入拼在提示词尾部 |
 
 会话文件写 `<数据目录>/sessions/<项目前缀>/`（目录名 = cwd 编码；文件名 `<时间>__<tag>__<id>.jsonl`，时间为本地 %Y%m%d-%H%M%S）；`contextSnapshot` 开启时请求快照落旁路 `.ctx/` 目录，不进模型上下文。
 

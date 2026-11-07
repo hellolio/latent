@@ -1,0 +1,16 @@
+[
+  {
+    "tool_calls": [
+      {
+        "name": "write",
+        "arguments": {
+          "path": "AGENTS.md",
+          "content": "# AGENTS.md\n\nThis file provides guidance to latent (an AI coding agent) when working with code in this repository.\n\n## Commands\n\n- cargo test\n"
+        }
+      }
+    ]
+  },
+  {
+    "text": "AGENTS.md 已生成,新会话生效"
+  }
+]

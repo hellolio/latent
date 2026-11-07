@@ -510,6 +510,12 @@ pub struct InteractiveState {
 }
 
 impl InteractiveState {
+    /// 帧动画进行中(busy 或后台 subagent 活跃):此状态下主循环每
+    /// 120ms 必出一帧,真实光标需虚拟化(画进编辑器行)防高频闪烁。
+    pub fn is_animated(&self) -> bool {
+        self.status.is_busy() || self.subagent_active > 0
+    }
+
     pub fn new(theme: Theme, width: usize) -> Self {
         InteractiveState {
             theme,

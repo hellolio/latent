@@ -18,7 +18,8 @@ pub mod transcript;
 pub mod types;
 
 pub use adapters::{
-    anthropic::create_anthropic_adapter, openai_completions::create_openai_completions_adapter,
+    anthropic::create_anthropic_adapter, is_stream_interrupted_error,
+    openai_completions::create_openai_completions_adapter,
 };
 
 pub use mock::{assistant_message, MockProvider, ScriptedProvider, ScriptedTurn};

@@ -42,6 +42,9 @@ fn parse_edits(args: &serde_json::Value) -> Result<Vec<Edit>, String> {
             .get("oldText")
             .and_then(|v| v.as_str())
             .ok_or("each edit requires string `oldText`")?;
+        if old_text.is_empty() {
+            return Err("oldText must not be empty".into());
+        }
         let new_text = edit
             .get("newText")
             .and_then(|v| v.as_str())
@@ -71,7 +74,9 @@ fn apply_edits(content: &str, edits: &[Edit]) -> Result<(String, usize), String>
         while let Some(pos) = content[from..].find(edit.old_text.as_str()) {
             let absolute = from + pos;
             matches.push(absolute);
-            from = absolute + 1;
+            // 按字符边界推进(等价于推进一个字符):+1 字节会落入多字节字符内部,
+            // 下一轮 content[from..] 直接 panic。
+            from = next_char_boundary(content, absolute + 1);
             if matches.len() > 1 {
                 break;
             }
@@ -115,6 +120,15 @@ fn apply_edits(content: &str, edits: &[Edit]) -> Result<(String, usize), String>
     Ok((out, first_changed_line))
 }
 
+/// index 不是字符边界时,向后对齐到第一个字符边界(调用方保证 index ≤ len)。
+fn next_char_boundary(content: &str, mut index: usize) -> usize {
+    while index < content.len() && !content.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+/// 统计剩余匹配数。前置条件由 apply_edits 保证:from 为字符边界且 ≤ len,needle 非空。
 fn count_rest(content: &str, needle: &str, from: usize) -> usize {
     let mut count = 0usize;
     let mut from = from;
@@ -374,6 +388,98 @@ mod tests {
 
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "same same different", "失败时不得写回");
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multibyte_first_char_match_does_not_panic() {
+        let dir = std::env::temp_dir().join(format!("latent-edit-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // 回归:oldText 首个匹配以多字节字符开头时,扫描起点 +1 字节曾落入字符内部 panic
+        let path = dir.join("arrow.txt");
+        tokio::fs::write(&path, "前置 →abc 后置\n").await.unwrap();
+        let tool = EditTool { cwd: dir.clone() };
+        let output = exec(
+            &tool,
+            serde_json::json!({
+                "path": "arrow.txt",
+                "edits": [{"oldText": "→abc", "newText": "→XYZ"}]
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(output.output.contains("Applied 1 edit(s)"));
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("→XYZ 后置"));
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multibyte_not_unique_reports_error_without_panic() {
+        let dir = std::env::temp_dir().join(format!("latent-edit-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // 回归:第二个匹配起点为多字节字符时,count_rest 的入参 from 曾是非边界
+        let path = dir.join("dup_arrow.txt");
+        tokio::fs::write(&path, "→ab →ab\n").await.unwrap();
+        let tool = EditTool { cwd: dir.clone() };
+        let err = exec(
+            &tool,
+            serde_json::json!({
+                "path": "dup_arrow.txt",
+                "edits": [{"oldText": "→ab", "newText": "x"}]
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("not unique"));
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "→ab →ab\n", "失败时不得写回");
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn four_byte_emoji_first_char_match_does_not_panic() {
+        let dir = std::env::temp_dir().join(format!("latent-edit-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // 4 字节 UTF-8 字符(emoji)开头的匹配,边界对齐需跨 3 字节
+        let path = dir.join("emoji.txt");
+        tokio::fs::write(&path, "🎉ok end\n").await.unwrap();
+        let tool = EditTool { cwd: dir.clone() };
+        let output = exec(
+            &tool,
+            serde_json::json!({
+                "path": "emoji.txt",
+                "edits": [{"oldText": "🎉ok", "newText": "🎉OK"}]
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(output.output.contains("Applied 1 edit(s)"));
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("🎉OK end"));
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_old_text_rejected_without_writing() {
+        let dir = std::env::temp_dir().join(format!("latent-edit-{}", uuid::Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // 回归:空 oldText 曾在 count_rest 中越界 panic,现在校验层直接拒绝
+        let path = dir.join("empty.txt");
+        tokio::fs::write(&path, "hello\n").await.unwrap();
+        let tool = EditTool { cwd: dir.clone() };
+        let err = exec(
+            &tool,
+            serde_json::json!({
+                "path": "empty.txt",
+                "edits": [{"oldText": "", "newText": "x"}]
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("oldText must not be empty"));
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(content, "hello\n", "失败时不得写回");
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 }

@@ -488,10 +488,15 @@ pub fn viewport(
     }
     lines.push(full_pad());
     if let Some((row, col)) = view.cursor {
-        cursor = Some((
-            col.min(width.saturating_sub(1)) as u16,
-            (editor_first_row + row) as u16,
-        ));
+        let col = col.min(width.saturating_sub(1));
+        // busy/后台 subagent 活跃期帧动画高频重绘:真实光标由 TuiApp 隐藏
+        // (只移动不显示)防闪烁,伪光标反色单元格画进编辑器行保持位置可见
+        if state.is_animated() {
+            if let Some(line) = lines.get_mut(editor_first_row + row) {
+                latent_tui::text::reverse_cell(line, col);
+            }
+        }
+        cursor = Some((col as u16, (editor_first_row + row) as u16));
     }
 
     // 6. footer 两行(上=左 cwd + 右 token 段;下=左 agent/模式 + 右模型)
@@ -533,15 +538,17 @@ pub fn viewport(
 /// 字符变白、扫过即恢复黄色。
 fn status_line(state: &InteractiveState) -> Vec<UiLine> {
     let theme = &state.theme;
-    let secs = state.spin * super::SPINNER_INTERVAL.as_millis() as usize / 1000;
+    let elapsed = latent_tui::footer::format_elapsed(
+        state.spin as u64 * super::SPINNER_INTERVAL.as_millis() as u64 / 1000,
+    );
     let text = match &state.status {
         Status::Idle => return Vec::new(),
         Status::Thinking => format!(
-            "{} Working ({secs}s · esc to interrupt)",
+            "{} Working ({elapsed} · esc to interrupt)",
             loader::frame(state.spin)
         ),
         Status::Tool(name) => format!(
-            "{} Running {name} ({secs}s · esc to interrupt)",
+            "{} Running {name} ({elapsed} · esc to interrupt)",
             loader::frame(state.spin)
         ),
         Status::Compacting => {
@@ -1302,6 +1309,70 @@ mod tests {
             .map(line_text)
             .collect();
         assert!(texts[0].contains("writing…"), "{texts:?}");
+    }
+
+    #[test]
+    fn status_line_elapsed_grows_human_readable() {
+        let mut state = state();
+        state.status = Status::Thinking;
+        state.spin = 625; // 625 * 120ms = 75s
+        let texts: Vec<String> = viewport(&state, None, 0, 6, 8)
+            .lines
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(texts[0].contains("Working (1m15s"), "{texts:?}");
+        state.spin = 30_025; // 1h0m3s
+        let texts: Vec<String> = viewport(&state, None, 0, 6, 8)
+            .lines
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(texts[0].contains("Working (1h0m"), "{texts:?}");
+    }
+
+    /// 第 `col` 格是否带 REVERSED(伪光标检验)。
+    fn reversed_at(line: &UiLine, col: usize) -> bool {
+        let mut base = 0usize;
+        for span in &line.spans {
+            let w = latent_tui::display_width(span.content.as_ref());
+            if col < base + w {
+                return span
+                    .style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED);
+            }
+            base += w;
+        }
+        false
+    }
+
+    #[test]
+    fn busy_frame_draws_fake_cursor_idle_does_not() {
+        let mut st = state();
+        st.status = Status::Thinking;
+        st.editor.set_text("hi");
+        let frame = viewport(&st, None, 0, 6, 8);
+        // 光标行由 frame.cursor 定位,不硬编码行号
+        let (col, row) = frame.cursor.expect("busy 时光标仍在编辑器内");
+        assert!(reversed_at(&frame.lines[row as usize], col as usize));
+        // 行内其他单元格不反色
+        assert!(!reversed_at(&frame.lines[row as usize], 0));
+
+        st.status = Status::Idle;
+        let frame = viewport(&st, None, 0, 6, 8);
+        let (col, row) = frame.cursor.expect("idle 时光标仍在编辑器内");
+        assert!(!reversed_at(&frame.lines[row as usize], col as usize));
+    }
+
+    #[test]
+    fn busy_frame_fake_cursor_on_placeholder_when_editor_empty() {
+        let mut st = state();
+        st.status = Status::Tool("bash".into());
+        let frame = viewport(&st, None, 0, 6, 8);
+        let (col, row) = frame.cursor.expect("空编辑器 cursor 落在占位行");
+        assert_eq!(col, 0);
+        assert!(reversed_at(&frame.lines[row as usize], col as usize));
     }
 
     #[test]

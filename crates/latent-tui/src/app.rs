@@ -145,6 +145,9 @@ pub struct TuiApp<W: Write = Stdout> {
     query_size: Box<dyn Fn() -> io::Result<(u16, u16)>>,
     /// 是否恢复真实终端(Drop 兜底用;内存 sink 上跳过 raw mode)。
     restores_terminal: bool,
+    /// 帧尾是否显示真实光标(busy 伪光标帧置 false:只移动不显示,防
+    /// 帧间 hide/show 闪烁;伪光标由 view 画进编辑器行)。
+    show_cursor_on_render: bool,
 }
 
 /// fullscreen 模式翻页重叠行数(对齐 pi `PAGE_SCROLL_OVERLAP`):翻页后
@@ -201,6 +204,7 @@ impl TuiApp<Stdout> {
             needs_reshape: false,
             query_size: Box::new(size),
             restores_terminal: true,
+            show_cursor_on_render: true,
         };
         let mut boot = String::new();
         if fullscreen {
@@ -300,6 +304,7 @@ impl<W: Write> TuiApp<W> {
             needs_reshape: false,
             query_size: Box::new(move || Ok(*size.0.borrow())),
             restores_terminal: false,
+            show_cursor_on_render: true,
         }
     }
 
@@ -433,7 +438,10 @@ impl<W: Write> TuiApp<W> {
             let sr = logical - self.viewport_top;
             if sr >= 0 && sr < self.rows as isize {
                 out.push_str(&move_to(col, sr as u16));
-                out.push_str(SHOW_CURSOR);
+                // 伪光标帧只移动不显示(位置保留 CPR/IME 锚点)
+                if self.show_cursor_on_render {
+                    out.push_str(SHOW_CURSOR);
+                }
             }
             // sr 越界时保持帧首的隐藏态(无需重复 HIDE)
         } // None: 帧首已隐藏
@@ -644,7 +652,10 @@ impl<W: Write> TuiApp<W> {
             };
             if sr < rows {
                 out.push_str(&move_to(col, sr as u16));
-                out.push_str(SHOW_CURSOR);
+                // 伪光标帧只移动不显示(位置保留 CPR/IME 锚点)
+                if self.show_cursor_on_render {
+                    out.push_str(SHOW_CURSOR);
+                }
             }
             // 越界时保持帧首的隐藏态(无需重复 HIDE)
         }
@@ -798,6 +809,13 @@ impl<W: Write> TuiApp<W> {
     /// 设置「松开拖选自动复制」开关(不影响选择/高亮/快捷键复制)。
     pub fn set_auto_copy_on_select(&mut self, on: bool) {
         self.auto_copy_on_select = on;
+    }
+
+    /// 设置帧尾是否显示真实光标。busy 伪光标帧传 false:真实光标只
+    /// 移动不显示(伪光标已画进行内),避免帧间 hide/show 高频闪烁;
+    /// 移动保留 CPR 查询/IME 锚点位置。
+    pub fn set_show_cursor_on_render(&mut self, on: bool) {
+        self.show_cursor_on_render = on;
     }
 
     /// 当前是否有有效选区(非单击的拖选区间;Ctrl+C 复制的判据)。
@@ -1612,6 +1630,45 @@ mod tests {
         let frame = sink.take();
         assert!(frame.contains("\x1b[10;4H"), "{frame:?}");
         assert!(frame.contains(SHOW_CURSOR), "{frame:?}");
+    }
+
+    #[test]
+    fn cursor_parked_without_show_when_disabled() {
+        // 伪光标帧(set_show_cursor_on_render(false)):真实光标只移动
+        // 不显示(CPR/IME 锚点保留,无帧间 hide/show 闪烁);恢复后重现
+        let (mut app, sink, _size) = app(40, 10);
+        let doc: Vec<UiLine> = (1..=8).map(|i| line(&format!("doc{i}"))).collect();
+        app.append_committed(&doc);
+        // 与 cursor_positions_inside_tail 同布局:光标落在屏幕行 9 → \x1b[10;4H
+        app.set_show_cursor_on_render(false);
+        app.render(&[line("tail-a"), line("tail-b")], Some((3, 1)))
+            .unwrap();
+        let frame = sink.take();
+        assert!(frame.contains("\x1b[10;4H"), "位置仍应移动: {frame:?}");
+        assert!(!frame.contains(SHOW_CURSOR), "{frame:?}");
+
+        app.set_show_cursor_on_render(true);
+        app.render(&[line("tail-a"), line("tail-b")], Some((3, 1)))
+            .unwrap();
+        assert!(sink.take().contains(SHOW_CURSOR));
+    }
+
+    #[test]
+    fn fullscreen_cursor_parked_without_show_when_disabled() {
+        // 对齐 fullscreen_cursor_pinned_to_editor_while_scrolled 布局:
+        // rows=8 + 1 尾行,光标 rel_row=0 → 屏幕行 7
+        let (mut app, sink, _size) = app_fullscreen(40, 8);
+        app.append_committed(&[line("doc")]);
+        app.set_show_cursor_on_render(false);
+        app.render(&[line("tail")], Some((3, 0))).unwrap();
+        let frame = sink.take();
+        assert!(frame.contains("\x1b[8;4H"), "位置仍应移动: {frame:?}");
+        assert!(!frame.contains(SHOW_CURSOR), "{frame:?}");
+
+        // 恢复显示后随下一帧重现
+        app.set_show_cursor_on_render(true);
+        app.render(&[line("tail")], Some((3, 0))).unwrap();
+        assert!(sink.take().contains(SHOW_CURSOR));
     }
 
     #[test]

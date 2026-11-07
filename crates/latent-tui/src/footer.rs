@@ -315,6 +315,18 @@ fn left_right_align(
     truncate_line(Line::from(spans), width)
 }
 
+/// 耗时整数紧凑格式(状态行计时器):`42s`(不足 1min)/ `1m15s`
+/// (≥1min 拆 m/s)/ `2h5m`(≥1h 拆 h/m,秒不再显示)。
+pub fn format_elapsed(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m{}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h{}m", seconds / 3600, seconds % 3600 / 60)
+    }
+}
+
 /// 耗时紧凑格式:`0.8s`(不足 1s 保留一位小数)/ `12.3s`(不足 1min 一位
 /// 小数)/ `1m2s`(≥1min 拆成 m/s,秒不进位为小数)。负数/NaN 归零。
 fn format_duration(seconds: f64) -> String {
@@ -668,6 +680,22 @@ mod tests {
         // 异常值归零,不 panic
         assert_eq!(format_duration(-1.0), "0.0s");
         assert_eq!(format_duration(f64::NAN), "0.0s");
+    }
+
+    #[test]
+    fn format_elapsed_human_units() {
+        // 不足 1min:整秒
+        assert_eq!(format_elapsed(0), "0s");
+        assert_eq!(format_elapsed(3), "3s");
+        assert_eq!(format_elapsed(59), "59s");
+        // ≥1min:拆 m/s
+        assert_eq!(format_elapsed(60), "1m0s");
+        assert_eq!(format_elapsed(75), "1m15s");
+        assert_eq!(format_elapsed(3599), "59m59s");
+        // ≥1h:拆 h/m,秒不再显示
+        assert_eq!(format_elapsed(3600), "1h0m");
+        assert_eq!(format_elapsed(3661), "1h1m");
+        assert_eq!(format_elapsed(7322), "2h2m");
     }
 
     #[test]

@@ -63,3 +63,9 @@
 - **坑**: 断言恢复请求的末条 user 消息时假设 `content == "继续"`（纯文本消息经 anthropic 适配器序列化为字符串），但 TUI 交互路径的用户输入走 `UserContent::Blocks` → content 是块数组，且末块带 `cache_control`（缓存断点附加在最后一条 user/system 消息上）。同一份请求体里两种形态并存，单一形态断言随机性失败。
 - **证据**: `test_tool_budget_pause.py` 首版失败：`{'content': [{'cache_control': {'type': 'ephemeral'}, 'text': '继续', 'type': 'text'}], 'role': 'user'} != '继续'`；同请求前一条 tool_result 消息恒为 blocks（`tool_result` 只能进块数组）。
 - **规避**: 断言消息文本先归一化——content 为字符串直接用，为数组则拼接各块的 `text`（工具内 `_msg_text` helper）；结构性断言（role、块类型）与文本断言分离。tool_result 消息可直接遍历 `block["type"] == "tool_result"`。
+
+## TEST-012: E2E 断言 pattern 不得与 UI chrome 文本（命令描述/help）撞车——弹窗先于 run 出现
+
+- **坑**: 新增 `/init` 的 E2E 用 `expect_text(r"新会话生效")` 等最终回复，而命令注册描述写成「…创建/更新项目根 AGENTS.md（新会话生效）」——`/init` 输入时补全弹窗就渲染了描述文本，`expect_text` 扫全量输出立即命中，断言在 run 尚未开始（mock 请求数为 0、文件未写盘）时通过，表现为“回复出现了但产物不存在”的假阳性，且加 `wait_for_requests` 前置会“修好”它（恰好等到了 run 结束），极具迷惑性。
+- **证据**: 失败现场 `NREQ: 0`；转录末尾只有弹窗帧与编辑器 `/init`，无任何 run 输出。
+- **规避**: E2E 断言文本必须只可能来自模型回复/工具结果：命令 `description`、`/help` 文案、footer 等固定 UI 文本不得包含断言 pattern（命令描述避免复用回复措辞）；产物类断言（文件落盘）用“请求体反向断言”兜底（`wait_for_requests` 确认轮次后断言请求内容与落盘结果一致）。

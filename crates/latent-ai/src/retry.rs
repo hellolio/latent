@@ -66,6 +66,13 @@ static RETRYABLE_PROVIDER_ERROR: LazyLock<Regex> = LazyLock::new(|| {
         "connection.?lost",
         "other side closed",
         "fetch failed",
+        "error.?sending.?request",
+        "tcp.?connect",
+        "dns.?error",
+        "failed.?to.?lookup.?address",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
         "getaddrinfo",
         "ENOTFOUND",
         "EAI_AGAIN",
@@ -76,6 +83,10 @@ static RETRYABLE_PROVIDER_ERROR: LazyLock<Regex> = LazyLock::new(|| {
         "timed? out",
         "timeout",
         "terminated",
+        "decoding response body",
+        "incomplete.?message",
+        "connection.?reset",
+        "stream.?interrupted",
         "websocket.?closed",
         "websocket.?error",
         "ended without",
@@ -586,6 +597,28 @@ mod tests {
         )));
         assert!(is_retryable_assistant_error(&error_message(
             "Connection refused"
+        )));
+        // reqwest body 读取失败(完整错误链含真实原因)
+        assert!(is_retryable_assistant_error(&error_message(
+            "error decoding response body: connection error: Connection reset by peer (os error 54) (stream interrupted, resend to continue)"
+        )));
+        // 错误链为空时靠基础文案兜底
+        assert!(is_retryable_assistant_error(&error_message(
+            "error decoding response body (stream interrupted, resend to continue)"
+        )));
+        // reqwest send 阶段建连失败:伞模式兜底 + 链上具体文案
+        assert!(is_retryable_assistant_error(&error_message(
+            "error sending request for url (https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions)"
+        )));
+        assert!(is_retryable_assistant_error(&error_message(
+            "error sending request for url (https://x): client error (Connect): tcp connect error: Connection refused (os error 61)"
+        )));
+        // DNS 解析失败(Rust/hyper 文案)
+        assert!(is_retryable_assistant_error(&error_message(
+            "error sending request for url (https://x): client error (Connect): dns error: failed to lookup address information: Name or service not known"
+        )));
+        assert!(is_retryable_assistant_error(&error_message(
+            "incomplete message"
         )));
         assert!(is_retryable_assistant_error(&error_message(
             "Anthropic stream ended before message_stop"
