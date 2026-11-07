@@ -244,6 +244,9 @@ cargo clippy --workspace --all-targets   # lint（要求零警告）
  - [ ] /compact命令可以设置压缩方式（auto，实时主动？上限触发被动压缩？）
  - [ ] 压缩启动时，没有在上下文中看到相关提示词，需要检查是否正常工作
  - [x] 增加/init命令
+ - [ ] 重新考虑默认工具，比如非bash工具，包括网络搜索，是否必要
+ - [ ] 并行开发，做多个git-workspace?
+ - [ ] 使用rust专用脚本语言roto构建插件
 
 架构设计、目录索引与开发规范见 [AGENTS.md](AGENTS.md)；E2E 测试说明见 [tests/e2e](tests/e2e)。
 
